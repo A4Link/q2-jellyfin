@@ -1,0 +1,18 @@
+q2-jellyfin
+Copyright (c) 2026 the q2-jellyfin authors
+
+This project is a fork of q2-subsonic (https://github.com/andsuor/q2-subsonic), MIT License,
+Copyright (c) 2026 the q2-subsonic authors. Everything outside internal/jellyfin comes from it,
+adapted. q2-subsonic was itself built from q2-filebrowser
+(https://github.com/group-a-study/q2-filebrowser).
+
+internal/tlsroots/cacert.pem is Mozilla's CA certificate bundle, under the Mozilla Public
+License 2.0.
+
+contrib/shanlingq2/icon.png and icon-40.png are drawn from the Jellyfin logo
+(icon-transparent.svg, https://github.com/jellyfin/jellyfin-ux), copyright the Jellyfin
+contributors, under the Creative Commons Attribution-ShareAlike 4.0 International License
+(https://creativecommons.org/licenses/by-sa/4.0/); the two PNGs are under the same licence.
+Changes: rasterised from the SVG, cropped to the logo and scaled to 52 and 40 px, by
+contrib/shanlingq2/icons.py. Jellyfin is a trademark of the Jellyfin project; this app
+is not affiliated with or endorsed by it.

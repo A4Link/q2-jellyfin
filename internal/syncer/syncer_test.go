@@ -1,0 +1,1756 @@
+package syncer
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+	"unicode/utf8"
+
+	"github.com/A4Link/q2-jellyfin/internal/applog"
+	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/library"
+	"github.com/A4Link/q2-jellyfin/internal/plan"
+	"github.com/A4Link/q2-jellyfin/internal/q2"
+	"github.com/A4Link/q2-jellyfin/internal/selection"
+)
+
+// fake is a Navidrome stand-in serving deterministic bytes per song id.
+type fake struct {
+	mu      sync.Mutex
+	status  map[string]int  // id -> forced HTTP status
+	drop    map[string]bool // id -> cut the next response at 50 %
+	noRange bool            // answer 200 with the whole file even when asked for a Range
+	block   map[string]chan struct{}
+	slow    map[string]bool     // id -> send in 32 KiB writes, 3 ms apart
+	ranges  map[string][]string // id -> Range headers seen
+	hits    map[string]int
+	sizes   []string // the size asked of getCoverArt
+}
+
+// seen returns the hits and Range headers for id.
+func (f *fake) seen(id string) (int, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hits[id], append([]string(nil), f.ranges[id]...)
+}
+
+func data(id string) []byte {
+	if strings.HasPrefix(id, "big") {
+		return bytes.Repeat([]byte("song-"+id+"|"), 300000)
+	}
+	return bytes.Repeat([]byte("song-"+id+"|"), 7000)
+}
+
+type slowWriter struct{ http.ResponseWriter }
+
+func (w slowWriter) Write(b []byte) (int, error) {
+	time.Sleep(3 * time.Millisecond)
+	n, err := w.ResponseWriter.Write(b)
+	w.ResponseWriter.(http.Flusher).Flush()
+	return n, err
+}
+
+// idOf is the item id in a Jellyfin media or image path: /Items/{id}/Download,
+// /Audio/{id}/universal, /Audio/{id}/stream, /Items/{id}/Images/Primary.
+func idOf(p string) string {
+	seg := strings.Split(strings.Trim(p, "/"), "/")
+	if len(seg) >= 2 {
+		return seg[1]
+	}
+	return ""
+}
+
+func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	id := idOf(r.URL.Path)
+	f.mu.Lock()
+	f.hits[id]++
+	f.ranges[id] = append(f.ranges[id], r.Header.Get("Range"))
+	st, drop, block, slow := f.status[id], f.drop[id], f.block[id], f.slow[id]
+	delete(f.drop, id)
+	noRange := f.noRange
+	f.mu.Unlock()
+	if strings.HasSuffix(r.URL.Path, "/Images/Primary") {
+		f.mu.Lock()
+		f.sizes = append(f.sizes, r.URL.Query().Get("maxWidth"))
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "image/jpeg")
+		if strings.HasPrefix(id, "big") {
+			w.Write(bytes.Repeat([]byte("j"), 16<<20+1))
+			return
+		}
+		w.Write([]byte("jpeg-" + id))
+		return
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if st != 0 {
+		w.WriteHeader(st)
+		return
+	}
+	b := data(id)
+	w.Header().Set("Content-Type", "audio/flac")
+	if drop {
+		w.Header().Set("Content-Length", fmt.Sprint(len(b)))
+		w.Write(b[:len(b)/2])
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
+	if noRange {
+		r.Header.Del("Range")
+	}
+	if slow {
+		w = slowWriter{w}
+	}
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(b))
+}
+
+func setup(t *testing.T) (*fake, *Runner, string) {
+	t.Helper()
+	f := &fake{status: map[string]int{}, drop: map[string]bool{}, block: map[string]chan struct{}{}, slow: map[string]bool{},
+		ranges: map[string][]string{}, hits: map[string]int{}}
+	srv := httptest.NewTLSServer(f)
+	t.Cleanup(srv.Close)
+	c, err := jellyfin.New(jellyfin.Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	r := New(root, c, nil)
+	r.Backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	r.CardMounted = func() bool { return true }
+	r.Net = NewNetSlot()
+	return f, r, root
+}
+
+func want(root, id, quality string) plan.Want {
+	s := jellyfin.Song{ID: id, Title: "T" + id, Album: "Alb", AlbumArtist: "Art", Year: 2000, Disc: 1, Track: len(id),
+		Suffix: "flac", CoverArt: "al-1"}
+	return plan.Want{Song: s, Quality: quality, Path: library.SongPath(root, s, quality, false), Items: []string{"album:al"},
+		Bytes: int64(len(data(id)))}
+}
+
+func wait(t *testing.T, r *Runner) Snapshot {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		if s := r.Snapshot(); s.State != "running" {
+			return s
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("still running")
+	return Snapshot{}
+}
+
+func manifest(t *testing.T, root string) *library.Manifest {
+	t.Helper()
+	b, err := os.ReadFile(root + "/.jellyfin/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &library.Manifest{}
+	if err := json.Unmarshal(b, m); err != nil {
+		t.Fatal("manifest not valid JSON:", err)
+	}
+	return m
+}
+
+func sameFile(t *testing.T, path, id string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(b, data(id)) {
+		t.Fatalf("%s: %v, %d bytes", path, err, len(b))
+	}
+}
+
+func noParts(t *testing.T, root string) {
+	t.Helper()
+	filepath.Walk(root, func(p string, _ os.FileInfo, _ error) error {
+		if strings.HasSuffix(p, ".part") || strings.HasSuffix(p, ".tmp") || strings.HasSuffix(p, ".key") {
+			t.Errorf("left over: %s", p)
+		}
+		return nil
+	})
+}
+
+func TestRunDownloadsAndRenames(t *testing.T) {
+	_, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "mp3-320")
+	a.Song.Size = 4242 // the server's size, kept to notice a re-rip (I7)
+	old, moved := root+"/Jellyfin/Old/x/01 - r.flac", root+"/Jellyfin/Art/2000 - Alb/09 - r.flac"
+	os.MkdirAll(filepath.Dir(old), 0o755)
+	os.WriteFile(old, []byte("r"), 0o644)
+	m := &library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: old, Quality: "original", Size: 1}}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	p := plan.Plan{Add: []plan.Want{a, b}, Rename: []plan.Move{{From: old, To: moved, ID: "r"}},
+		Playlists: map[string][]string{"Mix": {a.Path, moved, a.Path}}}
+	if err := r.Start(p); err != nil {
+		t.Fatal(err)
+	}
+	s := wait(t, r)
+	if s.State != "done" || s.Done != 2 || s.Total != 2 || s.Failed != 0 || s.Permille != 1000 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+	sameFile(t, b.Path, "bb")
+	if _, err := os.Stat(moved); err != nil {
+		t.Fatal("not renamed")
+	}
+	if _, err := os.Stat(root + "/Jellyfin/Old"); !os.IsNotExist(err) {
+		t.Fatal("old album folder left")
+	}
+	if c, err := os.ReadFile(filepath.Dir(a.Path) + "/cover.jpg"); err != nil || string(c) != "jpeg-al-1" {
+		t.Fatal("cover", err)
+	}
+	noParts(t, root)
+	mf := manifest(t, root)
+	for _, id := range []string{"a", "bb", "r"} {
+		if mf.Songs[id] == nil {
+			t.Fatal("manifest misses", id)
+		}
+	}
+	if mf.Songs["r"].Path != moved || mf.Songs["a"].Meta != library.MetaKey(a.Song, "original") ||
+		mf.Songs["bb"].Quality != "mp3-320" || mf.Songs["a"].Size != int64(len(data("a"))) || mf.Songs["a"].SrcSize != 4242 {
+		t.Fatalf("%+v %+v", mf.Songs["r"], mf.Songs["a"])
+	}
+	m3u, _ := os.ReadFile(library.PlaylistFile(root, "Mix"))
+	if string(m3u) != "#EXTM3U\n"+a.Path+"\n"+moved+"\n"+a.Path+"\n" {
+		t.Fatalf("%q", m3u)
+	}
+	if _, err := os.Stat(root + "/.jellyfin/pending.json"); !os.IsNotExist(err) {
+		t.Fatal("pending.json left after done")
+	}
+}
+
+func TestRunResumeAfterDrop(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "mp3-320")
+	f.drop["a"], f.drop["bb"] = true, true
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	half := len(data("a")) / 2
+	_, ra := f.seen("a")
+	_, rb := f.seen("bb")
+	if got := ra; len(got) != 2 || got[0] != "" || got[1] != fmt.Sprintf("bytes=%d-", half) {
+		t.Fatalf("ranges %q", got)
+	}
+	if got := rb; len(got) != 2 || got[1] != "" {
+		t.Fatalf("transcoded resumed with Range: %q", got)
+	}
+	sameFile(t, a.Path, "a")
+	sameFile(t, b.Path, "bb")
+	noParts(t, root)
+}
+
+func TestRunRangeIgnoredRestarts(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.drop["a"], f.noRange = true, true
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+}
+
+func TestRunFailureDoesNotStop(t *testing.T) {
+	f, r, root := setup(t)
+	a, x, c := want(root, "a", "original"), want(root, "x", "original"), want(root, "ccc", "original")
+	f.status["x"] = 404
+	r.Start(plan.Plan{Add: []plan.Want{a, x, c}})
+	s := wait(t, r)
+	if hx, _ := f.seen("x"); s.State != "done" || s.Failed != 1 || s.Done != 2 || hx != 3 {
+		t.Fatalf("%+v hits=%d", s, hx)
+	}
+	fl := s.Failures[0]
+	if len(s.Failures) != 1 || fl.HTTP != 404 || fl.SongID != "x" || fl.Op != "download" || fl.Title != "Tx" ||
+		fl.At.IsZero() || !strings.Contains(fl.Msg, "404") {
+		t.Fatalf("%+v", s.Failures)
+	}
+	sameFile(t, c.Path, "ccc")
+	if _, err := os.Stat(x.Path); !os.IsNotExist(err) {
+		t.Fatal("failed song left a file")
+	}
+
+	f.mu.Lock()
+	delete(f.status, "x")
+	f.mu.Unlock()
+	r.RetryFailed()
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 || s.Done != 3 {
+		t.Fatalf("retry %+v", s)
+	}
+	sameFile(t, x.Path, "x")
+	if ha, _ := f.seen("a"); ha != 1 {
+		t.Fatal("finished song fetched again")
+	}
+}
+
+func TestRunCardGone(t *testing.T) {
+	_, r, root := setup(t)
+	a, b, c := want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")
+	var mounted atomic.Bool
+	mounted.Store(true)
+	var checks atomic.Int32
+	r.CardMounted = func() bool {
+		if checks.Add(1) > 2 { // the card goes after the first song
+			mounted.Store(false)
+		}
+		return mounted.Load()
+	}
+	p := plan.Plan{Add: []plan.Want{a, b, c}}
+	r.Start(p)
+	s := wait(t, r)
+	if s.State != "paused" || !errors.Is(s.Err, q2.ErrNoCard) {
+		t.Fatalf("%+v", s)
+	}
+	// A yanked card loses the records not saved yet (M18); whatever the manifest names is whole.
+	m, _ := library.LoadManifest(root + "/.jellyfin/manifest.json")
+	for id, e := range m.Songs {
+		sameFile(t, e.Path, id)
+	}
+	if m.Songs["ccc"] != nil {
+		t.Fatal("manifest names a song never fetched")
+	}
+
+	r.CardMounted = func() bool { return true }
+	r.Resume()
+	if s := wait(t, r); s.State != "done" || s.Done != 3 || s.Err != nil {
+		t.Fatalf("%+v", s)
+	}
+	for _, w := range p.Add {
+		sameFile(t, w.Path, w.Song.ID)
+	}
+}
+
+func TestDeletesAfterDownloads(t *testing.T) {
+	_, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+	os.MkdirAll(filepath.Dir(z.Path), 0o755)
+	os.WriteFile(z.Path, []byte("z"), 0o644)
+	os.WriteFile(filepath.Dir(z.Path)+"/cover.jpg", []byte("c"), 0o644)
+	stale := library.PlaylistFile(root, "Gone")
+	os.MkdirAll(filepath.Dir(stale), 0o755)
+	os.WriteFile(stale, []byte("#EXTM3U\n"), 0o644)
+	m := &library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}
+	m.Save(root, root+"/.jellyfin/manifest.json")
+	var mu sync.Mutex
+	var ops []string
+	r.onOp = func(op, path string) {
+		mu.Lock()
+		if op == "download" || op == "remove" {
+			ops = append(ops, op)
+		}
+		mu.Unlock()
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a, b}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if strings.Join(ops, ",") != "download,download,remove" {
+		t.Fatal(ops)
+	}
+	if _, err := os.Stat(root + "/Jellyfin/Z"); !os.IsNotExist(err) {
+		t.Fatal("removed song's folder left")
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("stale playlist left")
+	}
+	if manifest(t, root).Songs["z"] != nil {
+		t.Fatal("removed song still in manifest")
+	}
+}
+
+func TestProgressPermilleAndETA(t *testing.T) {
+	if p := permille(500, 1000); p != 500 {
+		t.Fatal(p)
+	}
+	if p := permille(2000, 1000); p != 1000 {
+		t.Fatal(p)
+	}
+	t0 := time.Unix(1000, 0)
+	var m meter
+	m.add(t0, 0)
+	for i := 1; i <= 9; i++ { // 100 kB/s for 9 s
+		m.add(t0.Add(time.Duration(i)*time.Second), 100_000)
+	}
+	if e := m.eta(t0.Add(9*time.Second), 1_000_000); e != 0 {
+		t.Fatal("ETA before 10 s of data:", e)
+	}
+	for i := 10; i <= 60; i++ {
+		m.add(t0.Add(time.Duration(i)*time.Second), 100_000)
+	}
+	if e := m.eta(t0.Add(60*time.Second), 1_000_000); e < 9*time.Second || e > 11*time.Second {
+		t.Fatal("ETA", e)
+	}
+
+	_, r, _ := setup(t)
+	clock := t0
+	r.Now = func() time.Time { return clock }
+	r.mu.Lock()
+	r.state, r.bytesTotal, r.bytesDone = "running", 1000, 500
+	r.mu.Unlock()
+	if s := r.Snapshot(); s.Permille != 500 || s.ETA != 0 || s.BytesDone != 500 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestCancelKeepsFinished(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	f.block["bb"] = make(chan struct{})
+	p := plan.Plan{Add: []plan.Want{a, b}}
+	r.Start(p)
+	for i := 0; ; i++ {
+		if h, _ := f.seen("bb"); h > 0 {
+			break
+		}
+		if i > 1000 {
+			t.Fatal("bb never requested")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !r.Busy() || r.Start(p) != ErrBusy {
+		t.Fatal("not busy")
+	}
+	r.Cancel()
+	if s := r.Snapshot(); s.State != "idle" || r.Busy() {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+	m := manifest(t, root)
+	if m.Songs["a"] == nil || m.Songs["bb"] != nil {
+		t.Fatalf("%+v", m.Songs)
+	}
+	noParts(t, root)
+	if _, err := os.Stat(root + "/.jellyfin/pending.json"); !os.IsNotExist(err) {
+		t.Fatal("pending.json kept after cancel")
+	}
+}
+
+func TestNetSlotPriority(t *testing.T) {
+	s := NewNetSlot()
+	ctx := context.Background()
+	s.Acquire(ctx, false)
+	got := make(chan string, 2)
+	go func() { s.Acquire(ctx, false); got <- "normal"; s.Release() }()
+	time.Sleep(20 * time.Millisecond)
+	go func() { s.Acquire(ctx, true); got <- "prio"; s.Release() }()
+	time.Sleep(20 * time.Millisecond)
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if s.Acquire(cctx, false) == nil {
+		t.Fatal("acquired with a cancelled context while held")
+	}
+	s.Release()
+	if a, b := <-got, <-got; a != "prio" || b != "normal" {
+		t.Fatal(a, b)
+	}
+	if err := s.Acquire(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunFullSizePartRecovers(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	b.Bytes = 0 // size unknown: the full .part asks for a Range past the end and gets 416
+	for _, w := range []plan.Want{a, b} {
+		os.MkdirAll(filepath.Dir(w.Path), 0o755)
+		os.WriteFile(w.Path+".part", bytes.Repeat([]byte("x"), len(data(w.Song.ID))), 0o644)
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+	sameFile(t, b.Path, "bb")
+	if _, ra := f.seen("a"); len(ra) != 1 || ra[0] != "" {
+		t.Fatalf("full .part at planned size sent Range: %q", ra)
+	}
+	if _, rb := f.seen("bb"); len(rb) != 2 || rb[0] != fmt.Sprintf("bytes=%d-", len(data("bb"))) || rb[1] != "" {
+		t.Fatalf("416 not recovered in one try: %q", rb)
+	}
+	noParts(t, root)
+}
+
+func TestStreamerPreemptsMidFile(t *testing.T) {
+	f, r, root := setup(t)
+	big := want(root, "big", "original")
+	f.slow["big"] = true
+	r.Start(plan.Plan{Add: []plan.Want{big}})
+	for i := 0; r.Snapshot().BytesDone == 0; i++ {
+		if i > 1000 {
+			t.Fatal("download never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.Net.Acquire(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	s := r.Snapshot()
+	if s.State != "running" || s.BytesDone >= s.BytesTotal {
+		t.Fatalf("streamer served only after the file: %+v", s)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if b := r.Snapshot().BytesDone; b != s.BytesDone {
+		t.Fatal("download kept going while the streamer held the slot", b, s.BytesDone)
+	}
+	r.Net.Release()
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, big.Path, "big")
+	if _, rg := f.seen("big"); len(rg) != 1 {
+		t.Fatalf("download restarted: %q", rg)
+	}
+}
+
+func TestRestartResumes(t *testing.T) {
+	f, ra, root := setup(t)
+	a, big := want(root, "a", "original"), want(root, "big", "original")
+	f.slow["big"] = true
+	p := plan.Plan{Add: []plan.Want{a, big}}
+	ra.Start(p)
+	for i := 0; ; i++ {
+		if s := ra.Snapshot(); s.Done == 1 && s.BytesDone > a.Bytes {
+			break
+		}
+		if i > 2000 {
+			t.Fatal("big never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ra.Pause() // the process dies mid-file: the .part and pending.json stay
+	st, err := os.Stat(big.Path + ".part")
+	if err != nil || st.Size() == 0 {
+		t.Fatal("no .part", err)
+	}
+
+	rb := New(root, ra.src, nil)
+	rb.Backoff, rb.CardMounted, rb.Net = ra.Backoff, ra.CardMounted, NewNetSlot()
+	if err := rb.Start(p); err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, rb); s.State != "done" || s.Done != 2 {
+		t.Fatalf("%+v", s)
+	}
+	if h, _ := f.seen("a"); h != 1 {
+		t.Fatal("finished song fetched again", h)
+	}
+	if _, rg := f.seen("big"); len(rg) != 2 || rg[1] != fmt.Sprintf("bytes=%d-", st.Size()) {
+		t.Fatalf("ranges %q, part %d", rg, st.Size())
+	}
+	sameFile(t, big.Path, "big")
+}
+
+// A paused song's .part goes when the next plan no longer fetches it (taken out of Sync), as does
+// one an earlier run left (a restart, a cut song) (audit 2026-11-10 #7).
+func TestStartDropsUnwantedPart(t *testing.T) {
+	f, r, root := setup(t)
+	a, big := want(root, "a", "original"), want(root, "big", "original")
+	f.slow["big"] = true
+	r.Start(plan.Plan{Add: []plan.Want{a, big}})
+	for i := 0; ; i++ {
+		if s := r.Snapshot(); s.Done == 1 && s.BytesDone > a.Bytes {
+			break
+		}
+		if i > 2000 {
+			t.Fatal("big never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.Pause()
+	if _, err := os.Stat(big.Path + ".part"); err != nil {
+		t.Fatal("no .part", err)
+	}
+	stray := root + "/Jellyfin/Old/Album/Song.flac.part" // left by an earlier run, before a restart
+	put(t, stray, "x")
+	put(t, stray+".key", "original 9")
+	if err := r.Start(plan.Plan{}); err != nil { // big taken out of Sync
+		t.Fatal(err)
+	}
+	wait(t, r)
+	for _, p := range []string{stray, stray + ".key"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s kept: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(big.Path + ".part"); !os.IsNotExist(err) {
+		t.Fatalf(".part kept: %v", err)
+	}
+	if _, err := os.Stat(big.Path + ".part.key"); !os.IsNotExist(err) {
+		t.Fatalf(".part.key kept: %v", err)
+	}
+}
+
+func TestLogRedacted(t *testing.T) {
+	_, r, root := setup(t)
+	r.log = applog.Open(root+"/log.txt", 1<<20)
+	r.logf("sync: %v", errors.New("GET https://h/rest/download?u=u&t=tok123&s=salt99&p=pw77 -> EOF"))
+	b, _ := os.ReadFile(root + "/log.txt")
+	if len(b) == 0 || strings.Contains(string(b), "tok123") || strings.Contains(string(b), "salt99") ||
+		strings.Contains(string(b), "pw77") {
+		t.Fatalf("%q", b)
+	}
+}
+
+// syncPlaylists runs a sync of the given playlists (name -> no songs) over a card prepared by prep.
+func syncPlaylists(t *testing.T, prep func(root string), names ...string) (string, *library.Manifest) {
+	t.Helper()
+	_, r, root := setup(t)
+	if prep != nil {
+		prep(root)
+	}
+	pl := map[string][]string{}
+	for _, n := range names {
+		pl[n] = nil
+	}
+	r.Start(plan.Plan{Playlists: pl})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	return root, manifest(t, root)
+}
+
+func put(t *testing.T, p, body string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUserPlaylistNotOverwritten(t *testing.T) {
+	var user string
+	root, m := syncPlaylists(t, func(root string) {
+		user = library.PlaylistFile(root, "Andreas")
+		put(t, user, "mine")
+	}, "Andreas")
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+	want := root + "/_explaylist_data/Andreas (Jellyfin).m3u"
+	if _, err := os.Stat(want); err != nil || m.Playlists["Andreas"] != want {
+		t.Fatal(err, m.Playlists)
+	}
+}
+
+func TestRecordedPlaylistRewrittenAndStaleOnlyRecorded(t *testing.T) {
+	var other, gone string
+	root, m := syncPlaylists(t, func(root string) {
+		gone = library.PlaylistFile(root, "Gone")
+		other = library.PlaylistFile(root, "Other")
+		put(t, gone, "x")
+		put(t, other, "user")
+		put(t, library.PlaylistFile(root, "Keep"), "old")
+		mm := &library.Manifest{Playlists: map[string]string{"Gone": gone, "Keep": library.PlaylistFile(root, "Keep")}}
+		mm.Save(root, root+"/.jellyfin/manifest.json")
+	}, "Keep")
+	if b, _ := os.ReadFile(other); string(b) != "user" {
+		t.Fatal("unrecorded Other.m3u touched")
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatal("recorded stale file left")
+	}
+	if b, _ := os.ReadFile(library.PlaylistFile(root, "Keep")); string(b) != "#EXTM3U\n" {
+		t.Fatalf("Keep not rewritten in place: %q", b)
+	}
+	if len(m.Playlists) != 1 || m.Playlists["Keep"] != library.PlaylistFile(root, "Keep") {
+		t.Fatal(m.Playlists)
+	}
+}
+
+// q2-subsonic's older playlist files ("Navidrome - <name>.m3u") belong to that app, never to this
+// one: a sync, stale flag or not, leaves them alone (q2-subsonic removed them during its own
+// migration; this app has none).
+func TestOtherAppsPlaylistsUntouched(t *testing.T) {
+	var theirs string
+	root, m := syncPlaylists(t, func(root string) {
+		theirs = filepath.Join(root, "_explaylist_data", "Navidrome - Mix.m3u")
+		put(t, theirs, "#EXTM3U\n")
+		(&library.Manifest{PlaylistsStale: true}).Save(root, root+"/.jellyfin/manifest.json")
+	}, "Mix")
+	if _, err := os.Stat(theirs); err != nil {
+		t.Fatal("another app's playlist was removed:", err)
+	}
+	if library.Owned(root, theirs, m) {
+		t.Fatal("another app's playlist counted as this app's")
+	}
+	if _, err := os.Stat(library.PlaylistFile(root, "Mix")); err != nil || m.Playlists["Mix"] != library.PlaylistFile(root, "Mix") {
+		t.Fatal(err, m.Playlists)
+	}
+}
+
+func TestPlaylistWriteFailureKeepsRecords(t *testing.T) {
+	_, r, root := setup(t)
+	bad := library.PlaylistFile(root, "B")
+	os.MkdirAll(bad, 0o755) // a directory where B.m3u must go: the write fails
+	(&library.Manifest{Playlists: map[string]string{"B": bad}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "error" {
+		t.Fatalf("%+v", s)
+	}
+	if got := manifest(t, root).Playlists["A"]; got != library.PlaylistFile(root, "A") {
+		t.Fatalf("A not recorded: %v", manifest(t, root).Playlists)
+	}
+	os.Remove(bad)
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if m, _ := filepath.Glob(root + "/_explaylist_data/*(Jellyfin*"); len(m) != 0 {
+		t.Fatal("duplicates:", m)
+	}
+}
+
+func TestBadRecordedPlaylistIgnored(t *testing.T) {
+	root, m := syncPlaylists(t, func(root string) {
+		(&library.Manifest{Playlists: map[string]string{"X": "/etc/passwd", "Y": root + "/Jellyfin/y.m3u"}}).Save(root, root+"/.jellyfin/manifest.json")
+	}, "X")
+	if m.Playlists["X"] != library.PlaylistFile(root, "X") || len(m.Playlists) != 1 {
+		t.Fatal(m.Playlists)
+	}
+}
+
+// Song writes go under Jellyfin/ only: .jellyfin/ holds the app binary and its run script.
+func TestSongWritesOnlyUnderSubsonic(t *testing.T) {
+	_, r, root := setup(t)
+	bin := root + "/.jellyfin/q2-jellyfin"
+	put(t, bin, "app")
+	w := want(root, "a", "original")
+	w.Path = bin
+	src := root + "/Jellyfin/A/B/1.mp3"
+	put(t, src, "x")
+	r.Start(plan.Plan{Add: []plan.Want{w}, Rename: []plan.Move{{From: src, To: root + "/.jellyfin/run", ID: "r"}}})
+	wait(t, r)
+	if b, _ := os.ReadFile(bin); string(b) != "app" {
+		t.Fatalf("binary overwritten: %d bytes", len(b))
+	}
+	for _, p := range []string{bin + ".part", root + "/.jellyfin/run"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatal("written:", p)
+		}
+	}
+}
+
+// A "Navidrome - X.m3u" is never this app's: it is left alone.
+func TestUserNavidromePrefixKept(t *testing.T) {
+	var mine, sel string
+	syncPlaylists(t, func(root string) {
+		mine = filepath.Join(root, "_explaylist_data", "Navidrome - X.m3u")
+		sel = filepath.Join(root, "_explaylist_data", "Navidrome - Mix.m3u")
+		put(t, mine, "#EXTM3U\n")
+		put(t, sel, "#EXTM3U\n")
+	}, "Mix")
+	for _, f := range []string{mine, sel} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatal("user playlist deleted:", f)
+		}
+	}
+}
+
+// A playlist file recorded under an older SafeName with ".." in it, which the firmware refuses (and
+// with it the whole library update), is replaced by one with a clean name (I18).
+func TestDottedPlaylistFileReplaced(t *testing.T) {
+	var old string
+	root, m := syncPlaylists(t, func(root string) {
+		old = root + "/_explaylist_data/Wait... What.m3u"
+		put(t, old, "#EXTM3U\n")
+		(&library.Manifest{Playlists: map[string]string{"Wait... What": old}}).Save(root, root+"/.jellyfin/manifest.json")
+	}, "Wait... What")
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("old file left")
+	}
+	want := root + "/_explaylist_data/Wait… What.m3u"
+	if _, err := os.Stat(want); err != nil || m.Playlists["Wait... What"] != want {
+		t.Fatal(err, m.Playlists)
+	}
+}
+
+// stem is a playlist file's name without .m3u, which the Q2 keeps 63 bytes of (issue #1).
+func stem(t *testing.T, f string) string {
+	t.Helper()
+	s := strings.TrimSuffix(filepath.Base(f), ".m3u")
+	if len(s) > 63 || !utf8.ValidString(s) {
+		t.Errorf("%q: %d bytes", s, len(s))
+	}
+	return s
+}
+
+// The " (Jellyfin)" a clash adds fits in the 63 bytes too.
+func TestLongPlaylistSuffixFits(t *testing.T) {
+	long := strings.Repeat("曲", 30)
+	var user string
+	root, m := syncPlaylists(t, func(root string) {
+		user = library.PlaylistFile(root, long)
+		put(t, user, "mine")
+	}, long)
+	f := m.Playlists[long]
+	if s := stem(t, f); !strings.HasSuffix(s, " (Jellyfin)") || f == user || filepath.Dir(f) != root+"/_explaylist_data" {
+		t.Fatal(f)
+	}
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+}
+
+// Two long names that cut to the same 63 bytes get two files.
+func TestLongPlaylistNamesCutAlike(t *testing.T) {
+	a, b := strings.Repeat("Песня", 10)+" A", strings.Repeat("Песня", 10)+" B"
+	_, m := syncPlaylists(t, nil, a, b)
+	fa, fb := m.Playlists[a], m.Playlists[b]
+	stem(t, fa)
+	stem(t, fb)
+	if strings.EqualFold(fa, fb) {
+		t.Fatal(fa, fb)
+	}
+	for _, f := range []string{fa, fb} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A playlist an older build recorded under a name longer than the Q2 keeps is moved to one that
+// fits, and goes out as "add" again: the old build's Imported never proved the Q2 playlist of the
+// cut name is the app's, and "import" would replace it (R35). A user's file is never touched.
+func TestLongPlaylistFileMigrated(t *testing.T) {
+	cjk, cyr := strings.Repeat("曲", 30), strings.Repeat("Песня", 10)
+	var oldCJK, oldCyr, user string
+	root, m := syncPlaylists(t, func(root string) {
+		dir := root + "/_explaylist_data/"
+		oldCJK, oldCyr, user = dir+cjk+".m3u", dir+cyr+".m3u", dir+strings.Repeat("曲", 25)+".m3u"
+		for _, f := range []string{oldCJK, oldCyr, user} {
+			put(t, f, "#EXTM3U\n")
+		}
+		(&library.Manifest{Playlists: map[string]string{cjk: oldCJK, cyr: oldCyr},
+			Imported: map[string]bool{oldCJK: true, oldCyr: true}}).Save(root, root+"/.jellyfin/manifest.json")
+	}, cjk, cyr)
+	for _, f := range []string{oldCJK, oldCyr} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Error("old file left:", f)
+		}
+	}
+	if _, err := os.Stat(user); err != nil {
+		t.Error("user file removed")
+	}
+	newCJK, newCyr := library.PlaylistFile(root, cjk), library.PlaylistFile(root, cyr)
+	if m.Playlists[cjk] != newCJK || m.Playlists[cyr] != newCyr {
+		t.Fatal(m.Playlists)
+	}
+	stem(t, newCJK)
+	stem(t, newCyr)
+	if m.Imported[newCJK] || m.Imported[newCyr] {
+		t.Fatalf("imported %v", m.Imported)
+	}
+}
+
+// A user's file already at the name that fits: the moved playlist takes "<name> (Jellyfin).m3u".
+func TestLongPlaylistMigratedBesideUserFile(t *testing.T) {
+	long := strings.Repeat("曲", 30)
+	var old, user string
+	root, m := syncPlaylists(t, func(root string) {
+		old, user = root+"/_explaylist_data/"+long+".m3u", library.PlaylistFile(root, long)
+		put(t, old, "#EXTM3U\n")
+		put(t, user, "mine")
+		(&library.Manifest{Playlists: map[string]string{long: old}, Imported: map[string]bool{old: true}}).Save(root, root+"/.jellyfin/manifest.json")
+	}, long)
+	if f := m.Playlists[long]; f != library.PlaylistFileN(root, long, 1) || m.Imported[f] {
+		t.Fatal(f, m.Imported)
+	}
+	stem(t, m.Playlists[long])
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("old file left")
+	}
+}
+
+// A stale playlist file the sync can't remove is logged; it stays recorded for the next sync.
+func TestStalePlaylistRemoveFailureLogged(t *testing.T) {
+	_, r, root := setup(t)
+	r.log = applog.Open(root+"/log.txt", 1<<20)
+	long := root + "/_explaylist_data/" + strings.Repeat("曲", 30) + ".m3u"
+	put(t, long+"/x", "") // a folder with something in it: os.Remove fails
+	(&library.Manifest{Playlists: map[string]string{"L": long}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Playlists: map[string][]string{}})
+	wait(t, r)
+	if b, _ := os.ReadFile(root + "/log.txt"); !strings.Contains(string(b), long) {
+		t.Fatalf("%q", b)
+	}
+	if manifest(t, root).Playlists["L"] != long {
+		t.Fatal("not kept")
+	}
+}
+
+// casefold runs the calling test again in a user namespace with a case-insensitive tmpfs folder as
+// the card (FAT/exFAT are case-insensitive; CI's filesystems are not), and returns that folder in
+// the run inside. The outer run returns "" once the inner one passed. It skips where user
+// namespaces or casefold tmpfs (Linux 6.13+) aren't available.
+func casefold(t *testing.T) string {
+	t.Helper()
+	if d := os.Getenv("Q2_CASEFOLD"); d != "" {
+		return d
+	}
+	dir := t.TempDir()
+	setup := `mount -t tmpfs -o casefold none "$1" && mkdir "$1/card" && chattr +F "$1/card"`
+	if out, err := exec.Command("unshare", "-rm", "sh", "-c", setup, "sh", dir).CombinedOutput(); err != nil {
+		t.Skipf("no casefold tmpfs here: %v %s", err, out)
+	}
+	run := setup + ` && Q2_CASEFOLD="$1/card" exec "$2" -test.run "^$3\$" -test.v`
+	out, err := exec.Command("unshare", "-rm", "sh", "-c", run, "sh", dir, os.Args[0], t.Name()).CombinedOutput()
+	if err != nil || !bytes.Contains(out, []byte("--- PASS: "+t.Name())) {
+		t.Fatalf("on a case-insensitive card: %v\n%s", err, out)
+	}
+	return ""
+}
+
+// On a case-insensitive card, a case-only path change (a) renames, (b) replaces without deleting
+// the new file, and (c) a new song on a removed song's case variant isn't deleted with it (I5).
+func TestCaseInsensitiveCard(t *testing.T) {
+	root := casefold(t)
+	if root == "" {
+		return
+	}
+	_, r0, _ := setup(t)
+	r := New(root, r0.src, nil)
+	r.Backoff, r.CardMounted, r.Net = r0.Backoff, r0.CardMounted, NewNetSlot()
+	mk := func(id, artist, q string) jellyfin.Song {
+		return jellyfin.Song{ID: id, Title: "T" + id, Album: "Alb", AlbumArtist: artist, Year: 2000, Track: 1, Suffix: "flac", Size: int64(len(data(id)))}
+	}
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	old := map[string]jellyfin.Song{"a": mk("a", "Abba", ""), "b": mk("b", "Bee", ""), "c": mk("c", "Cee", "")}
+	old["c"] = jellyfin.Song{ID: "c", Title: "Td", Album: "Alb", AlbumArtist: "Cee", Year: 2000, Track: 1, Suffix: "flac"}
+	quality := map[string]string{"a": "original", "b": "mp3-128", "c": "original"}
+	for id, s := range old {
+		p := library.SongPath(root, s, quality[id], false)
+		put(t, p, "old-"+id)
+		m.Songs[id] = &library.Entry{ID: id, Path: p, Quality: quality[id], Size: 5, Items: []string{"song:" + id}, Meta: library.MetaKey(s, quality[id])}
+	}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	a, b, d := mk("a", "ABBA", ""), mk("b", "BEE", ""), mk("d", "CEE", "")
+	sel := selection.Set{Items: []selection.Item{{Kind: "song", ID: "a"}, {Kind: "song", ID: "b"}, {Kind: "song", ID: "d"}}}
+	p := plan.Compute(sel, "original", map[string][]jellyfin.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root, 1<<40)
+	if err := r.Start(p); err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	mf := manifest(t, root)
+	for id, want := range map[string]string{"a": "old-a", "b": string(data("b")), "d": string(data("d"))} {
+		e := mf.Songs[id]
+		if e == nil {
+			t.Fatalf("%s not in the manifest", id)
+		}
+		if got, err := os.ReadFile(e.Path); err != nil || string(got) != want {
+			t.Errorf("%s at %s: %v, %d bytes", id, e.Path, err, len(got))
+		}
+	}
+	if mf.Songs["c"] != nil {
+		t.Error("c kept")
+	}
+}
+
+// A rename cut after the file moved but before the manifest was saved is finished, not failed
+// on every later sync (M13).
+func TestRenameRecoversAfterCrash(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Jellyfin/A/x/01 - r.flac", root+"/Jellyfin/A/y/01 - r.flac"
+	put(t, to, "r") // moved already; the manifest still says from
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if e := manifest(t, root).Songs["r"]; e == nil || e.Path != to {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// A crash after a batch's targets were saved and some of its files moved: the next run records
+// each song where its file is, the moved ones at their new paths, and plans none of them again.
+func TestRenameCutAfterTargetsSaved(t *testing.T) {
+	f, r, root := setup(t)
+	from := func(id string) string { return root + "/Jellyfin/A/x/" + id + ".flac" }
+	to := func(id string) string { return root + "/Jellyfin/A/y/" + id + ".flac" }
+	put(t, to("m"), "m") // moved
+	put(t, from("n"), "n")
+	(&library.Manifest{Songs: map[string]*library.Entry{
+		"m": {ID: "m", Path: from("m"), Moving: to("m"), Quality: "original", Size: 1},
+		"n": {ID: "n", Path: from("n"), Moving: to("n"), Quality: "original", Size: 1},
+	}}).Save(root, root+"/.jellyfin/manifest.json")
+	if err := r.DropMissing(); err != nil {
+		t.Fatal(err)
+	}
+	if m := manifest(t, root); m.Songs["m"] == nil || m.Songs["n"] == nil {
+		t.Fatalf("dropped, to be downloaded again: %+v", m.Songs)
+	}
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from("m"), To: to("m"), ID: "m"}, {From: from("n"), To: to("n"), ID: "n"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	for id, e := range manifest(t, root).Songs {
+		if b, err := os.ReadFile(to(id)); e.Path != to(id) || e.Moving != "" || err != nil || string(b) != id {
+			t.Errorf("%s: %+v %q %v", id, e, b, err)
+		}
+	}
+	for _, id := range []string{"m", "n"} {
+		if n, _ := f.seen(id); n != 0 {
+			t.Errorf("%s downloaded", id)
+		}
+	}
+}
+
+// A song deselected after a cut rename moved its file leaves the card with its file, wherever the
+// file is: no orphan stays behind.
+func TestRemoveAfterCutRename(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Jellyfin/A/x/01 - r.flac", root+"/Jellyfin/A/y/01 - r.flac"
+	put(t, to, "r")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Moving: to, Quality: "original", Size: 1}}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Remove: []*library.Entry{{ID: "r", Path: from}}})
+	if s := wait(t, r); s.State != "done" || s.Removed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Lstat(to); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the moved file stayed: %v", err)
+	}
+	if m := manifest(t, root); len(m.Songs) != 0 {
+		t.Errorf("%+v", m.Songs)
+	}
+}
+
+// A playlist names where its song is: after a rename that failed, the song's old path, never the
+// planned one (which may hold nothing, or another song) (I6).
+func TestPlaylistNamesWhereTheSongIs(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Jellyfin/A/x/01 - r.flac", root+"/Jellyfin/A/y/01 - r.flac"
+	put(t, from, "r")
+	put(t, root+"/Jellyfin/A/y", "a file where the folder must go: the rename fails")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}, Playlists: map[string][]string{"Mix": {to}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	if b, _ := os.ReadFile(library.PlaylistFile(root, "Mix")); string(b) != "#EXTM3U\n"+from+"\n" {
+		t.Fatalf("%q", b)
+	}
+}
+
+// Nothing is removed while a wanted song failed: the card never ends with less than before (I2).
+func TestRemovesWaitForFailedDownloads(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.status["a"] = 404
+	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+	put(t, z.Path, "z")
+	stale := library.PlaylistFile(root, "Gone")
+	put(t, stale, "#EXTM3U\n")
+	(&library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Add: []plan.Want{a}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	for _, p := range []string{z.Path, stale} {
+		if _, err := os.Stat(p); err != nil {
+			t.Error("removed after a failed download:", p)
+		}
+	}
+	if m := manifest(t, root); m.Songs["z"] == nil || m.Playlists["Gone"] != stale {
+		t.Errorf("%+v %+v", m.Songs, m.Playlists)
+	}
+}
+
+// Losing the server (no Wi-Fi, server down) pauses the sync after two songs in a row, with the
+// reason, instead of failing every remaining song for hours (I3).
+func TestOfflinePauses(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	c, err := jellyfin.New(jellyfin.Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	root := t.TempDir()
+	r := New(root, c, nil)
+	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	var tries atomic.Int32
+	r.onOp = func(op, _ string) {
+		if op == "try" {
+			tries.Add(1)
+		}
+	}
+	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+	put(t, z.Path, "z")
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original"),
+		want(root, "dddd", "original")}, Remove: []*library.Entry{z}})
+	s := wait(t, r)
+	if s.State != "paused" || !errors.Is(s.Err, ErrOffline) || !errors.Is(s.Err, jellyfin.ErrUnreachable) {
+		t.Fatalf("%+v", s)
+	}
+	if n := tries.Load(); n != 4 {
+		t.Errorf("%d tries, want 2 songs × 2", n)
+	}
+	if _, err := os.Stat(z.Path); err != nil {
+		t.Error("removed while offline")
+	}
+}
+
+func TestStopReason(t *testing.T) {
+	full := &os.PathError{Op: "write", Path: "/mnt/mmc/x.part", Err: syscall.ENOSPC}
+	if err := StopReason(full); !errors.Is(err, ErrCardFull) {
+		t.Error("ENOSPC:", err)
+	}
+	if err := StopReason(&net.OpError{Op: "read", Err: syscall.ECONNRESET}); !errors.Is(err, ErrOffline) {
+		t.Error("reset:", err)
+	}
+	if err := StopReason(&jellyfin.APIError{Op: "get", HTTP: 404}); err != nil {
+		t.Error("404 is the song's own:", err)
+	}
+	for _, code := range []int{40, 41, 44, 50} { // the account, not the song (R39)
+		if err := StopReason(&jellyfin.APIError{Op: "get", HTTP: 200, Code: code}); !errors.Is(err, ErrRefused) || errors.Is(err, ErrOffline) {
+			t.Error(code, err)
+		}
+	}
+	if err := StopReason(&jellyfin.APIError{Op: "get", HTTP: 200, Code: 70}); err != nil {
+		t.Error("70 (not found) is the song's own:", err)
+	}
+}
+
+// Removals are dropped from the manifest before their files go, so a stop (Pause, Cancel, the card
+// going, power) never leaves a song recorded as on the card that isn't (I4).
+func TestInterruptedRemovalsRecorded(t *testing.T) {
+	_, r, root := setup(t)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	var rm []*library.Entry
+	for _, id := range []string{"x", "y", "z"} {
+		e := &library.Entry{ID: id, Path: root + "/Jellyfin/Z/z/" + id + ".flac", Quality: "original"}
+		put(t, e.Path, id)
+		m.Songs[id], rm = e, append(rm, e)
+	}
+	m.Save(root, root+"/.jellyfin/manifest.json")
+	r.onOp = func(op, _ string) {
+		if op == "remove" {
+			r.mu.Lock()
+			r.stopAs = "paused"
+			r.cancel() // Pause, from inside the run
+			r.mu.Unlock()
+		}
+	}
+	r.Start(plan.Plan{Remove: rm, Playlists: map[string][]string{}})
+	wait(t, r)
+	for id, e := range manifest(t, root).Songs {
+		if _, err := os.Stat(e.Path); err != nil {
+			t.Errorf("%s recorded, file gone: %v", id, err)
+		}
+	}
+}
+
+// The playlist phase stops at once when the card goes (USB storage gives the app 3 s) and never
+// writes the manifest onto the Q2's own storage once the card is gone (M15).
+func TestCardGoneDuringPlaylists(t *testing.T) {
+	_, r, root := setup(t)
+	var gone atomic.Bool
+	r.CardMounted = func() bool { return !gone.Load() }
+	r.onOp = func(op, _ string) {
+		if op == "playlist" && !gone.Load() {
+			gone.Store(true)
+			os.RemoveAll(root + "/.jellyfin") // unmounted: the card's folders are no longer there
+		}
+	}
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "paused" {
+		t.Fatalf("%+v", s)
+	}
+	if got, _ := filepath.Glob(root + "/_explaylist_data/*.m3u"); len(got) != 1 {
+		t.Errorf("written after the card went: %q", got)
+	}
+	if _, err := os.Stat(root + "/.jellyfin"); !os.IsNotExist(err) {
+		t.Error(".jellyfin written after the card went")
+	}
+}
+
+// The manifest is saved in batches, not after every song (M18): a crash re-fetches at most a batch.
+func TestManifestSavedInBatches(t *testing.T) {
+	_, r, root := setup(t)
+	var ws []plan.Want
+	for i := 0; i < 30; i++ {
+		ws = append(ws, want(root, fmt.Sprint("s", i), "mp3-320"))
+	}
+	saves := 0
+	r.onOp = func(op, _ string) {
+		if op == "save" {
+			saves++
+		}
+	}
+	r.Start(plan.Plan{Add: ws})
+	if s := wait(t, r); s.State != "done" || s.Done != 30 {
+		t.Fatalf("%+v", s)
+	}
+	if saves > 5 {
+		t.Errorf("%d manifest saves for 30 songs", saves)
+	}
+	if m := manifest(t, root); len(m.Songs) != 30 {
+		t.Errorf("%d songs recorded", len(m.Songs))
+	}
+}
+
+// Renames are saved in batches too, not after every song (audit #14): once before a batch moves
+// (its targets) and once after. The card going part-way leaves a manifest the next run finishes
+// from, the renames done but not saved included (M13).
+func TestRenamesSavedInBatches(t *testing.T) {
+	_, r, root := setup(t)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	var mvs []plan.Move
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprint("r", i)
+		from, to := fmt.Sprintf("%s/Jellyfin/A/x/%02d - r.flac", root, i), fmt.Sprintf("%s/Jellyfin/A/y/%02d - r.flac", root, i)
+		put(t, from, id)
+		m.Songs[id] = &library.Entry{ID: id, Path: from, Quality: "original", Size: int64(len(id))}
+		mvs = append(mvs, plan.Move{From: from, To: to, ID: id})
+	}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	saves := 0
+	r.onOp = func(op, _ string) {
+		if op == "save" {
+			saves++
+		}
+	}
+	var checks atomic.Int32
+	r.CardMounted = func() bool { return checks.Add(1) <= 14 } // the card goes after a dozen renames
+	p := plan.Plan{Rename: mvs}
+	r.Start(p)
+	if s := wait(t, r); s.State != "paused" || s.Renamed != 12 {
+		t.Fatalf("%+v", s)
+	}
+	if saves != 1 {
+		t.Errorf("%d manifest saves for 12 renames", saves)
+	}
+	if m, err := library.LoadManifest(root + "/.jellyfin/manifest.json"); err != nil || m.Songs["r11"].Path != mvs[11].To ||
+		m.Songs["r12"].Path != mvs[12].From || m.Songs["r11"].Moving+m.Songs["r12"].Moving != "" {
+		t.Errorf("not where the files are: %v %+v %+v", err, m.Songs["r11"], m.Songs["r12"])
+	}
+	r.CardMounted = func() bool { return true }
+	saves = 0
+	r.Start(p)
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if saves > 5 {
+		t.Errorf("%d manifest saves for 30 renames", saves)
+	}
+	mf := manifest(t, root)
+	for _, mv := range mvs {
+		if e := mf.Songs[mv.ID]; e == nil || e.Path != mv.To {
+			t.Errorf("%s: %+v", mv.ID, e)
+		}
+		if b, err := os.ReadFile(mv.To); err != nil || string(b) != mv.ID {
+			t.Errorf("%s: %q, %v", mv.To, b, err)
+		}
+	}
+}
+
+// A re-ripped original (the server's file changed size) is fetched again though its path, quality
+// and tags are the same, and its new size recorded, so the next preview has nothing to do (audit #1).
+func TestReRipDownloaded(t *testing.T) {
+	f, r, root := setup(t)
+	w := want(root, "a", "original")
+	w.Song.Size = 5000
+	put(t, w.Path, "old rip")
+	m := &library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: w.Path, Quality: "original", Size: 7,
+		Items: w.Items, Meta: library.MetaKey(w.Song, "original"), SrcSize: 4000}}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	r.Start(plan.Plan{Replace: []plan.Want{w}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if h, _ := f.seen("a"); h == 0 {
+		t.Fatal("not downloaded")
+	}
+	sameFile(t, w.Path, "a")
+	if e := manifest(t, root).Songs["a"]; e == nil || e.SrcSize != 5000 || e.Size != int64(len(data("a"))) {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// Start keeps no copy of the plan on the card (an Entire Library plan ran the app out of memory);
+// an older build's pending.json goes (I16).
+func TestStartWritesNoPendingPlan(t *testing.T) {
+	f, r, root := setup(t)
+	put(t, root+"/.jellyfin/pending.json", "{}")
+	a := want(root, "a", "original")
+	f.block["a"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	_, err := os.Stat(root + "/.jellyfin/pending.json")
+	close(f.block["a"])
+	wait(t, r)
+	if !os.IsNotExist(err) {
+		t.Fatal("pending.json while running:", err)
+	}
+}
+
+// A .part left by another version of the file (a transcode, then Original; or a re-rip) is fetched
+// again whole, never continued with Range into a spliced song (M14).
+func TestResumeRefusesOtherVersion(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	put(t, a.Path+".part", "TRANSCODED")
+	put(t, a.Path+".part.key", "mp3-320 4000")
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if _, rg := f.seen("a"); len(rg) != 1 || rg[0] != "" {
+		t.Errorf("ranges %q", rg)
+	}
+	sameFile(t, a.Path, "a")
+	noParts(t, root)
+}
+
+// Covers are asked for at 600 px (M19), and one past 16 MiB is refused, never saved cut short.
+func TestCoverSizedAndWhole(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	b.Song.Album, b.Song.CoverArt = "Other", "big-cover"
+	b.Path = library.SongPath(root, b.Song, "original", false)
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	s := wait(t, r)
+	if s.State != "done" || s.Failed != 0 || len(s.Failures) != 1 || s.Failures[0].Op != "cover" {
+		t.Fatalf("%+v", s)
+	}
+	if c, err := os.ReadFile(filepath.Dir(a.Path) + "/cover.jpg"); err != nil || string(c) != "jpeg-al-1" {
+		t.Error("cover", err)
+	}
+	if _, err := os.Stat(filepath.Dir(b.Path) + "/cover.jpg"); !os.IsNotExist(err) {
+		t.Error("a cut cover was saved")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sizes) != 2 || f.sizes[0] != "600" || f.sizes[1] != "600" {
+		t.Errorf("sizes %q", f.sizes)
+	}
+}
+
+// Refresh records the items holding songs that need no transfer, while no sync runs (I12); a run
+// records them too, and a renamed song's new MetaKey.
+func TestRefreshRecords(t *testing.T) {
+	f, r, root := setup(t)
+	s := jellyfin.Song{ID: "a", Title: "Ta", Album: "Alb", AlbumArtist: "Art", Track: 1, Suffix: "flac"}
+	moved := s
+	moved.Title = "Tb"
+	from, to := library.SongPath(root, s, "original", false), library.SongPath(root, moved, "original", false)
+	put(t, from, "a")
+	(&library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: from, Quality: "original", Size: 1,
+		Items: []string{"playlist:p1"}, Meta: library.MetaKey(s, "original")}}}).Save(root, root+"/.jellyfin/manifest.json")
+	if err := r.Refresh([]plan.Want{{Song: s, Quality: "original", Path: from, Items: []string{"album:al"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if e := manifest(t, root).Songs["a"]; !reflect.DeepEqual(e.Items, []string{"album:al"}) {
+		t.Fatalf("%+v", e)
+	}
+	b := want(root, "bb", "original")
+	f.block["bb"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{b}, Rename: []plan.Move{{From: from, To: to, ID: "a"}},
+		Keep: []plan.Want{{Song: moved, Quality: "original", Path: to, Items: []string{"album:al"}}}})
+	if err := r.Refresh(nil); err != nil {
+		t.Fatal("nothing to refresh:", err)
+	}
+	if err := r.Refresh([]plan.Want{{Song: s, Quality: "original", Path: from}}); !errors.Is(err, ErrBusy) {
+		t.Fatal("refresh while running:", err)
+	}
+	close(f.block["bb"])
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if e := manifest(t, root).Songs["a"]; e.Path != to || e.Meta != library.MetaKey(moved, "original") {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// refusing is a server that refuses every download for the account (Jellyfin error 50: downloads
+// turned off for it).
+type refusing struct{ gets atomic.Int32 }
+
+func (f *refusing) MediaURL(id, q string) string { return "https://h/rest/download?id=" + id }
+func (f *refusing) CoverURL(id string) string    { return "" }
+func (f *refusing) Get(context.Context, string, int64) (*http.Response, error) {
+	f.gets.Add(1)
+	return nil, &jellyfin.APIError{Op: "get", HTTP: 200, Code: 50, Msg: "User not authorized"}
+}
+
+// A download the server refuses for the whole account stops the run at its first song, with that
+// reason, instead of failing every song one by one (R39).
+func TestRefusedStopsAtOnce(t *testing.T) {
+	src, root := &refusing{}, t.TempDir()
+	r := New(root, src, nil)
+	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")}})
+	s := wait(t, r)
+	var ae *jellyfin.APIError
+	if s.State != "paused" || !errors.Is(s.Err, ErrRefused) || !errors.As(s.Err, &ae) || ae.Code != 50 {
+		t.Fatalf("%+v", s)
+	}
+	if n := src.gets.Load(); n != 1 {
+		t.Errorf("%d requests, want 1", n)
+	}
+}
+
+// Songs moved to a new album folder (a year or album fix) take the album's cover along (M17).
+func TestRenameCarriesCover(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Jellyfin/Art/1999 - Alb/01 - r.flac", root+"/Jellyfin/Art/2000 - Alb/01 - r.flac"
+	put(t, from, "r")
+	put(t, filepath.Dir(from)+"/cover.jpg", "jpeg")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if c, err := os.ReadFile(filepath.Dir(to) + "/cover.jpg"); err != nil || string(c) != "jpeg" {
+		t.Error("cover not carried:", err)
+	}
+	if _, err := os.Stat(filepath.Dir(from)); !os.IsNotExist(err) {
+		t.Error("old album folder left")
+	}
+}
+
+// The firmware's answer to a library request (R35): the files it imported become the app's own; an
+// added file it skipped because the Q2 has a playlist of that name (the user's) is renamed
+// "<name> (Jellyfin).m3u", to add again; one skipped under that name as well is a clash.
+func TestImported(t *testing.T) {
+	_, r, root := setup(t)
+	mix, rock, fav := library.PlaylistFile(root, "Mix"), library.PlaylistFile(root, "Rock"), root+"/_explaylist_data/Fav (Jellyfin).m3u"
+	for _, f := range []string{mix, rock, fav} {
+		put(t, f, "#EXTM3U\n")
+	}
+	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{}}).Save(root, root+"/.jellyfin/manifest.json")
+	again, clash, err := r.Imported([2][]string{nil, {mix, rock, fav}}, []string{rock, fav})
+	rockS := root + "/_explaylist_data/Rock (Jellyfin).m3u"
+	if err != nil || !reflect.DeepEqual(again, []string{rockS}) || !reflect.DeepEqual(clash, []string{fav}) {
+		t.Fatal(again, clash, err)
+	}
+	m := manifest(t, root)
+	if !m.Imported[mix] || m.Imported[rock] || m.Imported[fav] || m.Playlists["Rock"] != rockS {
+		t.Fatalf("%+v %+v", m.Imported, m.Playlists)
+	}
+	if _, err := os.Stat(rockS); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Moving names the songs a running or paused sync will rename, replace or remove: the streamer
+// fetches them rather than queue a path about to go (M24).
+func TestMoving(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.block["a"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{a}, Replace: []plan.Want{want(root, "b", "mp3-320")},
+		Rename: []plan.Move{{ID: "c"}}, Remove: []*library.Entry{{ID: "d"}}})
+	for _, id := range []string{"b", "c", "d"} {
+		if !r.Moving(id) {
+			t.Errorf("%s not moving", id)
+		}
+	}
+	if r.Moving("a") {
+		t.Error("an added song moving")
+	}
+	r.Cancel()
+	if r.Moving("d") {
+		t.Error("moving after Cancel")
+	}
+}
+
+// The runner is Busy until OnDone has returned, so the app never exits between a sync's end and
+// its library request (I15).
+func TestBusyUntilOnDone(t *testing.T) {
+	_, r, root := setup(t)
+	in, out := make(chan struct{}), make(chan struct{})
+	r.OnDone = func(plan.Plan) { close(in); <-out }
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original")}})
+	<-in
+	busy := r.Busy()
+	close(out)
+	if !busy {
+		t.Fatal("not busy in OnDone")
+	}
+}
+
+// crafted answers every download with a body and Content-Length of its own (-1: none sent), as a
+// transport that doesn't hold a body to its length would pass them on.
+type crafted struct{ body func() (io.Reader, int64) }
+
+func (c crafted) MediaURL(id, q string) string { return "https://h/rest/download?id=" + id }
+func (c crafted) CoverURL(id string) string    { return "" }
+func (c crafted) Get(context.Context, string, int64) (*http.Response, error) {
+	b, n := c.body()
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(b), ContentLength: n}, nil
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+// A body short of its Content-Length, an empty one, or one that runs on past twice its song's
+// size (no Content-Length) is never saved as the song (I8, M9).
+func TestBodyBounds(t *testing.T) {
+	for name, body := range map[string]func() (io.Reader, int64){
+		"short":   func() (io.Reader, int64) { return strings.NewReader("half"), 1000 },
+		"empty":   func() (io.Reader, int64) { return strings.NewReader(""), -1 },
+		"endless": func() (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			r := New(root, crafted{body}, nil)
+			r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond}, func() bool { return true }, NewNetSlot()
+			w := want(root, "a", "original")
+			w.Bytes = 1000
+			r.Start(plan.Plan{Add: []plan.Want{w}})
+			if s := wait(t, r); s.Failed != 1 {
+				t.Fatalf("%+v", s)
+			}
+			if _, err := os.Stat(w.Path); err == nil {
+				t.Fatal("saved as the song")
+			}
+		})
+	}
+}
+
+// A playlist's digest is saved with it, so a pause between playlists doesn't offer the written
+// ones again (review G3, Minor 9).
+func TestPlaylistSumsSurvivePause(t *testing.T) {
+	_, r, root := setup(t)
+	r.onOp = func(op, _ string) {
+		if op == "playlist" {
+			r.mu.Lock()
+			r.stopAs = "paused"
+			r.cancel() // Pause, from inside the run, after the first playlist
+			r.mu.Unlock()
+		}
+	}
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": {}, "B": {}}})
+	if s := wait(t, r); s.State != "paused" {
+		t.Fatalf("%+v", s)
+	}
+	if m := manifest(t, root); m.PlaylistSums["A"] != library.PlaylistSum([]string{}) {
+		t.Fatalf("sums %v", m.PlaylistSums)
+	}
+}
+
+// A stop records when it happened, for Details (review G3, Minor 3), and the snapshot counts the
+// renames and removals a run made, for its summary (Minor 7).
+func TestStopTimeAndCounts(t *testing.T) {
+	_, r, root := setup(t)
+	r.Now = func() time.Time { return time.Unix(1_000_000, 0) }
+	os.MkdirAll(root+"/.jellyfin", 0o755)
+	os.WriteFile(root+"/.jellyfin/manifest.json", []byte("{"), 0o644)
+	r.Start(plan.Plan{})
+	if s := wait(t, r); s.State != "error" || !s.ErrAt.Equal(time.Unix(1_000_000, 0)) {
+		t.Fatalf("%+v", s)
+	}
+	os.Remove(root + "/.jellyfin/manifest.json")
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for _, id := range []string{"x", "y"} {
+		e := &library.Entry{ID: id, Path: root + "/Jellyfin/Z/z/" + id + ".flac", Quality: "original"}
+		put(t, e.Path, id)
+		m.Songs[id] = e
+	}
+	m.Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Remove: []*library.Entry{m.Songs["x"]},
+		Rename: []plan.Move{{ID: "y", From: m.Songs["y"].Path, To: root + "/Jellyfin/Z/z/y2.flac"}}})
+	if s := wait(t, r); s.Removed != 1 || s.Renamed != 1 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// withLyrics is a source that has lyrics for every song.
+type withLyrics struct{ MediaSource }
+
+func (withLyrics) Lyrics(context.Context, string) (string, error) { return "[00:01.00]la", nil }
+
+// A replace that changes the format (Song.flac -> Song.opus) keeps the lyrics it wrote: removing
+// the old file takes its .lrc, which is the new one's too (audit #4).
+func TestReplaceNewFormatKeepsLyrics(t *testing.T) {
+	_, r, root := setup(t)
+	r.src = withLyrics{r.src}
+	old, w := want(root, "a", "original"), want(root, "a", "opus-128")
+	w.Song.HasLyrics = true
+	put(t, old.Path, "old rip")
+	put(t, library.LyricsPath(old.Path), "[00:01.00]old")
+	m := &library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: old.Path, Quality: "original", Size: 7,
+		Items: old.Items, Meta: library.MetaKey(old.Song, "original")}}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	r.Start(plan.Plan{Replace: []plan.Want{w}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(old.Path); !os.IsNotExist(err) {
+		t.Fatal("old file left")
+	}
+	if b, err := os.ReadFile(library.LyricsPath(w.Path)); err != nil || string(b) != "[00:01.00]la" {
+		t.Fatalf("lyrics: %q, %v", b, err)
+	}
+}
+
+// A replaced song's old file stays while another song is still recorded in it (one file under two
+// names, from older builds), as removals keep it (audit 2026-11-10 #8).
+func TestReplaceKeepsSharedFile(t *testing.T) {
+	_, r, root := setup(t)
+	old, w := want(root, "a", "original"), want(root, "a", "opus-128")
+	put(t, old.Path, "old rip")
+	m := &library.Manifest{Songs: map[string]*library.Entry{
+		"a": {ID: "a", Path: old.Path, Quality: "original", Size: 7, Items: old.Items, Meta: library.MetaKey(old.Song, "original")},
+		"b": {ID: "b", Path: old.Path, Quality: "original", Size: 7, Items: old.Items},
+	}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	r.Start(plan.Plan{Replace: []plan.Want{w}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(old.Path); err != nil {
+		t.Fatalf("shared file deleted: %v", err)
+	}
+	if _, err := os.Stat(w.Path); err != nil {
+		t.Fatalf("new file: %v", err)
+	}
+}
+
+// Short of space, the removals run first; a file two songs were recorded at (older builds) is then
+// still deleted once its last song is replaced, not left with no song recorded at it (re-audit
+// 2026-11-10 #5).
+func TestEarlyRemovalThenReplaceDropsSharedFile(t *testing.T) {
+	_, r, root := setup(t)
+	old, w := want(root, "a", "original"), want(root, "a", "opus-128")
+	put(t, old.Path, "old rip")
+	b := &library.Entry{ID: "b", Path: old.Path, Quality: "original", Size: 7, Items: old.Items}
+	m := &library.Manifest{Songs: map[string]*library.Entry{
+		"a": {ID: "a", Path: old.Path, Quality: "original", Size: 7, Items: old.Items, Meta: library.MetaKey(old.Song, "original")},
+		"b": b,
+	}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	r.Free = func() int64 { // short at the first check: the removals run, then there is room
+		if calls.Add(1) == 1 {
+			return 0
+		}
+		return 1 << 30
+	}
+	r.Reserve = func() int64 { return 1 }
+	r.Start(plan.Plan{Replace: []plan.Want{w}, Remove: []*library.Entry{b}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(old.Path); !os.IsNotExist(err) {
+		t.Fatalf("old file left with no song recorded at it: %v", err)
+	}
+	if mm := manifest(t, root); mm.Songs["b"] != nil || mm.Songs["a"] == nil || mm.Songs["a"].Path != w.Path {
+		t.Fatalf("%+v", mm.Songs)
+	}
+}
+
+// Short of space after a song failed, nothing is removed (I2) and the stop says the removals were
+// held back, so the user knows why it stops at the same place (re-audit 2026-11-10 #3).
+func TestSpaceLowHeldByFailedSong(t *testing.T) {
+	f, r, root := setup(t)
+	a, c, gone := want(root, "a", "original"), want(root, "c", "original"), want(root, "g", "original")
+	f.status["a"] = 404
+	put(t, gone.Path, "old")
+	ge := &library.Entry{ID: "g", Path: gone.Path, Quality: "original", Size: 3, Items: gone.Items}
+	m := &library.Manifest{Songs: map[string]*library.Entry{"g": ge}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	r.Free = func() int64 { // room for a, then none
+		if calls.Add(1) == 1 {
+			return 1 << 30
+		}
+		return 0
+	}
+	r.Reserve = func() int64 { return 1 }
+	r.Start(plan.Plan{Add: []plan.Want{a, c}, Remove: []*library.Entry{ge}})
+	s := wait(t, r)
+	var sl *SpaceLowError
+	if !errors.As(s.Err, &sl) || !sl.Held {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(gone.Path); err != nil {
+		t.Fatalf("removed though a song failed: %v", err)
+	}
+}
+
+// FromCache: a song it has needs no download, no room, and leaves no .part an earlier try left; a
+// song it hasn't is downloaded as before.
+func TestRunTakesFromCache(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	os.MkdirAll(filepath.Dir(a.Path), 0o755)
+	os.WriteFile(a.Path+".part", []byte("half"), 0o644)
+	os.WriteFile(a.Path+".part.key", []byte("original 1"), 0o644)
+	r.FromCache = func(w plan.Want) (int64, bool) {
+		if w.Song.ID != "a" {
+			return 0, false
+		}
+		return 6, os.WriteFile(w.Path, []byte("cached"), 0o644) == nil
+	}
+	r.Free, r.Reserve = func() int64 { return 1 << 20 }, func() int64 { return 1 << 20 } // no room for a download
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	s := wait(t, r)
+	if hits, _ := f.seen("a"); hits != 0 {
+		t.Fatalf("a downloaded %d times", hits)
+	}
+	if !errors.Is(s.Err, ErrSpaceLow) || s.Done != 1 {
+		t.Fatalf("%+v", s) // b, downloaded, stops at the reserve; a needed no room
+	}
+	if got, _ := os.ReadFile(a.Path); string(got) != "cached" {
+		t.Fatalf("%q", got)
+	}
+	if e := manifest(t, root).Songs["a"]; e == nil || e.Size != 6 {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(a.Path + ".part"); !os.IsNotExist(err) {
+		t.Fatal(".part left")
+	}
+	if _, err := os.Stat(a.Path + ".part.key"); !os.IsNotExist(err) {
+		t.Fatal(".part.key left")
+	}
+}
