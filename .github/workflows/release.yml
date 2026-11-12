@@ -13,7 +13,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check version and changelog
         run: |
           v=${GITHUB_REF_NAME#q2-v}
@@ -24,10 +24,11 @@ jobs:
           { echo; echo '---'; [ -z "$compare" ] || printf '**Full changes:** %s\n\n' "$compare"
             echo 'Install or update from Q2 Pod: System settings → App Store (or unzip to the card root).'; } >>notes.md
           cat notes.md
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27' # current, with its security fixes; go.mod's go line is only the minimum (M44)
           check-latest: true
+          cache: false # no dependencies, so no go.sum to key a cache on
       - name: Test
         run: |
           go vet ./...
