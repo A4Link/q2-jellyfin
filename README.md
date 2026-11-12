@@ -1,8 +1,11 @@
+# DOCUMENTATION TBC
+
+
 # q2-jellyfin
 
 A [Jellyfin](https://jellyfin.org) client for the **Shanling Q2** running [Q2 Pod](https://github.com/DiamondBond/q2-pod). Pick playlists, albums, artists and songs on the Q2, and it syncs them to the card over Wi-Fi, or streams a song straight from your server. It needs a Q2 Pod build that supports card apps, and a Jellyfin server reachable over HTTPS. Its requests are checked against the Jellyfin 12.4.0 API document.
 
-> **Status: first release (0.7).** Its tests run against a real Jellyfin 12.4.0 server, and test builds have run on a Q2 with Q2 Pod 1.8.0. A few features (the one-page sign-in, ⋯ showing the play queue, the heart, and reporting every streamed song) use Q2 Pod card-app features that are still pull requests; on firmware without them the app keeps its older pages and behaviour. Forked from [q2-subsonic](https://github.com/andsuor/q2-subsonic). What is left is in [TODO.md](TODO.md).
+> **Status: first release (0.7).** Its tests run against a real Jellyfin 12.4.0 server, and test builds have run on a Q2 with Q2 Pod 1.8.0. A few features (the one-page sign-in, ⋯ showing the play queue, the heart, and reporting every streamed song) use Q2 Pod card-app features that are still pull requests; on firmware without them the app keeps its older pages and behaviour. Forked from [q2-subsonic](https://github.com/andsuor/q2-subsonic).
 
 ## Install
 
