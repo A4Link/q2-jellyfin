@@ -599,7 +599,7 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 }
 
 // search lists what the server found, artists then albums then songs.
-// ponytail: one search3 call, 50 of each kind; page past that when someone needs more.
+// ponytail: one request per kind shown, 50 of each; page past that when someone needs more.
 func (d *daemon) search(ctx context.Context, cl *jellyfin.Client, term, cursor string) q2spot.Reply {
 	d.mu.Lock()
 	in := d.searchIn
@@ -621,25 +621,38 @@ func (d *daemon) search(ctx context.Context, cl *jellyfin.Client, term, cursor s
 		}
 		return page(rows, cursor)
 	}
-	ars, als, songs, err := cl.Search(ctx, term, 0)
+	type found struct {
+		ars   []jellyfin.Artist
+		als   []jellyfin.Album
+		songs []jellyfin.Song
+	}
+	// Kept for listFor, as latest: an Albums search's second reply (its albums and songs are more
+	// than one) reuses the first's answer.
+	f, err := cachedList(d, cl, "search "+in+"\t"+term, cursor == "", func() (found, error) {
+		var f found
+		var err error
+		if in != "albums" { // Albums finds albums and songs; Artists, artists; Newly Added, all three
+			if f.ars, err = cl.SearchArtists(ctx, term, 0); err != nil {
+				return f, err
+			}
+		}
+		if in != "artists" {
+			f.als, f.songs, err = cl.Search(ctx, term, 0)
+		}
+		return f, err
+	})
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
-	switch in { // Albums finds albums and songs; Artists, artists
-	case "albums":
-		ars = nil
-	case "artists":
-		als, songs = nil, nil
-	}
 	v := d.view()
 	var rows []q2spot.Row
-	for _, a := range ars {
+	for _, a := range f.ars {
 		rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
 	}
-	for _, a := range als {
+	for _, a := range f.als {
 		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, a.Artist, a.SongCount))
 	}
-	for _, s := range songs {
+	for _, s := range f.songs {
 		rows = append(rows, v.song(s, "song:"+s.ID, 0))
 	}
 	if len(rows) == 0 {

@@ -51,6 +51,7 @@ type nav struct {
 	artistReqs       atomic.Int32  // /Artists/AlbumArtists calls served
 	artistItemReqs   atomic.Int32  // /Items/ar<id> calls served (cl.Artist)
 	songListReqs     atomic.Int32  // every-song listing pages served (cl.AllSongs)
+	searchReqs       atomic.Int32  // search requests served (a searchTerm), artists' and items'
 	lyrics           atomic.Bool   // songs have lyrics on the server
 	lyricsHold       chan struct{} // lyrics requests wait for it
 	albumSort        atomic.Value  // the latest album list's "sortBy sortOrder", a string
@@ -282,6 +283,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/Items" && q.Get("parentId") == "music" && q.Get("includeItemTypes") == "":
 		page([]map[string]any{{"Id": "ar1", "Type": "MusicArtist", "Path": "/music/Artist"}})
 	case p == "/Artists/AlbumArtists" && q.Get("searchTerm") != "": // "Artist" for a term it holds
+		n.searchReqs.Add(1)
 		if strings.Contains("artist", strings.ToLower(q.Get("searchTerm"))) {
 			page([]map[string]any{{"Id": "ar1", "Name": "Artist", "AlbumCount": 2}})
 			return
@@ -316,6 +318,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			page(fav)
 		case q.Get("searchTerm") != "":
+			n.searchReqs.Add(1)
 			if n.empty || off > 0 {
 				page(nil)
 				return
