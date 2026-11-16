@@ -350,6 +350,98 @@ func TestPlaylistOrderAndDuplicates(t *testing.T) {
 	}
 }
 
+// isFolderScan is the music libraries' folder lookup (musicFolders): every top-level item of lib1.
+func isFolderScan(r *http.Request) bool {
+	return r.URL.Path == "/Items" && r.URL.Query().Get("parentId") == "lib1" && r.URL.Query().Get("includeItemTypes") == ""
+}
+
+func folderScans(f *fake) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.seen {
+		if isFolderScan(r) {
+			n++
+		}
+	}
+	return n
+}
+
+// A list doesn't wait for the library's folders: the first page of Albums is the libraries'
+// lookup and the page, nothing more (audit 2026-11-16 #14).
+func TestListAsksNoFolders(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"al1","Name":"Tender"}],"TotalRecordCount":1}`))
+		},
+	})
+	if _, err := signedIn(t, srv).Albums(context.Background(), 0, 25, "name", false); err != nil {
+		t.Fatal(err)
+	}
+	if n := folderScans(f); n != 0 || len(f.seen) != 2 {
+		t.Fatalf("%d folder scans, %d requests, want 0 and 2", n, len(f.seen))
+	}
+}
+
+// The folders are asked once, for the first playlist or song, and kept for the next.
+func TestFoldersAskedOnce(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"pl1","Name":"Mix","Type":"Playlist"}`))
+		},
+		"/Playlists/pl1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"}]}`))
+		},
+		"/Items/a": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"}`))
+		},
+	})
+	c := signedIn(t, srv)
+	for i := 0; i < 2; i++ {
+		if _, s, err := c.Playlist(context.Background(), "pl1"); err != nil || len(s) != 1 {
+			t.Fatal(s, err)
+		}
+	}
+	if _, err := c.Song(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if n := folderScans(f); n != 1 {
+		t.Fatalf("%d folder scans, want 1", n)
+	}
+}
+
+// A folder lookup that runs out of time isn't kept: the next playlist asks again, and filters as
+// before.
+func TestFoldersRetriedAfterTimeout(t *testing.T) {
+	var scans atomic.Int32
+	f := &fake{h: map[string]http.HandlerFunc{
+		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"pl1","Name":"Mix","Type":"Playlist"}`))
+		},
+		"/Playlists/pl1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"},{"Id":"m","Type":"Audio","Path":"/mixed/memo.mp3"}]}`))
+		},
+	}}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isFolderScan(r) && scans.Add(1) == 1 {
+			<-r.Context().Done() // the first lookup outlasts its caller
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := signedIn(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := c.Playlist(ctx, "pl1"); err == nil {
+		t.Fatal("no error from a lookup that timed out")
+	}
+	_, s, err := c.Playlist(context.Background(), "pl1")
+	if err != nil || len(s) != 1 || s[0].ID != "a" || scans.Load() != 2 {
+		t.Fatalf("%+v %v, %d scans", s, err, scans.Load())
+	}
+}
+
 // A download the server refuses for the account says so, and counts as a refusal (ErrAuth).
 func TestDownloadsOff(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{

@@ -437,7 +437,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 	if err != nil {
 		return Playlist{}, nil, err
 	}
-	s, err := c.music(ctx)
+	s, err := c.musicFolders(ctx)
 	if err != nil {
 		return Playlist{}, nil, err
 	}
@@ -670,7 +670,7 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	if err != nil {
 		return Song{}, err
 	}
-	if s, err := c.music(ctx); err != nil {
+	if s, err := c.musicFolders(ctx); err != nil {
 		return Song{}, err
 	} else if !s.inMusic(w) {
 		return Song{}, &APIError{Op: "Items", HTTP: 404, Code: CodeGone, Msg: "Not in a music library"}
