@@ -229,9 +229,9 @@ func shownServer(server string) string {
 const wifiWait = 15 * time.Second
 
 // netOps are the signed-in requests only the server can answer, true for an action (toasted). Not
-// npplay: a synced song may play from the card (queuePlay).
+// play or npplay: a synced song may play from the card (startPlay, queuePlay).
 var netOps = map[string]bool{"latest": false, "playlists": false, "artists": false, "albums": false, "artist": false,
-	"album": false, "playlist": false, "favorites": false, "search": false, "syncpl": false, "play": true, "syncfav": true}
+	"album": false, "playlist": false, "favorites": false, "search": false, "syncpl": false, "syncfav": true}
 
 // noWiFi is the page in place of one that needs the server while the Q2 has no Wi-Fi, as stock
 // Tidal's "Network Disconnected", or for an action its toast; ok is false with Wi-Fi. With the

@@ -900,7 +900,8 @@ func (d *daemon) playing(title string) q2spot.Reply {
 }
 
 // startPlay starts the list and song arg names ("[song:id] <list kind:id> <index>"), reporting the
-// song's title, or a failed reply.
+// song's title, or a failed reply. Without Wi-Fi only a synced song of the page's list plays
+// (fromCard).
 func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string) (q2spot.Reply, string, bool) {
 	f := strings.Fields(arg)
 	if len(f) == 3 {
@@ -913,6 +914,9 @@ func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string)
 	kind, id := parseKey(f[0])
 	songs := d.pageSongs(cl, selection.Key(kind, id)) // the list the page showed, if fresh (audit B3)
 	if songs == nil {
+		if r, off := d.noWiFi(true); off {
+			return r, "", false
+		}
 		var err error
 		if songs, _, err = d.songsOf(ctx, cl, kind, id); err != nil {
 			return d.errToast(err), "", false
@@ -921,8 +925,19 @@ func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string)
 	if i < 0 || i >= len(songs) {
 		return q2spot.Fail(q2spot.Unavailable, "Nothing to play"), "", false
 	}
+	if !d.fromCard(songs[i].ID) {
+		if r, off := d.noWiFi(true); off {
+			return r, "", false
+		}
+	}
 	d.startSongs(songs, i, f[0])
 	return q2spot.Reply{}, songs[i].Title, true
+}
+
+// fromCard is whether song id plays from the card, without Wi-Fi: synced, with the firmware's
+// playlist extension (stream.go). Without it every song is fetched.
+func (d *daemon) fromCard(id string) bool {
+	return d.caps.Playlist && d.stream.synced(d.manifest().Songs[id])
 }
 
 // startSongs plays songs from i, of the list key ("kind:id"; status.go shows its song waiting).
@@ -934,7 +949,7 @@ func (d *daemon) startSongs(songs []jellyfin.Song, i int, key string) {
 	d.playKey = key
 	d.mu.Unlock()
 	// status.go: the list shows this song waiting until it plays; one on the card plays at once.
-	if e := d.manifest().Songs[songs[i].ID]; d.caps.URLs || d.caps.Playlist && d.stream.synced(e) {
+	if d.caps.URLs || d.fromCard(songs[i].ID) {
 		// URL queues (stream_urls.go): Now Playing shows the firmware's own buffering
 		d.stream.setStatus(streamStatus{})
 	} else {

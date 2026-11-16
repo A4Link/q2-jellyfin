@@ -12,6 +12,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
 - **A synced song pressed in the Play Queue plays without Wi-Fi** on Q2 Pod firmware with `playlist`, from the card, instead of *Network Disconnected*. A song that isn't synced still says so.
+- **A synced song plays without Wi-Fi when pressed in the Play Queue or on an album, playlist or Favourites page already open**, on Q2 Pod firmware with `playlist`, from the card, instead of *Network Disconnected*. A song that isn't synced still says so (as does one a paused sync is about to replace).
 
 ## [0.7.0] - 2026-11-12
 

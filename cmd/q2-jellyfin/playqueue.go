@@ -133,7 +133,7 @@ func (d *daemon) queuePlay(arg string) q2spot.Reply {
 	if !ok || seq != q.Seq || err != nil || i < 0 || i >= len(q.Songs) {
 		return q2spot.Fail(q2spot.Unavailable, "The queue has changed")
 	}
-	if !d.caps.Playlist || !d.stream.synced(d.manifest().Songs[q.Songs[i].ID]) {
+	if !d.fromCard(q.Songs[i].ID) {
 		if r, off := d.noWiFi(true); off {
 			return r
 		}
