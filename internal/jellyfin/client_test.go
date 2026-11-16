@@ -500,6 +500,23 @@ func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
 	}
 }
 
+// Albums' later windows (Albums, More…) from a server that ignores startIndex would show page one
+// again: they fail instead.
+func TestAlbumsPageStartsWhereAsked(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"al0","Name":"First","Type":"MusicAlbum"}],"TotalRecordCount":100,"StartIndex":0}`))
+		},
+	})
+	c := signedIn(t, srv)
+	if al, err := c.Albums(context.Background(), 0, 25, "name", false); err != nil || len(al) != 1 {
+		t.Fatalf("page one: %+v %v", al, err)
+	}
+	if al, err := c.Albums(context.Background(), 50, 25, "name", false); !errors.Is(err, ErrChanged) {
+		t.Fatalf("page one again: %+v %v", al, err)
+	}
+}
+
 // A playlist of one song added 1000 times starts both pages with that song, and Jellyfin 12.4 gives
 // every entry of it the same PlaylistItemId (checked on the test server): pages that start where
 // they were asked are not taken for a repeated page.

@@ -226,6 +226,9 @@ func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int)
 		if err != nil {
 			return nil, err
 		}
+		if !r.startsAt(skip) {
+			return nil, ErrChanged
+		}
 		out = append(out, r.Items...)
 		skip = 0
 	}
