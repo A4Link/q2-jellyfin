@@ -68,6 +68,23 @@ func page(rows []q2spot.Row, cursor string) q2spot.Reply {
 	return r
 }
 
+// pageOf is page for a list of n rows, row(i) being row i, that makes only the rows one reply can
+// hold: a first sync's Added list can be 20,000 songs (audit 2026-11-16 #27).
+func pageOf(n int, cursor string, row func(int) q2spot.Row) q2spot.Reply {
+	off, _ := strconv.Atoi(cursor)
+	off = max(0, min(off, n))
+	var rows []q2spot.Row
+	for i := off; i < min(off+q2spot.MaxRows, n); i++ {
+		rows = append(rows, row(i))
+	}
+	r := page(rows, "")
+	r.Cursor = ""
+	if end := off + len(r.Rows); end < n {
+		r.Cursor = strconv.Itoa(end)
+	}
+	return r
+}
+
 // windowRows is how many rows of a long list show at a time with the firmware's "window" cap: the
 // firmware asks for them a reply (at most q2spot.MaxRows) at a time and appends them, then a Next
 // page row asks for the next window in the list's place, and the window after the first starts with

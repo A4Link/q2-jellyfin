@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
 
+	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/library"
+	"github.com/A4Link/q2-jellyfin/internal/plan"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
@@ -175,5 +179,41 @@ func TestWindowKeepsRepliesWithinLimits(t *testing.T) {
 	r = d.window(q2spot.Reply{Rows: rows[:1], Cursor: "400"}, "399")
 	if len(r.Rows) != 2 || r.Cursor != "" || r.Rows[1].URI != "next" || r.Rows[1].Context != "400" {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// Added and Removed make only the rows of the reply asked for, and answer as page() over every row
+// did: the same rows and cursor from any cursor, the last page and past the end too (audit
+// 2026-11-16 #27).
+func TestAddedRemovedPagedAsBefore(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	for _, n := range []int{0, 1, q2spot.MaxRows, q2spot.MaxRows + 1, 237} {
+		p := &plan.Plan{}
+		added, removed := []q2spot.Row{info("Nothing to add")}, []q2spot.Row{info("Nothing to remove")}
+		if n > 0 {
+			added, removed = nil, nil
+		}
+		for i := 0; i < n; i++ {
+			w := plan.Want{Song: jellyfin.Song{Title: fmt.Sprint("Song ", i), Artist: "Artist"}, Bytes: int64(i) * 1e6}
+			p.Add = append(p.Add, w)
+			p.Remove = append(p.Remove, &library.Entry{Path: filepath.Join(d.card, "Jellyfin", "A", fmt.Sprint(i, ".flac"))})
+			added = append(added, q2spot.Row{Kind: "info", Title: w.Song.Title, Subtitle: join(w.Song.Artist, size(w.Bytes))})
+			removed = append(removed, info(fmt.Sprint("A/", i, ".flac")))
+		}
+		d.mu.Lock()
+		d.daemon.preview = &preview{done: true, plan: p}
+		d.mu.Unlock()
+		cursors := []string{"", "7", "-3", "x", strconv.Itoa(n), strconv.Itoa(n + 5)}
+		for c := page(added, "").Cursor; c != ""; c = page(added, c).Cursor {
+			cursors = append(cursors, c)
+		}
+		for _, c := range cursors {
+			if got, was := d.added(c), page(added, c); fmt.Sprint(got.Encode("1")) != fmt.Sprint(was.Encode("1")) {
+				t.Errorf("%d songs, added %q: %d rows, cursor %q; was %d, %q", n, c, len(got.Rows), got.Cursor, len(was.Rows), was.Cursor)
+			}
+			if got, was := d.removed(c), page(removed, c); fmt.Sprint(got.Encode("1")) != fmt.Sprint(was.Encode("1")) {
+				t.Errorf("%d songs, removed %q: %d rows, cursor %q; was %d, %q", n, c, len(got.Rows), got.Cursor, len(was.Rows), was.Cursor)
+			}
+		}
 	}
 }

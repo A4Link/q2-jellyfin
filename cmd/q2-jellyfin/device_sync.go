@@ -508,16 +508,13 @@ func (d *daemon) removed(cursor string) q2spot.Reply {
 	p := d.preview
 	ready := p != nil && p.done && p.plan != nil
 	d.mu.Unlock()
-	var rows []q2spot.Row
-	if ready {
-		for _, e := range p.plan.Remove {
-			rows = append(rows, info(strings.TrimPrefix(e.Path, filepath.Join(d.card, "Jellyfin")+"/")))
-		}
+	if !ready || len(p.plan.Remove) == 0 {
+		return page([]q2spot.Row{info("Nothing to remove")}, cursor)
 	}
-	if len(rows) == 0 {
-		rows = []q2spot.Row{info("Nothing to remove")}
-	}
-	return page(rows, cursor)
+	dir := filepath.Join(d.card, "Jellyfin") + "/"
+	return pageOf(len(p.plan.Remove), cursor, func(i int) q2spot.Row {
+		return info(strings.TrimPrefix(p.plan.Remove[i].Path, dir))
+	})
 }
 
 // added lists the songs the sync will add, as removed lists those it takes away.
@@ -526,16 +523,13 @@ func (d *daemon) added(cursor string) q2spot.Reply {
 	p := d.preview
 	ready := p != nil && p.done && p.plan != nil
 	d.mu.Unlock()
-	var rows []q2spot.Row
-	if ready {
-		for _, w := range p.plan.Add {
-			rows = append(rows, q2spot.Row{Kind: "info", Title: w.Song.Title, Subtitle: join(w.Song.Artist, size(w.Bytes))})
-		}
+	if !ready || len(p.plan.Add) == 0 {
+		return page([]q2spot.Row{info("Nothing to add")}, cursor)
 	}
-	if len(rows) == 0 {
-		rows = []q2spot.Row{info("Nothing to add")}
-	}
-	return page(rows, cursor)
+	return pageOf(len(p.plan.Add), cursor, func(i int) q2spot.Row {
+		w := p.plan.Add[i]
+		return q2spot.Row{Kind: "info", Title: w.Song.Title, Subtitle: join(w.Song.Artist, size(w.Bytes))}
+	})
 }
 
 func (d *daemon) syncAction(op string) q2spot.Reply {

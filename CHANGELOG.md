@@ -10,6 +10,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - **A synced list starts sooner while a big sync runs or is paused**: checking whether the sync is about to move or remove each of its songs is one lookup per song, not a walk through the whole sync (after a change of Sync Quality, every song on the card).
 - **Removing many songs is quicker and wears the card less**: a sync records its removals on the card every 1,000 songs instead of every 100, as it does renames. A power cut part-way can now leave up to 1,000 removed songs' files on the card unrecorded (was 100); a song is still never recorded as on the card once its file is gone.
 - **Start Sync answers sooner with a full Playback Cache**: it reads the cache folder once to find the songs the sync can take from it, instead of looking each planned song up in it.
+- **Added and Removed on the Sync page scroll faster on a big sync**: each reply makes only the rows it shows, not one for every song in the sync.
 
 ### Fixed
 
