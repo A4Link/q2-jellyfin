@@ -4,6 +4,10 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-16
+
+> **This app is 100% vibecoded.** It works, and every change was reviewed and tested, but the quality of its code cannot be assured. Use it at your own risk.
+
 ### Changed
 
 - **Songs already in a lossy format are no longer re-encoded** under an Opus Sync or Streaming Quality: MP3, AAC, Ogg Vorbis, Opus, WMA and AC-3 files come as the server's file, untouched, since encoding them again only loses more. Lossless songs are transcoded as before. **Settings → Quality and Storage → Always Re-encode** (off by default) re-encodes lossy songs too, for smaller files; the row says underneath what its setting means. After updating, the next sync brings lossy songs synced at Opus again as their originals, unless Always Re-encode is turned on first. An account without the server's download permission needs Always Re-encode on to sync them: its sync now says so when it stops (README, Known limitations).
@@ -143,7 +147,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - q2-subsonic's phone sign-in page (a port on the Wi-Fi with a QR code and PIN): the app opens no port; everything is typed on the Q2.
 - q2-subsonic's one-time `Navidrome/` folder migration: this app never touches another app's files.
 
-[Unreleased]: https://github.com/A4Link/q2-jellyfin/commits/master
-[0.7.0]: https://github.com/A4Link/q2-jellyfin/commits/q2-v0.7.0
+[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.0...HEAD
+[0.8.0]: https://github.com/A4Link/q2-jellyfin/compare/v0.7.0...q2-v0.8.0
+[0.7.0]: https://github.com/A4Link/q2-jellyfin/commits/v0.7.0
 [0.6.2]: https://github.com/A4Link/q2-jellyfin/commits/q2-v0.6.2
 [0.6.1]: https://github.com/A4Link/q2-jellyfin/commits/q2-v0.6.1
