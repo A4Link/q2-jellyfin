@@ -610,31 +610,36 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 	return a, albums(als), nil
 }
 
-// Search finds up to 50 of each kind starting at offset.
-func (c *Client) Search(ctx context.Context, q string, offset int) ([]Artist, []Album, []Song, error) {
+// Search finds up to 50 albums and 50 songs starting at offset; SearchArtists finds the artists.
+func (c *Client) Search(ctx context.Context, q string, offset int) ([]Album, []Song, error) {
 	page := func(kind string) ([]wireItem, error) { // offset and limit per music library
 		var out []wireItem
 		err := c.eachMusic(ctx, "/Items", url.Values{"searchTerm": {q}, "includeItemTypes": {kind}, "recursive": {"true"},
 			"startIndex": {strconv.Itoa(offset)}, "limit": {"50"}}, func(w wireItem) { out = append(out, w) })
 		return out, err
 	}
-	// Artists through /Artists/AlbumArtists: artist items belong to the whole server, and /Items
-	// ignores parentId for them (a mixed library's "Memo Person" came back); this one honours it.
+	al, err := page("MusicAlbum")
+	if err != nil {
+		return nil, nil, err
+	}
+	so, err := page("Audio")
+	if err != nil {
+		return nil, nil, err
+	}
+	return albums(al), songs(so), nil
+}
+
+// SearchArtists finds up to 50 album artists starting at offset, through /Artists/AlbumArtists:
+// artist items belong to the whole server, and /Items ignores parentId for them (a mixed library's
+// "Memo Person" came back); this one honours it.
+func (c *Client) SearchArtists(ctx context.Context, q string, offset int) ([]Artist, error) {
 	var ar []wireItem
 	err := c.eachMusic(ctx, "/Artists/AlbumArtists", url.Values{"searchTerm": {q}, "startIndex": {strconv.Itoa(offset)},
 		"limit": {"50"}, "fields": {artistFields}}, func(w wireItem) { ar = append(ar, w) })
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	al, err := page("MusicAlbum")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	so, err := page("Audio")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return artists(ar), albums(al), songs(so), nil
+	return artists(ar), nil
 }
 
 // listPage is how many items one request of a long list asks for: a whole big playlist or every
