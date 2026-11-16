@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,35 @@ func TestURLQueue(t *testing.T) {
 		t.Error("a fetch run for a URL queue")
 	}
 	_ = jellyfin.Song{}
+}
+
+// U37: under an Opus Streaming Quality a lossy song is queued as it is, a lossless one transcoded;
+// Always Re-encode transcodes both.
+func TestURLQueueKeepsLossy(t *testing.T) {
+	for _, re := range []bool{false, true} {
+		e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+		e.s.src = urlSrc{e.src}
+		e.s.quality = func() string { return "opus-128" }
+		e.s.reencode = func() bool { return re }
+		ss := songs(2, "flac")
+		ss[1].Suffix, ss[1].Codec = "m4a", "aac"
+		e.s.start(ss, 0)
+		play, _ := os.ReadFile(e.play)
+		b, err := os.ReadFile(strings.Fields(string(play))[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+		want := []string{"opus-128", "original"}
+		if re {
+			want[1] = "opus-128"
+		}
+		for i, w := range want {
+			if got := strings.Split(lines[i+1], "\t")[0]; got != "https://srv/Audio/s"+strconv.Itoa(i)+"/"+w+"?ApiKey=k" {
+				t.Errorf("Always Re-encode %v, song %d: %q, want %s", re, i, got, w)
+			}
+		}
+	}
 }
 
 // U30: with the firmware's "fav", every line carries the song's item and heart (a card path's

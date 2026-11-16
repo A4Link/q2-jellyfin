@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,14 +50,15 @@ func (d *daemon) view() view {
 	d.mu.Unlock()
 	v := view{sel: sel, m: m, res: res, artists: artists, keyed: map[string][]string{}, albumOn: map[string]map[string]bool{},
 		pending: map[string]bool{}, held: map[string]bool{}, covers: &d.art.songs}
-	syncQ := d.settings().def() // every chosen item's, but a held one's: as on the card, as the plan does
+	set := d.settings()
+	syncQ, reencode := set.def(), set.reencode() // every chosen item's, but a held one's: as on the card
 	for _, it := range sel.Items {
 		v.held[selection.Key(it.Kind, it.ID)] = it.Held
 		if it.Kind == selection.KindLibrary {
 			v.lib, v.libHeld = true, it.Held
 		}
 	}
-	suffix := map[string]string{} // of the fetched songs on the card
+	song := map[string]jellyfin.Song{} // the fetched songs on the card
 	for _, songs := range res {
 		for _, s := range songs {
 			if m.Songs[s.ID] == nil {
@@ -65,29 +67,35 @@ func (d *daemon) view() view {
 			if v.albumOn[s.AlbumID] == nil {
 				v.albumOn[s.AlbumID] = map[string]bool{}
 			}
-			v.albumOn[s.AlbumID][s.ID], suffix[s.ID] = true, s.Suffix
+			v.albumOn[s.AlbumID][s.ID], song[s.ID] = true, s
 		}
 	}
 	for id, e := range m.Songs {
+		// A song not fetched since the start: an original on the card is of its file's format.
+		sg, known := song[id]
+		if !known && quality.IsOriginal(e.Quality) {
+			sg.Suffix = strings.ToLower(strings.TrimPrefix(filepath.Ext(e.Path), "."))
+		}
 		want := "" // the best quality among the chosen items holding it, as the plan picks
 		for _, k := range e.Items {
 			v.keyed[k] = append(v.keyed[k], id)
 			if !v.chosen(k) {
 				v.pending[k] = true // taken out: its songs go at the next sync
-			} else {
-				q := syncQ
-				// held, or a playlist a held Entire Library takes in: as on the card
-				if held, own := v.held[k]; held || !own && v.libHeld {
-					q = e.Quality
-				}
-				if quality.Better(q, want) {
-					want = q
-				}
+				continue
+			}
+			q, re := syncQ, reencode
+			// held, or a playlist a held Entire Library takes in: as on the card
+			if held, own := v.held[k]; held || !own && v.libHeld {
+				q, re = e.Quality, true
+			}
+			// An original the Q2 can't play syncs as quality.Fallback, a lossy song under a transcode as
+			// it is (library.Quality), as the plan does per item.
+			if q = library.Quality(q, sg, re); quality.Better(q, want) {
+				want = q
 			}
 		}
-		// An original the Q2 can't play syncs as quality.Fallback (library.Quality): not a change, nor
-		// is one whose format isn't known here.
-		if want == "" || e.Quality == want || e.Quality == library.Quality(want, suffix[id]) {
+		// An original .m4a or .wma not fetched may be lossless (library.Lossy): not known here, so no change.
+		if want == "" || e.Quality == want || !known && (sg.Suffix == "m4a" || sg.Suffix == "wma") {
 			continue
 		}
 		for _, k := range e.Items {
@@ -119,7 +127,7 @@ func (v view) on(key string, ids map[string]bool) int {
 // is on the Q2 and it is not selected. total is Y when its songs were never fetched.
 func (v view) status(kind selection.Kind, id string, total int) string {
 	key := selection.Key(kind, id)
-	selected := v.sel.Has(kind, id)
+	_, selected := v.held[key]
 	songs, resolved := v.res[key]
 	x := 0
 	switch {
@@ -186,7 +194,7 @@ func (v view) song(s jellyfin.Song, listKey string, i int) q2spot.Row {
 	st := ""
 	if v.m.Songs[s.ID] != nil {
 		st = "On Q2"
-	} else if v.sel.Has(selection.KindSong, s.ID) {
+	} else if _, ok := v.held[selection.Key(selection.KindSong, s.ID)]; ok {
 		st = "Waiting to sync"
 	}
 	return q2spot.Row{Kind: "action", URI: "play", Title: s.Title, Subtitle: join(s.Artist, st),

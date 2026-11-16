@@ -323,7 +323,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.menu()
 	case "details":
 		return details(req.Arg(0))
-	case "settings", "storage", "defq", "streamq", "setdefq", "setstreamq", "cache", "clearcache", "keepfree", "swipe", "reportplays":
+	case "settings", "storage", "defq", "streamq", "setdefq", "setstreamq", "cache", "clearcache", "keepfree", "swipe", "reportplays", "reencode":
 		return d.settingsOp(req.Op, req.Arg(0))
 	case "sort", "sortby", "setsort", "sortorder", "setorder": // settings on the card: no server needed
 		return d.sortOp(req.Op, req.Arg(0))
@@ -666,6 +666,20 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 			return q2spot.Fail(q2spot.Error, settingNotSaved)
 		}
 		return q2spot.Reply{Message: "Streaming Quality: " + quality.Name(s.stream())}
+	case "reencode": // under an Opus Sync Quality, what a sync wants changes as Sync Quality's change does
+		if s.reencode() {
+			s.Reencode = ""
+		} else {
+			s.Reencode = "on"
+		}
+		if d.saveSettings(s) != nil {
+			return q2spot.Fail(q2spot.Error, settingNotSaved)
+		}
+		if quality.IsOriginal(s.def()) { // only streaming changes: a sync under way goes on
+			return q2spot.Reply{Message: reencodeRow(s).Title}
+		}
+		d.changed()
+		return q2spot.Reply{Message: reencodeRow(s).Title + d.restartSync(d.client())}
 	case "keepfree":
 		s.KeepFree = nextKeepFree(s.KeepFree)
 		if d.saveSettings(s) != nil {
@@ -702,6 +716,7 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 	case "storage": // Quality and Storage: what is synced, streamed and kept on the card
 		return q2spot.Reply{Rows: []q2spot.Row{list("defq", "Sync Quality: "+quality.Name(s.def()), "For every synced song", ""),
 			list("streamq", "Streaming Quality: "+quality.Name(s.stream()), "For songs streamed", ""),
+			reencodeRow(s),
 			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync stops before the card has less"},
 			act("cache", "Playback Cache: "+cacheName(s.PlaybackCache), ""),
 			{Kind: "action", URI: "clearcache", Title: "Clear Playback Cache", Subtitle: size(d.stream.cacheSize()) + " of played songs"}}}

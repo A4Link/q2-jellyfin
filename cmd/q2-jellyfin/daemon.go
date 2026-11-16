@@ -52,7 +52,13 @@ type settings struct {
 	Sort map[string]listSort `json:"sort,omitempty"`
 	// ReportPlays is Report Plays to Server (report.go): "off", or "" for on.
 	ReportPlays string `json:"reportPlays,omitempty"`
+	// Reencode is Always Re-encode (quality_ui.go): "on", or "" for off, when a lossy song stays as
+	// it is under an Opus quality.
+	Reencode string `json:"reencode,omitempty"`
 }
+
+// reencode is Always Re-encode: a lossy song is transcoded to the chosen Opus quality too.
+func (s settings) reencode() bool { return s.Reencode == "on" }
 
 // def is Sync Quality, every synced song's: Original (the server's file, no transcoding) unless
 // an Opus transcode is chosen.
@@ -196,6 +202,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 		d.caps, src{d}, d.manifest, syncer.Net, time.Second)
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
+	d.stream.reencode = func() bool { return d.settings().reencode() }
 	d.stream.cacheLimit = func() int64 { return cacheBytes(d.settings().PlaybackCache) }
 	d.stream.moving = d.runner.Moving
 	d.stream.started = d.streamStarted

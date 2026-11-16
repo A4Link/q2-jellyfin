@@ -247,6 +247,33 @@ func TestSyncQualitySameKeepsSync(t *testing.T) {
 	close(n.block)
 }
 
+// Always Re-encode under an Original Sync Quality changes no synced song, only streaming: a sync
+// under way goes on, its download kept. Under an Opus one it starts the sync again.
+func TestReencodeRestartsOnlyUnderOpus(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3, block: make(chan struct{})}
+	defer close(n.block)
+	d := runningSync(t, n)
+	d.mu.Lock()
+	gen := d.gen
+	d.mu.Unlock()
+	if m := d.do("reencode").Message; m != "Always Re-encode: On" {
+		t.Fatalf("toast %q", m)
+	}
+	d.bg.Wait()
+	d.mu.Lock()
+	again := d.gen
+	d.mu.Unlock()
+	if st := d.runner.Snapshot().State; st != "running" || again != gen {
+		t.Fatalf("state %s, gen %d -> %d", st, gen, again)
+	}
+	d.do("setdefq", "opus-128")
+	d.bg.Wait()
+	eventually(t, "the sync to run again", func() bool { return d.runner.Snapshot().State == "running" })
+	if m := d.do("reencode").Message; m != "Always Re-encode: Off · sync restarting" {
+		t.Fatalf("toast under Opus %q", m)
+	}
+}
+
 // Two changes of Sync Quality in a row mid-sync, the second while the first's preview is still at
 // work (the sync stopped): the sync runs again at the second.
 func TestSyncQualityChangedTwiceRestartsAtLast(t *testing.T) {

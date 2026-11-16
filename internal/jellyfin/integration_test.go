@@ -298,6 +298,23 @@ func TestLiveSongMetadata(t *testing.T) {
 	}
 }
 
+// Each song's codec comes from the server with the lists' fields: the lossy rule (library.Lossy)
+// tells AAC in an .m4a from ALAC by it.
+func TestLiveSongCodec(t *testing.T) {
+	s, proxy := live(t)
+	c := liveSignIn(t, s, proxy, s.User.Name, s.User.Password)
+	for name, want := range map[string]string{"Alpha": "flac/flac", "Delta": "mp3/mp3", "Zeta": "opus/opus", "Eta": "m4a/aac",
+		"Theta": "wv/wavpack"} {
+		sg, err := c.Song(context.Background(), s.Items[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sg.Suffix + "/" + sg.Codec; got != want {
+			t.Errorf("%s: %s, want %s", name, got, want)
+		}
+	}
+}
+
 // fetch reads a song's bytes through the client.
 func fetch(t *testing.T, c *Client, u string) []byte {
 	t.Helper()

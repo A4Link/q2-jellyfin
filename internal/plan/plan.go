@@ -60,8 +60,9 @@ func resized(e *library.Entry, w *Want) bool {
 
 // Compute diffs the selection (resolved: item key -> its songs; playlistNames: playlist item key
 // -> display name) against the manifest. Every item's songs are at syncQ (Sync Quality, "" for
-// Original), but a held item's, which stay at the quality on the card.
-func Compute(sel selection.Set, syncQ string, resolved map[string][]jellyfin.Song, playlistNames map[string]string,
+// Original), but a held item's, which stay at the quality on the card. reencode is Always
+// Re-encode: without it a lossy song stays as it is under a transcode (library.Quality).
+func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string][]jellyfin.Song, playlistNames map[string]string,
 	m *library.Manifest, root string, free int64) Plan {
 	wants := map[string]*Want{}
 	multi := map[string]bool{}
@@ -74,15 +75,15 @@ func Compute(sel selection.Set, syncQ string, resolved map[string][]jellyfin.Son
 			if s.Disc > 1 {
 				multi[s.AlbumID] = true
 			}
-			q := syncQ
+			q, re := syncQ, reencode
 			if it.Held { // only what is on the card, as it is
 				e := m.Songs[s.ID]
 				if e == nil {
 					continue
 				}
-				q = e.Quality
+				q, re = e.Quality, true
 			}
-			q = library.Quality(q, s.Suffix)
+			q = library.Quality(q, s, re)
 			w := wants[s.ID]
 			if w == nil {
 				w = &Want{Song: s, Quality: q}

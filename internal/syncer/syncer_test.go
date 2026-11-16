@@ -960,7 +960,7 @@ func TestCaseInsensitiveCard(t *testing.T) {
 	}
 	a, b, d := mk("a", "ABBA", ""), mk("b", "BEE", ""), mk("d", "CEE", "")
 	sel := selection.Set{Items: []selection.Item{{Kind: "song", ID: "a"}, {Kind: "song", ID: "b"}, {Kind: "song", ID: "d"}}}
-	p := plan.Compute(sel, "original", map[string][]jellyfin.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root, 1<<40)
+	p := plan.Compute(sel, "original", false, map[string][]jellyfin.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root, 1<<40)
 	if err := r.Start(p); err != nil {
 		t.Fatal(err)
 	}

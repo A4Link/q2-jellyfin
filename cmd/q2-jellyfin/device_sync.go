@@ -24,6 +24,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/plan"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
+	"github.com/A4Link/q2-jellyfin/internal/quality"
 	"github.com/A4Link/q2-jellyfin/internal/selection"
 	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
@@ -58,7 +59,8 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		if snap.Err != nil {
 			det = withErr(det, snap.Err)
 		}
-		return q2spot.Reply{Rows: append(d.syncSources(), info(msg), act("retry", "Retry", ""), act("check", "Check Again", ""),
+		rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(snap.Err)...)
+		return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), act("check", "Check Again", ""),
 			list("details", "Details", "", det))}
 	}
 	if _, err := d.selection(); err != nil {
@@ -139,6 +141,22 @@ func (d *daemon) stopMessage(err error) string {
 	return jellyfin.Message(err, d.hostName())
 }
 
+// downloadsHint is the way round a refused download, a row of its own under the message: under an
+// Opus Sync Quality only a song kept as it is (an MP3, AAC or Opus one) is downloaded, so Always
+// Re-encode syncs without the permission; under Original, an Opus one with it does.
+func (d *daemon) downloadsHint(err error) []q2spot.Row {
+	s := d.settings()
+	switch {
+	case !errors.Is(err, jellyfin.ErrDownloadsOff):
+		return nil
+	case quality.IsOriginal(s.def()):
+		return []q2spot.Row{info("Or choose an Opus Sync Quality and Always Re-encode")}
+	case !s.reencode():
+		return []q2spot.Row{info("Turn on Always Re-encode in Quality and Storage")}
+	}
+	return nil
+}
+
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
 // failure fails the preview: a missing item's songs would otherwise read as removed. ctx ends with
 // the preview (dropPreview).
@@ -209,7 +227,7 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 		}
 		// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts
 		// what the sync needs (cache.go).
-		pl = plan.Compute(sel, d.settings().def(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
+		pl = plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
 		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
@@ -320,7 +338,7 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		case errors.Is(s.Err, syncer.ErrCardFull):
 			rows = append(rows, info("The card is full"))
 		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
-			rows = append(rows, info(jellyfin.Message(s.Err, d.hostName()))) // with code 50 (R39) too
+			rows = append(append(rows, info(jellyfin.Message(s.Err, d.hostName()))), d.downloadsHint(s.Err)...) // with code 50 (R39) too
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {
