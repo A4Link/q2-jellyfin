@@ -109,6 +109,7 @@ type Runner struct {
 
 	mu                    sync.Mutex
 	plan                  *plan.Plan
+	moving                map[string]bool // the songs plan renames, replaces or removes, for Moving
 	state, stopAs         string
 	ending                bool // a run is done, and its OnDone hasn't returned yet
 	err                   error
@@ -186,6 +187,16 @@ func (r *Runner) launch() {
 	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
 	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
 		r.bytesTotal += w.Bytes
+	}
+	r.moving = map[string]bool{}
+	for _, mv := range p.Rename {
+		r.moving[mv.ID] = true
+	}
+	for _, w := range p.Replace {
+		r.moving[w.Song.ID] = true
+	}
+	for _, e := range p.Remove {
+		r.moving[e.ID] = true
 	}
 	go r.run(ctx, p, r.done)
 }
@@ -348,7 +359,7 @@ func (r *Runner) Resume() {
 func (r *Runner) Cancel() {
 	r.stop("idle")
 	r.mu.Lock()
-	r.state, r.err, r.plan, r.current = "idle", nil, nil, ""
+	r.state, r.err, r.plan, r.moving, r.current = "idle", nil, nil, nil, ""
 	part := r.part
 	r.part = ""
 	r.mu.Unlock()
@@ -404,28 +415,13 @@ func (r *Runner) DropMissing() error {
 }
 
 // Moving reports whether the plan a sync runs, or holds paused, renames, replaces or removes song
-// id: the streamer then fetches the song rather than queue a path that is about to go (M24).
+// id: the streamer then fetches the song rather than queue a path that is about to go (M24). A
+// lookup in a set made once a launch: a synced list starting calls it for each of its songs, and a
+// Sync Quality change can replace every song on the card (audit 2026-11-16 #24).
 func (r *Runner) Moving(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if p := r.plan; p != nil && (r.state == "running" || r.state == "paused") {
-		for _, mv := range p.Rename {
-			if mv.ID == id {
-				return true
-			}
-		}
-		for _, w := range p.Replace {
-			if w.Song.ID == id {
-				return true
-			}
-		}
-		for _, e := range p.Remove {
-			if e.ID == id {
-				return true
-			}
-		}
-	}
-	return false
+	return (r.state == "running" || r.state == "paused") && r.moving[id]
 }
 
 // Busy is whether a sync runs, or has just ended and its OnDone hasn't returned (I15).

@@ -1492,6 +1492,11 @@ func TestMoving(t *testing.T) {
 	if r.Moving("d") {
 		t.Error("moving after Cancel")
 	}
+	r.Start(plan.Plan{Add: []plan.Want{a}, Remove: []*library.Entry{{ID: "e"}}}) // the next plan's, not the last's
+	if !r.Moving("e") || r.Moving("b") || r.Moving("d") {
+		t.Errorf("next plan: e %v, b %v, d %v", r.Moving("e"), r.Moving("b"), r.Moving("d"))
+	}
+	r.Cancel()
 }
 
 // The runner is Busy until OnDone has returned, so the app never exits between a sync's end and
