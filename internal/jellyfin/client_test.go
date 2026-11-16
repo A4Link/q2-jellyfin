@@ -580,6 +580,73 @@ func TestArtistAlbumsPaged(t *testing.T) {
 	}
 }
 
+// A server that ignores startIndex (or a proxy that caches without the query) sends the same page
+// for ever under a huge total. The lists stop at the repeat, not at the caller's time limit
+// (audit 2026-11-16 #23).
+func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
+	page := func(item string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var items []string
+			for i := 0; i < 500; i++ {
+				items = append(items, fmt.Sprintf(item, i))
+			}
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2000000000,"StartIndex":0}`, strings.Join(items, ","))
+		}
+	}
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items":                page(`{"Id":"s%d","Type":"Audio"}`),
+		"/Artists/AlbumArtists": page(`{"Id":"ar%d","Name":"Artist","Type":"MusicArtist"}`),
+	})
+	c := signedIn(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.AllSongs(ctx); !errors.Is(err, ErrChanged) {
+		t.Fatalf("songs: %v", err)
+	}
+	if _, err := c.Artists(ctx, "name", false); !errors.Is(err, ErrChanged) {
+		t.Fatalf("artists: %v", err)
+	}
+}
+
+// Albums' later windows (Albums, More…) from a server that ignores startIndex would show page one
+// again: they fail instead.
+func TestAlbumsPageStartsWhereAsked(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"al0","Name":"First","Type":"MusicAlbum"}],"TotalRecordCount":100,"StartIndex":0}`))
+		},
+	})
+	c := signedIn(t, srv)
+	if al, err := c.Albums(context.Background(), 0, 25, "name", false); err != nil || len(al) != 1 {
+		t.Fatalf("page one: %+v %v", al, err)
+	}
+	if al, err := c.Albums(context.Background(), 50, 25, "name", false); !errors.Is(err, ErrChanged) {
+		t.Fatalf("page one again: %+v %v", al, err)
+	}
+}
+
+// A playlist of one song added 1000 times starts both pages with that song, and Jellyfin 12.4 gives
+// every entry of it the same PlaylistItemId (checked on the test server): pages that start where
+// they were asked are not taken for a repeated page.
+func TestPlaylistOfOneSongPaged(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"pl1","Name":"Mix","Type":"Playlist","MediaType":"Audio"}`))
+		},
+		"/Playlists/pl1/Items": func(w http.ResponseWriter, r *http.Request) {
+			start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+			var items []string
+			for i := start; i < min(start+500, 1000); i++ {
+				items = append(items, `{"Id":"s1","PlaylistItemId":"s1","Type":"Audio","Path":"/music/A/1.flac"}`)
+			}
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1000,"StartIndex":%d}`, strings.Join(items, ","), start)
+		},
+	})
+	if _, ss, err := signedIn(t, srv).Playlist(context.Background(), "pl1"); err != nil || len(ss) != 1000 {
+		t.Fatalf("%d songs, %v", len(ss), err)
+	}
+}
+
 func TestGetResumesWithRange(t *testing.T) {
 	var rg string
 	_, srv := newFake(t, map[string]http.HandlerFunc{

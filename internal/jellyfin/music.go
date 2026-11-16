@@ -185,6 +185,9 @@ func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, 
 			if total >= 0 && r.TotalRecordCount != total {
 				return nil, ErrChanged // items shifted between pages: one may have been skipped
 			}
+			if !r.startsAt(start) {
+				return nil, ErrChanged
+			}
 			total = r.TotalRecordCount
 			fresh := r.Items[:0]
 			for _, w := range r.Items {
@@ -249,6 +252,9 @@ func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int)
 		r, err := c.items(ctx, lq)
 		if err != nil {
 			return nil, err
+		}
+		if !r.startsAt(skip) {
+			return nil, ErrChanged
 		}
 		out = append(out, r.Items...)
 		skip = 0

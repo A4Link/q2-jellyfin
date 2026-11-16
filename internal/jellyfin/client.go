@@ -663,6 +663,9 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		if total >= 0 && r.TotalRecordCount != total {
 			return 0, ErrChanged // items shifted between pages: one may have been skipped
 		}
+		if !r.startsAt(start) {
+			return 0, ErrChanged
+		}
 		total = r.TotalRecordCount
 		for _, w := range r.Items {
 			f(w)
