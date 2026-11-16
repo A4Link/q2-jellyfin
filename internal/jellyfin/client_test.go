@@ -117,6 +117,22 @@ func TestSignInWrongPassword(t *testing.T) {
 	}
 }
 
+// A token the server no longer takes (the Q2 revoked under Dashboard → Devices), or a library the
+// account lost, says where to sign in again, not "Wrong username or password": no password was typed.
+func TestRevokedTokenSaysSignInAgain(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusForbidden) },
+	})
+	revoked, _ := New(Creds{Server: srv.URL, User: "u", Token: "old", UserID: "u1", DeviceID: "dev"}, srv.Client())
+	err1 := revoked.Ping(context.Background())
+	_, err2 := signedIn(t, srv).Playlists(context.Background(), "name", false)
+	for _, err := range []error{err1, err2} {
+		if !errors.Is(err, ErrAuth) || Message(err, "h") != "Server refused this Q2. Sign in again: Settings → Account → Sign Out" {
+			t.Fatalf("%v / %q", err, Message(err, "h"))
+		}
+	}
+}
+
 // A server that isn't Jellyfin is refused before the password is sent.
 func TestSignInRefusesOtherServer(t *testing.T) {
 	f, srv := newFake(t, map[string]http.HandlerFunc{
@@ -618,6 +634,19 @@ func TestQuickConnectExpired(t *testing.T) {
 	c, _ := New(Creds{Server: srv.URL}, srv.Client())
 	_, err := c.QuickConnectPoll(context.Background(), "old")
 	if !errors.Is(err, ErrQuickConnectExpired) || errors.Is(err, ErrUnreachable) || Message(err, "h") != "The Quick Connect code expired. Try again" {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
+// A code that expires between the poll that saw it approved and the swap for a token says so, not
+// where a signed-in Q2 signs in again (it isn't signed in).
+func TestQuickConnectSignInExpired(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/AuthenticateWithQuickConnect": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusUnauthorized) },
+	})
+	c, _ := New(Creds{Server: srv.URL}, srv.Client())
+	_, err := c.QuickConnectSignIn(context.Background(), "old")
+	if !errors.Is(err, ErrQuickConnectExpired) || Message(err, "h") != "The Quick Connect code expired. Try again" {
 		t.Fatalf("%v / %q", err, Message(err, "h"))
 	}
 }

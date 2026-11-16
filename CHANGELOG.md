@@ -11,6 +11,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **A revoked or expired sign-in no longer says *Wrong username or password*** when no password was typed (the Q2 revoked under Dashboard → Devices, the server rebuilt, or a library the account lost): pages, the Sync page and Settings now say *Server refused this Q2. Sign in again: Settings → Account → Sign Out*. A wrong password typed at sign-in still says *Wrong username or password*.
 
 ## [0.7.0] - 2026-11-12
 
