@@ -2164,6 +2164,35 @@ func TestPreviewAfterHeart(t *testing.T) {
 	}
 }
 
+// A heart the server didn't take changed nothing there, so the Sync preview stays; one it took
+// makes the next Sync open preview again (Favourites in Sync).
+func TestPreviewAfterHeartSent(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3, favs: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", favKey)
+	same := func() bool {
+		d.mu.Lock()
+		p := d.daemon.preview
+		d.mu.Unlock()
+		d.preview(t)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.daemon.preview == p
+	}
+	d.preview(t)
+	d.rep.box.add(report{Kind: favKind, Item: "al0.0", On: true})
+	n.favStatus.Store(503)
+	d.sendNow(t)
+	if !same() {
+		t.Error("a heart that failed to send previewed again")
+	}
+	n.favStatus.Store(0)
+	d.sendNow(t)
+	if len(d.outbox()) != 0 || same() {
+		t.Errorf("a heart sent: outbox %+v, preview kept", d.outbox())
+	}
+}
+
 // Sign Out and Check Again cancel a preview still fetching (M11).
 func TestPreviewCancelled(t *testing.T) {
 	for _, op := range []string{"signout", "check"} {
