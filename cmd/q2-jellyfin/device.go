@@ -256,7 +256,7 @@ func (d *daemon) noWiFi(action bool) (r q2spot.Reply, ok bool) {
 	case !off && since < wifiWait:
 		r = q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Connecting to Wi-Fi…")}}
 	case off:
-		r = q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Network Disconnected"), info("Turn on Wi-Fi in Settings")}}
+		r = q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Network Disconnected"), info("Turn on Wi-Fi in System settings")}}
 	default: // the switch is on: no network in reach, or it won't connect
 		r = q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Network Disconnected"), info("No Wi-Fi network in reach")}}
 	}

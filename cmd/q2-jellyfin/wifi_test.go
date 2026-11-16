@@ -54,7 +54,7 @@ func TestWiFiSwitchedOff(t *testing.T) {
 	d.localIP = func() string { return "" }
 	off := true
 	d.wifiOff = func() bool { return off }
-	if r := d.do("menu"); r.Message != "refresh" || strings.Join(titles(r), "|") != "Network Disconnected|Turn on Wi-Fi in Settings|Settings" {
+	if r := d.do("menu"); r.Message != "refresh" || strings.Join(titles(r), "|") != "Network Disconnected|Turn on Wi-Fi in System settings|Settings" {
 		t.Fatalf("root %q %q", r.Message, titles(r))
 	}
 	if r := d.do("play", "album:al0 0"); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
