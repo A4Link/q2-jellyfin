@@ -1494,6 +1494,31 @@ func TestPausedRefusedSaysWhy(t *testing.T) {
 	}
 }
 
+// An artist in Sync fetches each album's songs, not each album again: the artist's album list has
+// them already (audit 2026-11-16 #15). Songs keep the albums' order, and a compilation's songs
+// still take the album's artist (M41).
+func TestArtistSongsOneRequestPerAlbum(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2, various: true}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "artist:ar1")
+	n.reqs.Store(0)
+	d.preview(t)
+	if a, all := n.albumReqs.Load(), n.reqs.Load(); a != 0 || all != 4 {
+		t.Fatalf("%d album requests, %d in all", a, all)
+	}
+	d.mu.Lock()
+	songs := d.resolved["artist:ar1"]
+	d.mu.Unlock()
+	var got []string
+	for _, s := range songs {
+		got = append(got, s.ID+" "+s.AlbumArtist)
+	}
+	want := "al0.0 Various Artists,al0.1 Various Artists,al1.0 Various Artists,al1.1 Various Artists"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("%q", got)
+	}
+}
+
 // On a server without OpenSubsonic's displayAlbumArtist, a compilation's songs take the album's
 // artist, so it syncs as one folder, not one per track artist (M41).
 func TestCompilationOneFolder(t *testing.T) {
