@@ -911,7 +911,7 @@ func (j *job) removals() error {
 const (
 	saveEvery   = 20              // downloads recorded per manifest save (M18) ...
 	saveAfter   = 3 * time.Minute // ... or this long since the last (audit B7: fewer big card writes)
-	removeBatch = 100             // removals dropped from the manifest per save
+	removeBatch = 1000            // removals per manifest save: a crash forgets at most this many files (I4)
 	renameBatch = 1000            // renames per manifest save: Entry.Moving makes any batch crash-safe
 )
 
