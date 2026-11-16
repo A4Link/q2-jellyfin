@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -113,7 +114,7 @@ func (s *streamer) take(c, path string) bool {
 // server since (a re-rip) is downloaded again. The cache's size setting doesn't matter: a cached
 // song is used whether or not the cache is still on.
 func (s *streamer) forSync(w plan.Want) (int64, bool) {
-	c, n := s.syncCopy(w)
+	c, n := s.syncCopy(w, os.Stat)
 	if n == 0 || !s.take(c, w.Path) {
 		return 0, false
 	}
@@ -121,10 +122,10 @@ func (s *streamer) forSync(w plan.Want) (int64, bool) {
 }
 
 // syncCopy is where w's song would be in the cache, and its size when it is there as the sync wants
-// it (forSync); 0 when it isn't.
-func (s *streamer) syncCopy(w plan.Want) (string, int64) {
+// it (forSync); 0 when it isn't. stat looks the file up.
+func (s *streamer) syncCopy(w plan.Want, stat func(string) (fs.FileInfo, error)) (string, int64) {
 	c := s.cachePath(cacheKey{w.Song.ID, w.Quality, strings.TrimPrefix(filepath.Ext(w.Path), ".")})
-	fi, err := os.Stat(c)
+	fi, err := stat(c)
 	if err != nil || fi.Size() == 0 || quality.IsOriginal(w.Quality) && fi.Size() != w.Song.Size {
 		return c, 0
 	}
@@ -243,11 +244,24 @@ func (s *streamer) keepForSync(keep map[string]bool) {
 }
 
 // cachedFor is the cached files a sync of ws will take (forSync), and the bytes the plan counted
-// for those songs: a rename on the card, they need no room.
+// for those songs: a rename on the card, they need no room. The cache folder is read once: a Stat
+// per song scans the FAT folder for each, most of them for a name that isn't there, and a first
+// sync can plan 20,000 (audit 2026-11-16 #26).
 func (s *streamer) cachedFor(ws []plan.Want) (map[string]bool, int64) {
+	ents, _ := os.ReadDir(s.cacheDir())
+	in := map[string]fs.DirEntry{}
+	for _, e := range ents {
+		in[e.Name()] = e
+	}
+	stat := func(c string) (fs.FileInfo, error) {
+		if e := in[filepath.Base(c)]; e != nil {
+			return e.Info()
+		}
+		return nil, fs.ErrNotExist
+	}
 	keep, n := map[string]bool{}, int64(0)
 	for _, w := range ws {
-		if c, size := s.syncCopy(w); size > 0 {
+		if c, size := s.syncCopy(w, stat); size > 0 {
 			keep[c] = true
 			n += w.Bytes
 		}
