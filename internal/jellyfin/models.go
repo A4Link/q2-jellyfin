@@ -47,6 +47,7 @@ const artistFields = "ItemCounts"
 // wireItem is Jellyfin's BaseItemDto, only the fields this app reads.
 type wireItem struct {
 	ID                   string            `json:"Id"`
+	PlaylistItemID       string            `json:"PlaylistItemId"` // a playlist entry's own id: a song can be in it twice
 	Name                 string            `json:"Name"`
 	Type                 string            `json:"Type"`
 	CollectionType       string            `json:"CollectionType"` // a library view's ("music", "movies", …)

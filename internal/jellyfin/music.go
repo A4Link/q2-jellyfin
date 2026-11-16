@@ -159,13 +159,16 @@ func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, 
 				return nil, ErrChanged // items shifted between pages: one may have been skipped
 			}
 			total = r.TotalRecordCount
-			fresh := r.Items[:0]
+			fresh, had := r.Items[:0], len(got)
 			for _, w := range r.Items {
 				got[w.ID] = true
 				if !seen[w.ID] {
 					seen[w.ID] = true
 					fresh = append(fresh, w)
 				}
+			}
+			if len(r.Items) > 0 && len(got) == had {
+				return nil, ErrChanged // no new song: a server that ignores startIndex would loop
 			}
 			out = append(out, songs(fresh)...)
 			if len(r.Items) < page || start+len(r.Items) >= r.TotalRecordCount {
