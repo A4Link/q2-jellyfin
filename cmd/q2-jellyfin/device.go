@@ -15,6 +15,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/quality"
 	"github.com/A4Link/q2-jellyfin/internal/selection"
+	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
 
 // The Q2's Jellyfin page over Q2SPOT/1 (q2-pod patch/addon.c draws it). A list row's URI is the op it
@@ -529,7 +530,9 @@ func (d *daemon) menu() q2spot.Reply {
 	return q2spot.Reply{Message: "refresh", Rows: append(append(append(rows, d.streamErrRows()...), d.favRows()...), d.fileRows()...)}
 }
 
-// streamErrRows are a stream's failure and its Details, when one stopped or skipped a song.
+// streamErrRows are a stream's failure and its Details, when one stopped or skipped a song. A stop
+// says why as the Sync page does (stopMessage); the server lost mid-song, a body cut short too, is
+// said as a sync says it (syncer.StopReason), never as the card's records.
 func (d *daemon) streamErrRows() []q2spot.Row {
 	e := d.stream.Err()
 	if e == nil {
@@ -540,7 +543,15 @@ func (d *daemon) streamErrRows() []q2spot.Row {
 	if errors.As(e, &ae) {
 		op, h, code = ae.Op, ae.HTTP, ae.Code
 	}
-	return []q2spot.Row{info(e.Error()), list("details", "Details", "", detailsCtx(op, h, code, e.at, e.id))}
+	msg := e.Error()
+	if !e.skipped { // a skip says why already
+		why := e.err
+		if r := syncer.StopReason(why); errors.Is(r, syncer.ErrOffline) {
+			why = r
+		}
+		msg += ": " + d.stopMessage(why)
+	}
+	return []q2spot.Row{info(msg), list("details", "Details", "", withErr(detailsCtx(op, h, code, e.at, e.id), e.err))}
 }
 
 func (d *daemon) syncSubtitle(cl *jellyfin.Client) string {
