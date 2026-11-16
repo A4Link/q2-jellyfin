@@ -1010,7 +1010,7 @@ func TestRenameCutAfterTargetsSaved(t *testing.T) {
 		"m": {ID: "m", Path: from("m"), Moving: to("m"), Quality: "original", Size: 1},
 		"n": {ID: "n", Path: from("n"), Moving: to("n"), Quality: "original", Size: 1},
 	}}).Save(root, root+"/.jellyfin/manifest.json")
-	if err := r.DropMissing(); err != nil {
+	if err := r.DropMissing(manifest(t, root)); err != nil {
 		t.Fatal(err)
 	}
 	if m := manifest(t, root); m.Songs["m"] == nil || m.Songs["n"] == nil {
@@ -1029,6 +1029,20 @@ func TestRenameCutAfterTargetsSaved(t *testing.T) {
 		if n, _ := f.seen(id); n != 0 {
 			t.Errorf("%s downloaded", id)
 		}
+	}
+}
+
+// DropMissing checks the manifest it is given, the one the preview reads, not a second copy read
+// again from the card (audit 18): with every song still there, the file on the card isn't parsed.
+func TestDropMissingTakesManifest(t *testing.T) {
+	_, r, root := setup(t)
+	p := root + "/Jellyfin/A/x/k.flac"
+	put(t, p, "k")
+	m := &library.Manifest{Songs: map[string]*library.Entry{"k": {ID: "k", Path: p, Quality: "original", Size: 1}}}
+	os.MkdirAll(root+"/.jellyfin", 0o755)
+	os.WriteFile(root+"/.jellyfin/manifest.json", []byte("{"), 0o644) // a parse would fail
+	if err := r.DropMissing(m); err != nil {
+		t.Fatal(err)
 	}
 }
 

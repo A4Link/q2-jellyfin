@@ -216,13 +216,15 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 	if err == nil {
 		err = werr
 	}
-	if _, merr := d.manifestErr(); err == nil { // Sync Favourites and a hold start one with no Sync page to stop it
+	man, merr := d.manifestErr()
+	if err == nil { // Sync Favourites and a hold start one with no Sync page to stop it
 		err = merr
 	}
 	var pl plan.Plan
 	if err == nil {
-		// Songs deleted from the card are planned again, not taken as there (I9).
-		if derr := d.runner.DropMissing(); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
+		// Songs deleted from the card are planned again, not taken as there (I9). The plan reads
+		// the manifest again below: DropMissing may have changed it.
+		if derr := d.runner.DropMissing(man); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
 			d.log.Printf("sync: %v", derr)
 		}
 		// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts

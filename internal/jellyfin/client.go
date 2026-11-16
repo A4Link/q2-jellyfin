@@ -437,7 +437,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 	if err != nil {
 		return Playlist{}, nil, err
 	}
-	s, err := c.music(ctx)
+	s, err := c.musicFolders(ctx)
 	if err != nil {
 		return Playlist{}, nil, err
 	}
@@ -512,16 +512,26 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 	if err != nil {
 		return Album{}, nil, err
 	}
-	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}})
+	s, err := c.AlbumSongs(ctx, id)
 	if err != nil {
 		return Album{}, nil, err
 	}
 	a := w.album()
 	if a.SongCount == 0 {
-		a.SongCount = len(r.Items)
+		a.SongCount = len(s)
 	}
-	return a, songs(r.Items), nil
+	return a, s, nil
+}
+
+// AlbumSongs is Album's songs without the album: one request, for a caller that has the album
+// from a list already (an artist's albums).
+func (c *Client) AlbumSongs(ctx context.Context, id string) ([]Song, error) {
+	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
+		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}})
+	if err != nil {
+		return nil, err
+	}
+	return songs(r.Items), nil
 }
 
 // Artists lists album artists, as Jellyfin's music library does.
@@ -600,31 +610,36 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 	return a, albums(als), nil
 }
 
-// Search finds up to 50 of each kind starting at offset.
-func (c *Client) Search(ctx context.Context, q string, offset int) ([]Artist, []Album, []Song, error) {
+// Search finds up to 50 albums and 50 songs starting at offset; SearchArtists finds the artists.
+func (c *Client) Search(ctx context.Context, q string, offset int) ([]Album, []Song, error) {
 	page := func(kind string) ([]wireItem, error) { // offset and limit per music library
 		var out []wireItem
 		err := c.eachMusic(ctx, "/Items", url.Values{"searchTerm": {q}, "includeItemTypes": {kind}, "recursive": {"true"},
 			"startIndex": {strconv.Itoa(offset)}, "limit": {"50"}}, func(w wireItem) { out = append(out, w) })
 		return out, err
 	}
-	// Artists through /Artists/AlbumArtists: artist items belong to the whole server, and /Items
-	// ignores parentId for them (a mixed library's "Memo Person" came back); this one honours it.
+	al, err := page("MusicAlbum")
+	if err != nil {
+		return nil, nil, err
+	}
+	so, err := page("Audio")
+	if err != nil {
+		return nil, nil, err
+	}
+	return albums(al), songs(so), nil
+}
+
+// SearchArtists finds up to 50 album artists starting at offset, through /Artists/AlbumArtists:
+// artist items belong to the whole server, and /Items ignores parentId for them (a mixed library's
+// "Memo Person" came back); this one honours it.
+func (c *Client) SearchArtists(ctx context.Context, q string, offset int) ([]Artist, error) {
 	var ar []wireItem
 	err := c.eachMusic(ctx, "/Artists/AlbumArtists", url.Values{"searchTerm": {q}, "startIndex": {strconv.Itoa(offset)},
 		"limit": {"50"}, "fields": {artistFields}}, func(w wireItem) { ar = append(ar, w) })
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	al, err := page("MusicAlbum")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	so, err := page("Audio")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return artists(ar), albums(al), songs(so), nil
+	return artists(ar), nil
 }
 
 // listPage is how many items one request of a long list asks for: a whole big playlist or every
@@ -648,6 +663,9 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		if total >= 0 && r.TotalRecordCount != total {
 			return 0, ErrChanged // items shifted between pages: one may have been skipped
 		}
+		if !r.startsAt(start) {
+			return 0, ErrChanged
+		}
 		total = r.TotalRecordCount
 		for _, w := range r.Items {
 			f(w)
@@ -670,7 +688,7 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	if err != nil {
 		return Song{}, err
 	}
-	if s, err := c.music(ctx); err != nil {
+	if s, err := c.musicFolders(ctx); err != nil {
 		return Song{}, err
 	} else if !s.inMusic(w) {
 		return Song{}, &APIError{Op: "Items", HTTP: 404, Code: CodeGone, Msg: "Not in a music library"}

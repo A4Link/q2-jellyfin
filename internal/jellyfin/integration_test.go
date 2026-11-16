@@ -241,7 +241,7 @@ func TestLiveMusicOnly(t *testing.T) {
 			t.Errorf("%s: %d albums", a.Name, a.AlbumCount)
 		}
 	}
-	if ars, _, _, err := c.Search(ctx, "Test Artist", 0); err != nil || len(ars) != 1 || ars[0].AlbumCount != 1 {
+	if ars, err := c.SearchArtists(ctx, "Test Artist", 0); err != nil || len(ars) != 1 || ars[0].AlbumCount != 1 {
 		t.Errorf("search Test Artist: %+v %v", ars, err)
 	}
 	fav, err := c.Favorites(ctx)
@@ -249,8 +249,9 @@ func TestLiveMusicOnly(t *testing.T) {
 		t.Errorf("favourites %q %v", got, err)
 	}
 	for _, term := range []string{"Memo", "Test Book", "Test Movie"} {
-		ars, als, ss, err := c.Search(ctx, term, 0)
-		if err != nil || len(ss) != 0 || len(als) != 0 || len(ars) != 0 {
+		als, ss, err := c.Search(ctx, term, 0)
+		ars, aerr := c.SearchArtists(ctx, term, 0)
+		if err = errors.Join(err, aerr); err != nil || len(ss) != 0 || len(als) != 0 || len(ars) != 0 {
 			t.Errorf("search %q: artists %d albums %d songs %v %v", term, len(ars), len(als),
 				names(ss, func(x Song) string { return x.Title }), err)
 		}
@@ -518,7 +519,7 @@ func TestLiveFavorite(t *testing.T) {
 	if err != nil || !slices.ContainsFunc(al, func(x Song) bool { return x.ID == id && x.Favorite }) {
 		t.Fatalf("album %+v %v", al, err)
 	}
-	_, _, found, err := c.Search(ctx, "Beta", 0)
+	_, found, err := c.Search(ctx, "Beta", 0)
 	if err != nil || !slices.ContainsFunc(found, func(x Song) bool { return x.ID == id && x.Favorite }) {
 		t.Fatalf("search %+v %v", found, err)
 	}

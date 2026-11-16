@@ -11,6 +11,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/library"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
+	"github.com/A4Link/q2-jellyfin/internal/selection"
 )
 
 // Hearts (U30; Q2 Pod's "fav", docs/librespot.md Hearts): Now Playing's heart marks a song a
@@ -184,10 +185,16 @@ func (d *daemon) hearts() map[string]bool {
 	return m
 }
 
-// favsChanged forgets the Favourites list kept since it was fetched: it is fetched again.
+// favsChanged forgets the Favourites list kept since it was fetched: it is fetched again. With
+// Favourites in Sync, the Sync preview is computed again too (gen), so an un-hearted song leaves at
+// the next sync; not for Entire Library alone, which would ask the server for every song again.
 func (d *daemon) favsChanged() {
+	sel, _ := d.selection()
 	d.mu.Lock()
 	delete(d.resolved, favKey)
+	if sel.Has(selection.KindFavorites, "all") {
+		d.gen++
+	}
 	d.mu.Unlock()
 	c := &d.lists
 	c.mu.Lock()
