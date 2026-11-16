@@ -158,8 +158,12 @@ func TestSectionsStreamErrorInSettings(t *testing.T) {
 	d.do("menu") // the firmware shows sections
 	d.do("play", "album:al0 0")
 	var r q2spot.Reply
-	eventually(t, "the stream error", func() bool { r = d.do("settings"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
-	if r.Rows[0].Title != "Couldn't stream Song 0" || r.Rows[1].Title != "Details" || r.Rows[2].Title != "Sync" {
+	const want = "Couldn't stream Song 0: Not found on the server" // as the main list says it without sections
+	eventually(t, "the stream error", func() bool { r = d.do("settings"); _, ok := find(r, want); return ok })
+	if r.Rows[0].Title != want || r.Rows[1].Title != "Details" || r.Rows[2].Title != "Sync" {
 		t.Fatalf("%q", titles(r))
+	}
+	if got := strings.Join(titles(d.do(r.Rows[1].URI, r.Rows[1].Context)), "|"); !strings.Contains(got, "Error: stream: http 404 code 70") {
+		t.Errorf("details %q", got)
 	}
 }

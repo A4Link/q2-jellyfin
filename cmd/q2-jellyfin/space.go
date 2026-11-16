@@ -62,7 +62,7 @@ func nextKeepFree(v string) string {
 func (d *daemon) syncSources() []q2spot.Row {
 	sel, err := d.selection()
 	fav := q2spot.Row{Kind: "action", URI: "syncfav", Title: "Sync Favourites", Subtitle: "Add your favourites to Sync and start"}
-	if sel.Has(selection.KindFavorites, "all") || sel.Has(selection.KindLibrary, "all") {
+	if sel.Has(selection.KindFavorites, "all") {
 		fav.Subtitle = "In Sync · press to sync now"
 	}
 	n := 0
@@ -87,7 +87,7 @@ func (d *daemon) syncFavourites(ctx context.Context, cl *jellyfin.Client) q2spot
 		return q2spot.Fail(q2spot.Error, selDamaged)
 	}
 	msg := "Syncing Favourites"
-	if !sel.Has(selection.KindFavorites, "all") && !sel.Has(selection.KindLibrary, "all") {
+	if !sel.Has(selection.KindFavorites, "all") { // Entire Library has its songs, not its playlist
 		r := d.toggle(ctx, cl, favKey)
 		if r.Status != "" && r.Status != q2spot.OK {
 			return r

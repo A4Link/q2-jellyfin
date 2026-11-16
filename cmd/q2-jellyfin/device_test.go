@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -62,6 +64,7 @@ type nav struct {
 	holdArtists      chan struct{} // artist list requests wait for it
 	songArt          bool          // songs carry their album's cover (AlbumPrimaryImageTag)
 	coverStatus      int           // covers answer this HTTP status instead
+	coverSize        int           // covers are this many bytes
 	albumLists       atomic.Int32  // album list requests served (Albums, Newly Added)
 	rawStatus        atomic.Int32  // when set, every request answers this HTTP status (a proxy's 502)
 	pings            atomic.Int32  // /Users/Me requests served
@@ -270,6 +273,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
+		if n.coverSize != 0 {
+			w.Write(make([]byte, n.coverSize))
+			return
+		}
 		w.Write([]byte("ÿØjpeg " + p + " " + q.Get("fillWidth")))
 	case p == "/System/Info/Public":
 		ok(map[string]any{"ProductName": "Jellyfin Server", "Version": "10.10.7"})
@@ -1098,6 +1105,7 @@ func TestControlOpsReplyFast(t *testing.T) {
 	timed("pause")
 	timed("resume")
 	timed("cancel")
+	d.do("signout") // the first press only asks
 	timed("signout")
 	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
 }
@@ -1402,7 +1410,7 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 	t.Cleanup(func() { close(n.block) })
 	d.playMu.Lock() // a previous start still running
 	d.do("play", "album:al1 0")
-	d.do("signout")
+	pressSignOut(d)
 	time.Sleep(50 * time.Millisecond) // let an unguarded stop run first, as in the race
 	d.playMu.Unlock()
 	time.Sleep(300 * time.Millisecond)
@@ -1486,6 +1494,31 @@ func TestPausedRefusedSaysWhy(t *testing.T) {
 	want := jellyfin.Message(err, d.hostName())
 	if r := d.syncRows(syncer.Snapshot{State: "paused", Err: err}); !strings.Contains(strings.Join(titles(r), "|"), "|"+want+"|Resume") {
 		t.Errorf("want %q: %q", want, titles(r))
+	}
+}
+
+// An artist in Sync fetches each album's songs, not each album again: the artist's album list has
+// them already (audit 2026-11-16 #15). Songs keep the albums' order, and a compilation's songs
+// still take the album's artist (M41).
+func TestArtistSongsOneRequestPerAlbum(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2, various: true}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "artist:ar1")
+	n.reqs.Store(0)
+	d.preview(t)
+	if a, all := n.albumReqs.Load(), n.reqs.Load(); a != 0 || all != 4 {
+		t.Fatalf("%d album requests, %d in all", a, all)
+	}
+	d.mu.Lock()
+	songs := d.resolved["artist:ar1"]
+	d.mu.Unlock()
+	var got []string
+	for _, s := range songs {
+		got = append(got, s.ID+" "+s.AlbumArtist)
+	}
+	want := "al0.0 Various Artists,al0.1 Various Artists,al1.0 Various Artists,al1.1 Various Artists"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("%q", got)
 	}
 }
 
@@ -1689,18 +1722,45 @@ func TestRootStreamErrorLast(t *testing.T) {
 	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	d.do("play", "album:al0 0")
 	var r q2spot.Reply
-	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
+	const want = "Couldn't stream Song 0: Not found on the server"
+	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, want); return ok })
 	if r.Rows[0].Title != "Newly Added" {
 		t.Fatalf("first row %q", titles(r))
 	}
 	det := r.Rows[len(r.Rows)-1]
-	if r.Rows[len(r.Rows)-2].Title != "Couldn't stream Song 0" || det.Title != "Details" {
+	if r.Rows[len(r.Rows)-2].Title != want || det.Title != "Details" {
 		t.Fatalf("rows %q", titles(r))
 	}
 	got := strings.Join(titles(d.do(det.URI, det.Context)), "|")
-	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0"} {
+	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0", "Error: stream: http 404 code 70"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("details %q lack %q", got, w)
+		}
+	}
+}
+
+// A stream's failure says why, as the Sync page does: the server lost mid-song (a body cut short
+// too) by its host, a full card in words, never Go's text; its Details carry the error (audit 10).
+func TestStreamErrorReason(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	d.do("menu") // signed in: the host is known
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{io.ErrUnexpectedEOF, "Can't reach " + d.hostName()},
+		{&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, "Can't reach " + d.hostName()},
+		{&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, "The card is full"},
+		{&jellyfin.APIError{Op: "stream", HTTP: 502, Msg: "Bad Gateway"}, "The server answered HTTP 502"},
+	} {
+		d.stream.setErr(&streamErr{title: "Song 0", id: "al0.0", at: time.Now(), err: c.err})
+		r := d.streamErrRows()
+		if len(r) != 2 || r[0].Title != "Couldn't stream Song 0: "+c.want {
+			t.Errorf("%v: %q", c.err, titles(q2spot.Reply{Rows: r}))
+			continue
+		}
+		if got := strings.Join(titles(details(r[1].Context)), "|"); !strings.Contains(got, "|Error: "+c.err.Error()) {
+			t.Errorf("%v: details %q", c.err, got)
 		}
 	}
 }
@@ -2117,6 +2177,9 @@ func TestPreviewCancelled(t *testing.T) {
 			sel.Save(filepath.Join(d.dir, "selection.json"))
 			d.do("sync")
 			eventually(t, "the preview's request", func() bool { return n.albumReqs.Load() == 1 })
+			if op == "signout" {
+				d.do(op) // the first press only asks
+			}
 			d.do(op)
 			eventually(t, "the request cancelled", func() bool { return n.albumGaveUp.Load() == 1 })
 			close(n.holdAlbum)
@@ -2134,7 +2197,7 @@ func TestSignOutCancelsSync(t *testing.T) {
 	d.preview(t)
 	d.do("start")
 	eventually(t, "the sync to run", d.runner.Busy)
-	d.do("signout")
+	pressSignOut(d)
 	eventually(t, "the sync to stop", func() bool { return !d.runner.Busy() })
 	if st := d.runner.Snapshot().State; st != "idle" {
 		t.Fatalf("state %q", st)
@@ -2410,6 +2473,43 @@ func TestIncludedViaCachedArtist(t *testing.T) {
 	}
 	if got := n.artistItemReqs.Load(); got != 0 {
 		t.Fatalf("%d artist requests", got)
+	}
+}
+
+// After a restart, with the playlist's songs and the artist's albums not in memory, adding a song
+// or an album asks nothing more of the server: it is added on its own (audit 2026-11-16 #16). The
+// plan holds the song once, and removing the playlist and the artist leaves both in Sync.
+func TestIncludedViaNotFetched(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	file := filepath.Join(d.dir, "selection.json")
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindPlaylist, ID: "pl1", Name: "Mix"}) // al0's songs
+	sel.Save(file)
+	before := n.reqs.Load()
+	if r := d.do("toggle", "song:al0.1"); r.Message != "Added to Sync · 1 song" {
+		t.Fatalf("%q", r.Message)
+	}
+	if got := n.reqs.Load() - before; got != 3 { // the song and its music library (cl.Song), not Mix
+		t.Fatalf("%d requests", got)
+	}
+	sel, _ = selection.Load(file)
+	sel.Toggle(selection.Item{Kind: selection.KindArtist, ID: "ar1", Name: "Artist"}) // al0 and al1
+	sel.Save(file)
+	if r := d.do("toggle", "album:al1"); r.Message != "Added to Sync · 2 songs" || n.artistItemReqs.Load() != 0 {
+		t.Fatalf("%q, %d artist requests", r.Message, n.artistItemReqs.Load())
+	}
+	d.preview(t)
+	d.mu.Lock()
+	add := len(d.daemon.preview.plan.Add)
+	d.mu.Unlock()
+	if add != 4 { // the artist's 4 songs; al0.1 (in Mix and on its own too) once
+		t.Fatalf("%d songs to add", add)
+	}
+	d.do("toggle", "playlist:pl1")
+	d.do("toggle", "artist:ar1")
+	if it := d.selected(t); len(it) != 2 || it[0].ID != "al0.1" || it[1].ID != "al1" {
+		t.Fatalf("%+v", it)
 	}
 }
 
