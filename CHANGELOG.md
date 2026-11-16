@@ -12,6 +12,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
 - **A server that ignores where a list should continue** (or a proxy that caches its answers) no longer makes lists load until they time out: when a page comes back the same as the last, the list says *The library changed while it was read. Try again* at once, instead of every list waiting and a Sync preview running out of memory.
+- **A server that ignores where a list should continue** (or a proxy that caches its answers) no longer makes lists load until they time out: when a page doesn't start where it was asked to, the list says *The library changed while it was read. Try again* at once, instead of every list waiting and a Sync preview running out of memory.
 
 ## [0.7.0] - 2026-11-12
 
