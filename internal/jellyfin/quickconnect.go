@@ -54,6 +54,10 @@ func (c *Client) QuickConnectPoll(ctx context.Context, secret string) (bool, err
 func (c *Client) QuickConnectSignIn(ctx context.Context, secret string) (Creds, error) {
 	var r authResult
 	if err := c.call(ctx, "POST", "/Users/AuthenticateWithQuickConnect", nil, map[string]string{"Secret": secret}, &r); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.HTTP == 401 { // the code expired between the poll and now
+			ae.kind = ErrQuickConnectExpired
+		}
 		return Creds{}, err
 	}
 	if r.AccessToken == "" {
