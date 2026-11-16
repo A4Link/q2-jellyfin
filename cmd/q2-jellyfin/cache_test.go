@@ -137,6 +137,7 @@ func TestCacheSettings(t *testing.T) {
 	if m := d.do("clearcache").Message; m != "Press again to remove 3 MB of cached songs" || !exists(p) {
 		t.Fatalf("first press %q", m)
 	}
+	d.do("storage") // Q2 Pod asks the page again after the toast: the first press stays
 	if m := d.do("clearcache").Message; m != "Removed 3 MB of cached songs" || exists(p) {
 		t.Fatalf("second press %q", m)
 	}

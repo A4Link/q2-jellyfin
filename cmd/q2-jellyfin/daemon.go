@@ -28,11 +28,11 @@ import (
 )
 
 const (
-	answerIn    = 8 * time.Second  // every Q2SPOT/1 reply within this (the firmware gives up at 15 s)
-	idleAfter   = 30 * time.Minute // exit 0 after this long with no request, sync or stream
-	previewTTL  = time.Minute      // a preview older than this is computed again when Sync is opened
-	clearArmFor = 10 * time.Second // Clear Playback Cache: a second press within this clears
-	logoutIn    = 5 * time.Second  // Sign Out's word to the server, in the background
+	answerIn   = 8 * time.Second  // every Q2SPOT/1 reply within this (the firmware gives up at 15 s)
+	idleAfter  = 30 * time.Minute // exit 0 after this long with no request, sync or stream
+	previewTTL = time.Minute      // a preview older than this is computed again when Sync is opened
+	armFor     = 10 * time.Second // Clear Playback Cache, Sign Out: a second press within this does it
+	logoutIn   = 5 * time.Second  // Sign Out's word to the server, in the background
 )
 
 var errSignedOut = errors.New("signed out")
@@ -137,7 +137,7 @@ type daemon struct {
 	cl                 *jellyfin.Client
 	server, user, host string
 	lastReq            time.Time
-	clearArmed         time.Time         // Clear Playback Cache's first press
+	armed              armed             // Clear Playback Cache's or Sign Out's first press
 	sectionsShown      bool              // the last menu reply was sections: Settings shows a stream's failure
 	shuffles           map[string]uint64 // each list's Random order (sort.go)
 	albumsAll          *albumsFetch      // every album, being fetched for Random (everyAlbum)
@@ -283,7 +283,7 @@ func (d *daemon) signOut() error {
 		return err
 	}
 	d.login.mu.Lock()
-	d.login.file = "" // a sign-in file's outcome was about the sign-in that ends here
+	d.login.file, d.login.msg = "", "" // Signed in as, or a sign-in file's outcome: the sign-in that ends here
 	d.login.mu.Unlock()
 	d.mu.Lock()
 	old := d.cl
@@ -310,6 +310,30 @@ func (d *daemon) signOut() error {
 		})
 	}
 	return nil
+}
+
+// armed is the first press of an action that asks to be pressed again (Clear Playback Cache, Sign
+// Out), and when.
+type armed struct {
+	op string
+	at time.Time
+}
+
+// armPage is the page each such action sits on: Q2 Pod asks it again after the toast, so it keeps
+// the first press; any other press drops it.
+var armPage = map[string]string{"clearcache": "storage", "signout": "account"}
+
+// pressedAgain reports whether op is the second press within armFor; else it arms op for the next,
+// when arm.
+func (d *daemon) pressedAgain(op string, arm bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	again := d.armed.op == op && time.Since(d.armed.at) < armFor
+	d.armed = armed{}
+	if !again && arm {
+		d.armed = armed{op, time.Now()}
+	}
+	return again
 }
 
 // signOutFailed is Sign Out's reply when the credentials can't be deleted.
