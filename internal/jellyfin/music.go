@@ -21,20 +21,27 @@ import (
 //     library with parentId, which the server honours.
 //   - A playlist lives outside every library, and the server ignores parentId when ids is given,
 //     so its entries are kept only when their file lies under a music library's folder (the
-//     folders its top-level items sit in). An entry whose path the server doesn't show counts as
-//     music only when it belongs to an album, which only a music library makes.
+//     folders its top-level items sit in, asked only when a playlist or song is checked). An entry
+//     whose path the server doesn't show counts as music only when it belongs to an album, which
+//     only a music library makes.
 
 type musicScope struct {
-	libs  []string // the music libraries' ids, in the server's order
-	roots []string // the folders they hold, "/"-separated, without a trailing "/"
+	libs []string // the music libraries' ids, in the server's order
 }
+
+// musicRoots is the folders the music libraries hold, "/"-separated, without a trailing "/".
+type musicRoots []string
 
 type scopeCache struct {
 	mu sync.Mutex
 	s  *musicScope
+
+	rootsMu sync.Mutex // its own lock: a list never waits for the folders
+	roots   musicRoots
+	scanned bool // roots is set; a scan that failed leaves it false, so the next call retries
 }
 
-// music is the user's music libraries, asked once per client.
+// music is the user's music libraries, asked once per client: one request, before any list.
 func (c *Client) music(ctx context.Context) (*musicScope, error) {
 	c.scope.mu.Lock()
 	defer c.scope.mu.Unlock()
@@ -46,20 +53,40 @@ func (c *Client) music(ctx context.Context) (*musicScope, error) {
 		return nil, err
 	}
 	s := &musicScope{}
-	seen := map[string]bool{}
 	for _, v := range views.Items {
 		if !strings.EqualFold(v.CollectionType, "music") {
 			continue
 		}
 		s.libs = append(s.libs, v.ID)
+	}
+	c.scope.s = s
+	return s, nil
+}
+
+// musicFolders is the music libraries' folders, asked once per client and only for what inMusic
+// checks (a playlist, a song): a big library has a top-level item per artist, too many to make
+// every list wait for (audit 2026-11-16 #14).
+func (c *Client) musicFolders(ctx context.Context) (musicRoots, error) {
+	s, err := c.music(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.scope.rootsMu.Lock()
+	defer c.scope.rootsMu.Unlock()
+	if c.scope.scanned {
+		return c.scope.roots, nil
+	}
+	var roots musicRoots
+	seen := map[string]bool{}
+	for _, lib := range s.libs {
 		// Every top-level item, paged, not just the first 200: a library can have more than one
 		// content folder, and a song in a later one must not be filtered out as non-music (audit S15).
-		q := url.Values{"userId": {c.c.UserID}, "parentId": {v.ID}, "fields": {"Path"}}
+		q := url.Values{"userId": {c.c.UserID}, "parentId": {lib}, "fields": {"Path"}}
 		_, err := c.eachPage(ctx, "/Items", q, func(k wireItem) {
 			if p := slashPath(k.Path); p != "" {
 				if dir := path.Dir(p); !seen[dir] {
 					seen[dir] = true
-					s.roots = append(s.roots, dir)
+					roots = append(roots, dir)
 				}
 			}
 		})
@@ -67,15 +94,15 @@ func (c *Client) music(ctx context.Context) (*musicScope, error) {
 			return nil, err
 		}
 	}
-	c.scope.s = s
-	return s, nil
+	c.scope.roots, c.scope.scanned = roots, true
+	return roots, nil
 }
 
 // slashPath is a server path with "/" separators (a Windows server's too), without a trailing one.
 func slashPath(p string) string { return strings.TrimRight(strings.ReplaceAll(p, `\`, "/"), "/") }
 
 // inMusic reports whether w is a song of a music library (see the package comment above).
-func (s *musicScope) inMusic(w wireItem) bool {
+func (roots musicRoots) inMusic(w wireItem) bool {
 	if w.Type != "" && w.Type != "Audio" {
 		return false
 	}
@@ -86,7 +113,7 @@ func (s *musicScope) inMusic(w wireItem) bool {
 	if p = slashPath(p); p == "" {
 		return w.AlbumID != ""
 	}
-	for _, r := range s.roots {
+	for _, r := range roots {
 		if strings.HasPrefix(strings.ToLower(p), strings.ToLower(r)+"/") {
 			return true
 		}
