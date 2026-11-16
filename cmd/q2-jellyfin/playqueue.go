@@ -123,13 +123,20 @@ func (d *daemon) queuePage(cursor string) q2spot.Reply {
 	return d.window(page(rows, cursor), cursor)
 }
 
-// queuePlay is a row's press: the queue kept, played from that song.
+// queuePlay is a row's press: the queue kept, played from that song. Without Wi-Fi only a synced
+// song plays, from the card, as the firmware's playlist extension allows (stream.go); a later song
+// not synced fails as it would were Wi-Fi lost mid-queue.
 func (d *daemon) queuePlay(arg string) q2spot.Reply {
 	q, ok := d.loadQueue()
 	seq, n, _ := strings.Cut(arg, " ")
 	i, err := strconv.Atoi(n)
 	if !ok || seq != q.Seq || err != nil || i < 0 || i >= len(q.Songs) {
 		return q2spot.Fail(q2spot.Unavailable, "The queue has changed")
+	}
+	if !d.caps.Playlist || !d.stream.synced(d.manifest().Songs[q.Songs[i].ID]) {
+		if r, off := d.noWiFi(true); off {
+			return r
+		}
 	}
 	d.startSongs(q.Songs, i, "queue")
 	return d.playing(q.Songs[i].Title)

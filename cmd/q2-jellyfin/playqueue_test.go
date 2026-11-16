@@ -155,6 +155,38 @@ func TestPlayQueueStalePress(t *testing.T) {
 	}
 }
 
+// Without Wi-Fi, a synced song pressed in ⋯ plays from the card with the firmware's playlist
+// extension; one not synced, or any song without the extension (it fetches them all), still says
+// "Network Disconnected" (audit 9).
+func TestPlayQueueNoWiFi(t *testing.T) {
+	for _, caps := range []string{"playlist", ""} {
+		d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, caps, true)
+		d.do("toggle", "album:al0")
+		d.syncOK(t)
+		os.Remove(d.manifest().Songs["al0.1"].Path) // Song 1 is no longer on the card
+		d.do("play", "album:al0 0")
+		d.bg.Wait() // the start runs behind the reply
+		d.localIP = func() string { return "" }
+		d.wifiOff = func() bool { return true }
+		row, _ := find(d.do("npqueue"), "Song 0")
+		r := d.do(row.URI, row.Context)
+		if caps == "" {
+			if r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
+				t.Fatalf("no playlist: synced %+v", r)
+			}
+			continue
+		}
+		d.bg.Wait()
+		if r.Status != "" || d.do("npqueue").Rows[0].Context == row.Context { // a new queue: it played
+			t.Fatalf("synced %+v", r)
+		}
+		row, _ = find(d.do("npqueue"), "Song 1")
+		if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
+			t.Fatalf("not synced %+v", r)
+		}
+	}
+}
+
 // The queue is decoded again only when its file changes: a new Play's queue shows at once.
 func TestPlayQueueNewSave(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "urls now", true)
