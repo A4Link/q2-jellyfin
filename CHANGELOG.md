@@ -7,6 +7,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Changed
 
 - **Songs already in a lossy format are no longer re-encoded** under an Opus Sync or Streaming Quality: MP3, AAC, Ogg Vorbis, Opus, WMA and AC-3 files come as the server's file, untouched, since encoding them again only loses more. Lossless songs are transcoded as before. **Settings → Quality and Storage → Always Re-encode** (off by default) re-encodes lossy songs too, for smaller files; the row says underneath what its setting means. After updating, the next sync brings lossy songs synced at Opus again as their originals, unless Always Re-encode is turned on first. An account without the server's download permission needs Always Re-encode on to sync them: its sync now says so when it stops (README, Known limitations).
+- **Add to Sync answers at once**, without asking the server about every artist and playlist already in Sync. It still says *Included via* an artist, playlist or Favourites in Sync when Jellyfin has their songs to hand (since the Sync page or that item's page was opened); otherwise, as after a restart, the album or song is added on its own (*Added to Sync*): it is still synced once, and stays in Sync if that artist or playlist is removed.
 - **Lists open sooner after Jellyfin starts:** the first list no longer waits while every top-level folder of the music libraries is fetched; that is now asked only when a playlist or song first needs it, once. On a big library over weak Wi-Fi the first list could time out again and again.
 
 ### Fixed

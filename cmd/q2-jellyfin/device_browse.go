@@ -790,7 +790,7 @@ func (d *daemon) toggle(ctx context.Context, cl *jellyfin.Client, arg string) q2
 	default:
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
-	if via := d.coveredBy(ctx, cl, sel, kind, id, song); via != "" {
+	if via := d.coveredBy(sel, kind, id, song); via != "" {
 		return q2spot.Reply{Message: "Included via " + via}
 	}
 	// Loaded again after the fetches: another press may have saved it meanwhile.
@@ -835,8 +835,11 @@ func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r
 	return sel, r, true
 }
 
-// coveredBy names a selected item that already holds this album or song, or "".
-func (d *daemon) coveredBy(ctx context.Context, cl *jellyfin.Client, sel selection.Set, kind selection.Kind, id string, s jellyfin.Song) string {
+// coveredBy names a selected item that already holds this album or song, or "". It asks the server
+// nothing, so a press answers at once: an artist's albums or a list's songs not in memory (after a
+// restart, until the Sync page or the item's own page fetches them) don't count, and the album or
+// song is added on its own; the plan holds a song once (audit 2026-11-16 #16).
+func (d *daemon) coveredBy(sel selection.Set, kind selection.Kind, id string, s jellyfin.Song) string {
 	album := id
 	if kind == selection.KindSong {
 		album = s.AlbumID
@@ -847,21 +850,10 @@ func (d *daemon) coveredBy(ctx context.Context, cl *jellyfin.Client, sel selecti
 		switch {
 		case it.Kind == selection.KindAlbum && it.ID == album:
 			return it.Name
-		case it.Kind == selection.KindArtist: // the albums fetched already (songsOf), else asked
+		case it.Kind == selection.KindArtist: // the albums fetched already (songsOf, toggle, its page)
 			d.mu.Lock()
-			als, ok := d.artistAlbums[it.ID]
+			als := d.artistAlbums[it.ID]
 			d.mu.Unlock()
-			if !ok {
-				var err error
-				if _, als, err = cl.Artist(ctx, it.ID); err != nil {
-					// Out of time or the server failed: added as asked; the plan holds a song once.
-					d.log.Printf("included via: %v", err)
-					return ""
-				}
-				d.mu.Lock()
-				d.artistAlbums[it.ID] = als
-				d.mu.Unlock()
-			}
 			for _, a := range als {
 				if a.ID == album {
 					return it.Name
@@ -869,11 +861,8 @@ func (d *daemon) coveredBy(ctx context.Context, cl *jellyfin.Client, sel selecti
 			}
 		case (it.Kind == selection.KindPlaylist || it.Kind == selection.KindFavorites) && kind == selection.KindSong:
 			d.mu.Lock()
-			songs, ok := d.resolved[selection.Key(it.Kind, it.ID)]
+			songs := d.resolved[selection.Key(it.Kind, it.ID)]
 			d.mu.Unlock()
-			if !ok {
-				songs, _, _ = d.songsOf(ctx, cl, it.Kind, it.ID)
-			}
 			for _, x := range songs {
 				if x.ID == s.ID {
 					return it.Name
