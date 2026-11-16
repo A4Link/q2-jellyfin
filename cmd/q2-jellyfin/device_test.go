@@ -2103,6 +2103,40 @@ func TestEntireLibraryPagingEnds(t *testing.T) {
 	}
 }
 
+// A preview is reused for previewTTL (audit 18): opening Sync a few minutes later asks the server
+// nothing, even for Entire Library; one older is computed again, and so is one after a selection
+// change, Check Again or Sync Favourites, however new.
+func TestPreviewReused(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	age := func(by time.Duration) {
+		d.mu.Lock()
+		d.daemon.preview.at = d.daemon.preview.at.Add(-by)
+		d.mu.Unlock()
+	}
+	again := func(what string, want bool) {
+		t.Helper()
+		before := n.songListReqs.Load()
+		d.preview(t)
+		if got := n.songListReqs.Load() > before; got != want {
+			t.Errorf("%s: fetched again %v, want %v", what, got, want)
+		}
+	}
+	age(4 * time.Minute)
+	again("4 minutes on", false)
+	age(previewTTL)
+	again("past previewTTL", true)
+	d.do("check")
+	again("Check Again", true)
+	d.do("setdefq", "opus-160") // the selection's quality: a change (gen)
+	again("a selection change", true)
+	before := n.songListReqs.Load()
+	d.do("syncfav")
+	eventually(t, "Sync Favourites' preview", func() bool { return n.songListReqs.Load() > before })
+}
+
 // Sign Out and Check Again cancel a preview still fetching (M11).
 func TestPreviewCancelled(t *testing.T) {
 	for _, op := range []string{"signout", "check"} {

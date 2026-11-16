@@ -28,9 +28,13 @@ import (
 )
 
 const (
-	answerIn    = 8 * time.Second  // every Q2SPOT/1 reply within this (the firmware gives up at 15 s)
-	idleAfter   = 30 * time.Minute // exit 0 after this long with no request, sync or stream
-	previewTTL  = time.Minute      // a preview older than this is computed again when Sync is opened
+	answerIn  = 8 * time.Second  // every Q2SPOT/1 reply within this (the firmware gives up at 15 s)
+	idleAfter = 30 * time.Minute // exit 0 after this long with no request, sync or stream
+	// previewTTL: a preview older than this is computed again when Sync is opened. Entire Library's
+	// asks the server for every song, so it is kept as long as a list (listFor): an album added or
+	// a playlist changed on the server shows on the Sync page up to 5 minutes later. A selection
+	// change (gen), Check Again and Sync Favourites (dropPreview) compute it again at once.
+	previewTTL  = listFor
 	clearArmFor = 10 * time.Second // Clear Playback Cache: a second press within this clears
 	logoutIn    = 5 * time.Second  // Sign Out's word to the server, in the background
 )
