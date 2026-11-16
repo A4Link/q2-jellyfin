@@ -262,7 +262,7 @@ func TestFavSignOut(t *testing.T) {
 	d.favLines(t, press("item", "1", "al0.1"))
 	d.takeFavs(time.Now())
 	d.favLines(t, press("item", "1", "al0.0"))
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if len(d.outbox()) != 0 || exists(d.favPath()) || exists(d.favPath()+".taking") {
 		t.Fatalf("outbox %+v, fav.log %v", d.outbox(), exists(d.favPath()))
