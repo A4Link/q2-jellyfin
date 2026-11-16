@@ -11,6 +11,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **Sign Out asks first**: the first press says *Press again to sign out*, as Clear Playback Cache does, since Sign Out stops a sync and the music and forgets plays and hearts not sent yet; any other press in between drops it. Afterwards the sign-in page no longer says *Signed in as* the user just signed out.
+- **Clear Playback Cache's second press clears the cache:** the Quality and Storage page, which Q2 Pod asks again after the first press's message, no longer drops that first press.
 
 ## [0.7.0] - 2026-11-12
 

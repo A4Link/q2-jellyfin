@@ -467,7 +467,7 @@ func TestChangeServerFailKeepsDateURL(t *testing.T) {
 	if tlsroots.DateURL() != want {
 		t.Fatalf("date URL %q, want %q", tlsroots.DateURL(), want)
 	}
-	d.do("signout")
+	pressSignOut(d)
 	if r := d.do("menu"); r.Rows[len(r.Rows)-1].Subtitle != serverHint {
 		t.Fatalf("stale message %+v", r.Rows)
 	}
@@ -481,14 +481,14 @@ func TestSignOutEndsSession(t *testing.T) {
 	d.do("search", "u")
 	loginSuccessPage(t, d.do("search", typedPassword))
 	d.do("account")
-	d.do("signout")
+	pressSignOut(d)
 	eventually(t, "the logout", func() bool { return a.logouts.Load() == 1 })
 
 	d.do("keylogin")
 	d.do("search", "u")
 	loginSuccessPage(t, d.do("search", "KEY"))
 	d.do("account")
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if n := a.logouts.Load(); n != 1 {
 		t.Fatalf("%d logouts", n)
@@ -502,7 +502,7 @@ func TestSignOutUnwritable(t *testing.T) {
 	p := filepath.Join(d.dir, "credentials")
 	os.Remove(p)
 	os.MkdirAll(filepath.Join(p, "x"), 0o755) // a folder with something in it: os.Remove fails
-	if r := d.do("signout"); r.Status == "" || r.Status == "ok" || r.Message != "Couldn't sign out: the card can't be written" {
+	if r := pressSignOut(d); r.Status == "" || r.Status == "ok" || r.Message != "Couldn't sign out: the card can't be written" {
 		t.Fatalf("%+v", r)
 	}
 	if d.client() == nil {
@@ -630,13 +630,47 @@ func TestSignOutShowsSignIn(t *testing.T) {
 	d, _ := loginDaemon(t)
 	signInWithPassword(t, d)
 	d.do("account")
-	if r := d.do("signout"); r.Message != "Signed out" {
+	if r := pressSignOut(d); r.Message != "Signed out" {
 		t.Fatalf("%+v", r)
 	}
 	r := d.do("account")
 	if got := strings.Join(titles(r), "|"); r.Message != "refresh" || got != "Change Server|Sign In with Quick Connect|Sign In with Password" {
 		t.Fatalf("%q %+v", got, r)
 	}
+	if subs := strings.Join(subtitles(r), "|"); strings.Contains(subs, "Signed in as") {
+		t.Fatalf("stale subtitle %q", subs)
+	}
+}
+
+// Sign Out asks first, as Clear Playback Cache does: the first press only says to press again, the
+// page asked again after the toast keeps it, and any other press drops it. Swipe on or off alike.
+func TestSignOutAsksFirst(t *testing.T) {
+	for _, caps := range []string{"", "sections"} {
+		t.Run("caps="+caps, func(t *testing.T) {
+			d := newTestDaemon(t, &nav{}, caps, true)
+			d.do("menu")
+			d.do("settings")
+			d.do("account")
+			if r := d.do("signout"); r.Message != "Press again to sign out" || d.client() == nil {
+				t.Fatalf("first press %+v, signed in %v", r, d.client() != nil)
+			}
+			d.do("settings") // another press: the first is dropped
+			d.do("account")
+			if r := d.do("signout"); r.Message != "Press again to sign out" || d.client() == nil {
+				t.Fatalf("after another press %+v, signed in %v", r, d.client() != nil)
+			}
+			d.do("account") // Q2 Pod asks the page again after the toast
+			if r := d.do("signout"); r.Message != "Signed out" || d.client() != nil {
+				t.Fatalf("second press %+v, signed in %v", r, d.client() != nil)
+			}
+		})
+	}
+}
+
+// pressSignOut presses Sign Out twice, as it asks, and returns the second reply.
+func pressSignOut(d *tdaemon) q2spot.Reply {
+	d.do("signout")
+	return d.do("signout")
 }
 
 // Signed out, Change Server opens the Server page: the address, pressed to type another.
