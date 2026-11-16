@@ -263,6 +263,39 @@ func TestCacheKeepsWhatSyncTakes(t *testing.T) {
 	}
 }
 
+// Start Sync reads the cache folder once, and finds what a Stat per song found (forSync): a whole
+// file at the sync's quality, an original only at the server's size (audit 2026-11-16 #26).
+func TestCachedForMatchesStat(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	put := func(id, q, ext string, n int) {
+		p := e.cached(id, q, ext)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(strings.Repeat("x", n)), 0o644)
+	}
+	put("a", "original", "flac", 100)
+	put("b", "original", "flac", 100) // re-ripped on the server since: 200 bytes there
+	put("c", "opus-128", "opus", 50)
+	put("d", "opus-128", "opus", 0)  // empty
+	put("f", "opus-192", "opus", 50) // another quality
+	put("g", "original", "mp3", 100) // another format
+	want := func(id string, size int64, q, ext string) plan.Want {
+		return plan.Want{Song: jellyfin.Song{ID: id, Size: size}, Quality: q, Bytes: 1000,
+			Path: filepath.Join(e.root, "Jellyfin", "x", id+"."+ext)}
+	}
+	ws := []plan.Want{want("a", 100, "original", "flac"), want("b", 200, "original", "flac"),
+		want("c", 999, "opus-128", "opus"), want("d", 0, "opus-128", "opus"), want("e", 100, "original", "flac"),
+		want("f", 0, "opus-128", "opus"), want("g", 100, "original", "flac")}
+	keep, n := e.s.cachedFor(ws)
+	if len(keep) != 2 || !keep[e.cached("a", "original", "flac")] || !keep[e.cached("c", "opus-128", "opus")] || n != 2000 {
+		t.Fatalf("keep %v, %d bytes", keep, n)
+	}
+	for _, w := range ws {
+		if c, size := e.s.syncCopy(w, os.Stat); keep[c] != (size > 0) {
+			t.Errorf("%s: kept %v, Stat finds %d bytes", w.Song.ID, keep[c], size)
+		}
+	}
+}
+
 // A cancelled sync no longer holds its cached songs: a trim may delete them again.
 func TestCacheTrimAfterCancel(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}

@@ -1162,7 +1162,8 @@ func TestStopReason(t *testing.T) {
 }
 
 // Removals are dropped from the manifest before their files go, so a stop (Pause, Cancel, the card
-// going, power) never leaves a song recorded as on the card that isn't (I4).
+// going, power) never leaves a song recorded as on the card that isn't (I4): each file goes only once
+// the manifest saved on the card no longer names it, whatever the batch size.
 func TestInterruptedRemovalsRecorded(t *testing.T) {
 	_, r, root := setup(t)
 	m := &library.Manifest{Songs: map[string]*library.Entry{}}
@@ -1173,8 +1174,11 @@ func TestInterruptedRemovalsRecorded(t *testing.T) {
 		m.Songs[id], rm = e, append(rm, e)
 	}
 	m.Save(root, root+"/.jellyfin/manifest.json")
-	r.onOp = func(op, _ string) {
+	r.onOp = func(op, path string) {
 		if op == "remove" {
+			if b, _ := os.ReadFile(root + "/.jellyfin/manifest.json"); strings.Contains(string(b), path) {
+				t.Errorf("%s removed while the saved manifest records it (power lost now)", path)
+			}
 			r.mu.Lock()
 			r.stopAs = "paused"
 			r.cancel() // Pause, from inside the run
@@ -1506,6 +1510,11 @@ func TestMoving(t *testing.T) {
 	if r.Moving("d") {
 		t.Error("moving after Cancel")
 	}
+	r.Start(plan.Plan{Add: []plan.Want{a}, Remove: []*library.Entry{{ID: "e"}}}) // the next plan's, not the last's
+	if !r.Moving("e") || r.Moving("b") || r.Moving("d") {
+		t.Errorf("next plan: e %v, b %v, d %v", r.Moving("e"), r.Moving("b"), r.Moving("d"))
+	}
+	r.Cancel()
 }
 
 // The runner is Busy until OnDone has returned, so the app never exits between a sync's end and
