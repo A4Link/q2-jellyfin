@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
@@ -211,7 +212,8 @@ func (d *daemon) missArt(id string, wait time.Duration) {
 }
 
 // pruneArt drops the oldest covers, artPrune at a time, until there are artKeep or fewer and they
-// add up to less than artBytes. Each row's file counts, links too.
+// add up to less than artBytes. Each row's file counts toward artKeep, links too; toward artBytes a
+// cover counts once, however many rows link it, as it takes its room once.
 func (d *daemon) pruneArt() {
 	ents, err := os.ReadDir(d.artDir())
 	if err != nil {
@@ -221,20 +223,29 @@ func (d *daemon) pruneArt() {
 		name string
 		at   time.Time
 		size int64
+		ino  uint64
 	}
 	var fs []f
 	var total int64
+	links := map[uint64]int{} // a cover's names still here, by inode
 	for _, e := range ents {
 		if info, err := e.Info(); err == nil && strings.HasSuffix(e.Name(), ".jpg") {
-			fs = append(fs, f{e.Name(), info.ModTime(), info.Size()})
-			total += info.Size()
+			ino := info.Sys().(*syscall.Stat_t).Ino
+			fs = append(fs, f{e.Name(), info.ModTime(), info.Size(), ino})
+			if links[ino] == 0 {
+				total += info.Size()
+			}
+			links[ino]++
 		}
 	}
 	sort.Slice(fs, func(i, j int) bool { return fs[i].at.Before(fs[j].at) })
 	for len(fs) > artKeep || total >= artBytes {
 		for _, x := range fs[:min(artPrune, len(fs))] {
 			os.Remove(filepath.Join(d.artDir(), x.name))
-			total -= x.size
+			links[x.ino]--
+			if links[x.ino] == 0 { // its last name: its room is free
+				total -= x.size
+			}
 		}
 		fs = fs[min(artPrune, len(fs)):]
 	}

@@ -99,6 +99,22 @@ func TestArtPrunedBySize(t *testing.T) {
 	}
 }
 
+// A cover linked to several rows counts once toward artBytes: 40 covers of 150 KB (6 MB), each
+// shown by 4 rows (24 MB by their names), are all kept.
+func TestArtLinksCountOnce(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "art", true)
+	names := artFiles(t, d, 40, 150<<10)
+	for i, p := range names {
+		for j := range 3 {
+			if err := os.Link(p, filepath.Join(d.artDir(), fmt.Sprintf("row-%d-%d.jpg", i, j))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	d.pruneArt()
+	keptArt(t, names, 0)
+}
+
 // A single reply that fetched a cover prunes, not one in a hundred.
 func TestArtPrunedAfterOneReply(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "art", true)
