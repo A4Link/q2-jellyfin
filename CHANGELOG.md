@@ -11,6 +11,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **A `Jellyfin sign-in.txt` over 4 KB is wiped before it is deleted**, as a smaller one is: it was deleted as too big to be a sign-in file with its bytes, its password among them, still on the card. The wipe writes the zeros a piece at a time, so a big file put there by mistake doesn't take its size in RAM.
 
 ## [0.7.0] - 2026-11-12
 

@@ -174,6 +174,26 @@ func TestSignInFileNoServer(t *testing.T) {
 	noSecretAnywhere(t, d, typedPassword)
 }
 
+// A file too big to be a sign-in file is deleted unused, and wiped first as any other: a second
+// name for it (a hard link) sees only zeros afterwards, as the card's freed clusters would.
+func TestSignInFileTooBig(t *testing.T) {
+	d, srv := fileDaemon(t, false)
+	p := writeSignIn(t, d, "server="+srv+"\nuser=u\npassword="+typedPassword+"\n"+strings.Repeat("# a long comment\n", 300))
+	other := filepath.Join(d.card, "other-name")
+	if err := os.Link(p, other); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	r := d.do("menu")
+	fileGone(t, p)
+	if row, _ := find(r, "Type Your Server Address"); row.Subtitle != "Jellyfin sign-in.txt: too big to be a sign-in file" {
+		t.Fatalf("%+v", r.Rows)
+	}
+	if b, _ := os.ReadFile(other); len(b) <= signInFileMax || len(bytes.Trim(b, "\x00")) > 0 {
+		t.Fatalf("not wiped: %d bytes", len(b))
+	}
+	noSecretAnywhere(t, d, typedPassword)
+}
+
 // Signed in, the file wins: signed out, then signed in to the file's server.
 func TestSignInFileWhileSignedIn(t *testing.T) {
 	d, srv := fileDaemon(t, true)

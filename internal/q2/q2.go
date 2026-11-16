@@ -85,16 +85,17 @@ func WriteWith(path string, write func(io.Writer) error) error {
 }
 
 // Wipe writes zeros over the file at path, in place, and syncs it: FAT frees a deleted or replaced
-// file's clusters with its bytes still in them, so a secret is wiped before the file goes. Only
-// for small files: the zeros are one buffer.
+// file's clusters with its bytes still in them, so a secret is wiped before the file goes. The
+// zeros come from one 64 KiB buffer, so a big file costs no more RAM than a small one.
 func Wipe(path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
 	fi, err := f.Stat()
-	if err == nil {
-		_, err = f.Write(make([]byte, fi.Size()))
+	zeros := make([]byte, 64<<10)
+	for n := int64(0); err == nil && n < fi.Size(); n += int64(len(zeros)) {
+		_, err = f.Write(zeros[:min(int64(len(zeros)), fi.Size()-n)])
 	}
 	if err == nil {
 		err = f.Sync()

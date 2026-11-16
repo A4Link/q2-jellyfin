@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -19,6 +20,29 @@ func TestWipe(t *testing.T) {
 	}
 	if Wipe(filepath.Join(t.TempDir(), "none")) == nil {
 		t.Fatal("no error for a missing file")
+	}
+}
+
+// Wipe of a big file writes from one small buffer: a file renamed by mistake (a film, say) is not
+// taken whole into RAM, past the app's 48 MB limit.
+func TestWipeBigFile(t *testing.T) {
+	const size = 16 << 20
+	p := filepath.Join(t.TempDir(), "big")
+	f, _ := os.Create(p)
+	f.Truncate(size)
+	f.WriteAt([]byte("password=s3cret"), size-15)
+	f.Close()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if err := Wipe(p); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+	if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+		t.Fatalf("allocated %d bytes", n)
+	}
+	if b, _ := os.ReadFile(p); len(b) != size || len(bytes.Trim(b, "\x00")) > 0 {
+		t.Fatalf("%d bytes, not all zeros", len(b))
 	}
 }
 
