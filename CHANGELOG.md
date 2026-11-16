@@ -11,6 +11,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **Favourites syncs as its own playlist with Sync Entire Library on:** *Sync Favourites* and *Add to Sync* on its page add it, a **Favourites** playlist appears on the Q2 and follows your hearts (its songs, already in the library, are not downloaded twice), and it can be taken out again. Before, the Sync page said *In Sync* and no Favourites playlist ever appeared.
+- **The Favourites row in Playlists is held to add it to Sync or take it out,** and shows *Waiting to sync* or *On Q2*, as the other playlists do.
 
 ## [0.7.0] - 2026-11-12
 
