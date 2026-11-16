@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1686,18 +1688,45 @@ func TestRootStreamErrorLast(t *testing.T) {
 	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	d.do("play", "album:al0 0")
 	var r q2spot.Reply
-	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
+	const want = "Couldn't stream Song 0: Not found on the server"
+	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, want); return ok })
 	if r.Rows[0].Title != "Newly Added" {
 		t.Fatalf("first row %q", titles(r))
 	}
 	det := r.Rows[len(r.Rows)-1]
-	if r.Rows[len(r.Rows)-2].Title != "Couldn't stream Song 0" || det.Title != "Details" {
+	if r.Rows[len(r.Rows)-2].Title != want || det.Title != "Details" {
 		t.Fatalf("rows %q", titles(r))
 	}
 	got := strings.Join(titles(d.do(det.URI, det.Context)), "|")
-	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0"} {
+	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0", "Error: stream: http 404 code 70"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("details %q lack %q", got, w)
+		}
+	}
+}
+
+// A stream's failure says why, as the Sync page does: the server lost mid-song (a body cut short
+// too) by its host, a full card in words, never Go's text; its Details carry the error (audit 10).
+func TestStreamErrorReason(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	d.do("menu") // signed in: the host is known
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{io.ErrUnexpectedEOF, "Can't reach " + d.hostName()},
+		{&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, "Can't reach " + d.hostName()},
+		{&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, "The card is full"},
+		{&jellyfin.APIError{Op: "stream", HTTP: 502, Msg: "Bad Gateway"}, "The server answered HTTP 502"},
+	} {
+		d.stream.setErr(&streamErr{title: "Song 0", id: "al0.0", at: time.Now(), err: c.err})
+		r := d.streamErrRows()
+		if len(r) != 2 || r[0].Title != "Couldn't stream Song 0: "+c.want {
+			t.Errorf("%v: %q", c.err, titles(q2spot.Reply{Rows: r}))
+			continue
+		}
+		if got := strings.Join(titles(details(r[1].Context)), "|"); !strings.Contains(got, "|Error: "+c.err.Error()) {
+			t.Errorf("%v: details %q", c.err, got)
 		}
 	}
 }
