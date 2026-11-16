@@ -15,8 +15,9 @@ type Song struct {
 	Size                                           int64
 	Suffix, CoverArt                               string
 	BitRate                                        int
-	HasLyrics                                      bool // the server holds lyrics for it (Lyrics)
-	Favorite                                       bool // the user's favourite (UserData.IsFavorite)
+	Codec                                          string // the audio stream's ("flac", "mp3", "aac", …); "" when the server names none
+	HasLyrics                                      bool   // the server holds lyrics for it (Lyrics)
+	Favorite                                       bool   // the user's favourite (UserData.IsFavorite)
 }
 
 type Album struct {
@@ -67,10 +68,14 @@ type wireItem struct {
 	ImageTags            map[string]string `json:"ImageTags"`
 	AlbumPrimaryImageTag string            `json:"AlbumPrimaryImageTag"`
 	MediaSources         []struct {
-		Size      int64  `json:"Size"`
-		Bitrate   int    `json:"Bitrate"`
-		Container string `json:"Container"`
-		Path      string `json:"Path"`
+		Size         int64  `json:"Size"`
+		Bitrate      int    `json:"Bitrate"`
+		Container    string `json:"Container"`
+		Path         string `json:"Path"`
+		MediaStreams []struct {
+			Type  string `json:"Type"`
+			Codec string `json:"Codec"`
+		} `json:"MediaStreams"`
 	} `json:"MediaSources"`
 	UserData struct {
 		IsFavorite bool `json:"IsFavorite"`
@@ -115,6 +120,12 @@ func (w wireItem) song() Song {
 		Favorite: w.UserData.IsFavorite}
 	if len(w.MediaSources) > 0 {
 		s.Size, s.BitRate = w.MediaSources[0].Size, w.MediaSources[0].Bitrate/1000
+		for _, ms := range w.MediaSources[0].MediaStreams {
+			if ms.Type == "Audio" {
+				s.Codec = strings.ToLower(ms.Codec)
+				break
+			}
+		}
 	}
 	// A song's cover is its album's primary image, else its own.
 	switch {

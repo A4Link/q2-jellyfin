@@ -70,11 +70,33 @@ var playable = map[string]bool{"mp3": true, "wav": true, "wma": true, "ape": tru
 // file's extension).
 func Playable(suffix string) bool { return playable[strings.ToLower(suffix)] }
 
-// Quality is q for a song of this suffix: an original the Q2 can't play, or of no known format, is
-// fetched as quality.Fallback. One rule for sync, both kinds of streaming and Sync Now's count.
-func Quality(q, suffix string) string {
-	if quality.IsOriginal(q) && !Playable(suffix) {
+// lossyCodecs threw sound away when they were made: re-encoding one loses more, for a smaller
+// saving than its bitrate suggests. dts is left out: Jellyfin's name covers lossless DTS-HD MA too.
+var lossyCodecs = map[string]bool{"mp3": true, "mp2": true, "aac": true, "vorbis": true, "opus": true,
+	"wmav1": true, "wmav2": true, "ac3": true, "eac3": true}
+
+// lossySuffixes stand for a lossy codec when the server names none. m4a and wma are left out: they
+// hold lossless ALAC and WMA Lossless too.
+var lossySuffixes = map[string]bool{"mp3": true, "mp2": true, "aac": true, "opus": true, "ogg": true, "ac3": true}
+
+// Lossy reports whether s's file is already lossy: by its audio codec, else by its suffix.
+func Lossy(s jellyfin.Song) bool {
+	if s.Codec != "" {
+		return lossyCodecs[strings.ToLower(s.Codec)]
+	}
+	return lossySuffixes[strings.ToLower(s.Suffix)]
+}
+
+// Quality is q for song s. An original the Q2 can't play, or of no known format, is fetched as
+// quality.Fallback. A lossy file the Q2 plays stays as it is under a transcode, unless reencode
+// (Settings → Always Re-encode): a second lossy encode only loses more. One rule for sync, both
+// kinds of streaming and Sync Now's count.
+func Quality(q string, s jellyfin.Song, reencode bool) string {
+	switch {
+	case quality.IsOriginal(q) && !Playable(s.Suffix):
 		return quality.Fallback
+	case !quality.IsOriginal(q) && !reencode && Playable(s.Suffix) && Lossy(s):
+		return quality.Original
 	}
 	return q
 }

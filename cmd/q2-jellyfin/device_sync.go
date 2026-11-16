@@ -24,6 +24,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/plan"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
+	"github.com/A4Link/q2-jellyfin/internal/quality"
 	"github.com/A4Link/q2-jellyfin/internal/selection"
 	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
@@ -136,7 +137,18 @@ func (d *daemon) stopMessage(err error) string {
 	case errors.As(err, &pe):
 		return "Couldn't write to the card"
 	}
-	return jellyfin.Message(err, d.hostName())
+	return d.serverMessage(err)
+}
+
+// serverMessage is jellyfin.Message, plus the way round a refused download: under an Opus Sync
+// Quality only a song kept as it is (an MP3, AAC or Opus one) is downloaded, so Always Re-encode
+// syncs without the permission.
+func (d *daemon) serverMessage(err error) string {
+	msg := jellyfin.Message(err, d.hostName())
+	if s := d.settings(); errors.Is(err, jellyfin.ErrDownloadsOff) && !quality.IsOriginal(s.def()) && !s.reencode() {
+		msg += ". Turn on Always Re-encode to sync without them"
+	}
+	return msg
 }
 
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
@@ -209,7 +221,7 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 		}
 		// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts
 		// what the sync needs (cache.go).
-		pl = plan.Compute(sel, d.settings().def(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
+		pl = plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
 		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
@@ -320,7 +332,7 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		case errors.Is(s.Err, syncer.ErrCardFull):
 			rows = append(rows, info("The card is full"))
 		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
-			rows = append(rows, info(jellyfin.Message(s.Err, d.hostName()))) // with code 50 (R39) too
+			rows = append(rows, info(d.serverMessage(s.Err))) // with code 50 (R39) too
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {

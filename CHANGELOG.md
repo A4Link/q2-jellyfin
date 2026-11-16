@@ -4,6 +4,10 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Changed
+
+- **Songs already in a lossy format are no longer re-encoded** under an Opus Sync or Streaming Quality: MP3, AAC, Ogg Vorbis, Opus, WMA and AC-3 files come as the server's file, untouched, since encoding them again only loses more. Lossless songs are transcoded as before. **Settings → Quality and Storage → Always Re-encode** (off by default) re-encodes lossy songs too, for smaller files; the row says underneath what its setting means. After updating, the next sync brings lossy songs synced at Opus again as their originals, unless Always Re-encode is turned on first. An account without the server's download permission needs Always Re-encode on to sync them: its sync now says so when it stops (README, Known limitations).
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

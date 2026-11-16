@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/library"
 	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
 
@@ -168,7 +170,9 @@ func TestLiveSyncFavourites(t *testing.T) {
 	}
 }
 
-// At an Opus Sync Quality, the same sync brings Ogg Opus files, tagged, at that quality.
+// At an Opus Sync Quality, the same sync brings Ogg Opus files, tagged, at that quality; Delta, an
+// MP3 and so already lossy, comes as the server's file (U37). With Always Re-encode on, the next
+// sync brings Delta as Ogg Opus too, in place of the MP3.
 func TestLiveSyncFavouritesOpus(t *testing.T) {
 	d, _ := liveDaemon(t, 0)
 	d.do("setdefq", "opus-96")
@@ -178,7 +182,9 @@ func TestLiveSyncFavouritesOpus(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("%q", got)
 	}
-	for _, f := range got {
+	const delta = "Second Artist/2010 - Second Album/01 - Delta"
+	isOpus := func(f string) {
+		t.Helper()
 		b, _ := os.ReadFile(filepath.Join(d.card, "Jellyfin", f))
 		if !strings.HasSuffix(f, ".opus") || !bytes.HasPrefix(b, []byte("OggS")) || !bytes.Contains(b, []byte("OpusTags")) {
 			t.Errorf("%s: not Ogg Opus", f)
@@ -188,6 +194,32 @@ func TestLiveSyncFavouritesOpus(t *testing.T) {
 			t.Errorf("%s: no TITLE tag", f)
 		}
 	}
+	for _, f := range got {
+		if f == delta+".mp3" {
+			b, _ := os.ReadFile(filepath.Join(d.card, "Jellyfin", f))
+			var e *library.Entry
+			for _, x := range d.manifest().Songs {
+				if strings.HasSuffix(filepath.ToSlash(x.Path), f) {
+					e = x
+				}
+			}
+			if e == nil || e.Quality != "original" || e.SrcSize <= 0 || int64(len(b)) != e.SrcSize {
+				t.Errorf("%s: not kept as the server's file (%d bytes): %+v", f, len(b), e)
+			}
+			continue
+		}
+		isOpus(f)
+	}
+	if !slices.Contains(got, delta+".mp3") {
+		t.Fatalf("Delta not kept as MP3: %q", got)
+	}
+	d.do("reencode")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "Delta re-encoded", func() bool {
+		return slices.Contains(onCard(t, d), delta+".opus") && !slices.Contains(onCard(t, d), delta+".mp3")
+	})
+	isOpus(delta + ".opus")
 }
 
 // Choose Playlists: a playlist's songs in its order, duplicates kept, music only.

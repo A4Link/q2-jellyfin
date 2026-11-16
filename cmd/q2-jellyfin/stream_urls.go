@@ -52,9 +52,12 @@ func urlField(s string) string {
 // urlsMax: the song started and those after it first, then the ones before it as room allows.
 func (s *streamer) urlsQueue(songs []jellyfin.Song, from int, ps playerSource) (b []byte, lo, hi int) {
 	lo, hi = max(0, from-urlsBefore), min(len(songs), from+urlsAfter)
-	q := quality.Original
+	q, re := quality.Original, false
 	if s.quality != nil {
 		q = quality.Normal(s.quality()) // once: it reads settings.json
+	}
+	if s.reencode != nil {
+		re = s.reencode()
 	}
 	m := s.manifest()
 	var hearts map[string]bool
@@ -67,7 +70,7 @@ func (s *streamer) urlsQueue(songs []jellyfin.Song, from int, ps playerSource) (
 		if e := m.Songs[sg.ID]; s.synced(e) {
 			src = e.Path // on the card: played as a local file within the queue
 		} else {
-			src = ps.PlayerURL(sg.ID, library.Quality(q, sg.Suffix))
+			src = ps.PlayerURL(sg.ID, library.Quality(q, sg, re))
 		}
 		cover := ""
 		if sg.CoverArt != "" {

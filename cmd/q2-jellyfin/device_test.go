@@ -565,12 +565,12 @@ func TestRootSignedIn(t *testing.T) {
 func TestQualityAndStoragePage(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	r := d.do("storage")
-	want := []string{"Sync Quality: Original", "Streaming Quality: Original",
+	want := []string{"Sync Quality: Original", "Streaming Quality: Original", "Always Re-encode: Off",
 		"Space to Keep Free: 512 MB", "Playback Cache: 2 GB", "Clear Playback Cache"}
 	if got := titles(r); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("%q, want %q", got, want)
 	}
-	for i, uri := range []string{"defq", "streamq", "keepfree", "cache", "clearcache"} {
+	for i, uri := range []string{"defq", "streamq", "reencode", "keepfree", "cache", "clearcache"} {
 		if r.Rows[i].URI != uri {
 			t.Errorf("%s URI %q", r.Rows[i].Title, r.Rows[i].URI)
 		}
@@ -578,6 +578,60 @@ func TestQualityAndStoragePage(t *testing.T) {
 	for _, row := range d.do("settings").Rows {
 		if strings.HasPrefix(row.Title, "Sync Quality") || strings.HasPrefix(row.Title, "Playback Cache") {
 			t.Errorf("still in Settings: %q", row.Title)
+		}
+	}
+}
+
+// U37: Always Re-encode is off by default and says what that means underneath; a press turns it
+// on (saved, toasted), the row then says what on means, and a second press turns it off again.
+func TestAlwaysReencode(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	row := func() q2spot.Row {
+		for _, r := range d.do("storage").Rows {
+			if r.URI == "reencode" {
+				return r
+			}
+		}
+		t.Fatal("no Always Re-encode row")
+		return q2spot.Row{}
+	}
+	if r := row(); r.Title != "Always Re-encode: Off" || r.Subtitle != "MP3, AAC and Opus songs stay as they are" || r.Kind != "action" {
+		t.Fatalf("default %+v", r)
+	}
+	if m := d.do("reencode").Message; !strings.HasPrefix(m, "Always Re-encode: On") {
+		t.Fatalf("toast %q", m)
+	}
+	if !d.settings().reencode() {
+		t.Fatal("not saved")
+	}
+	if r := row(); r.Title != "Always Re-encode: On" || r.Subtitle != "Lossy songs too: smaller, lower quality" {
+		t.Fatalf("on %+v", r)
+	}
+	if m := d.do("reencode").Message; !strings.HasPrefix(m, "Always Re-encode: Off") || d.settings().reencode() {
+		t.Fatalf("second press %q", m)
+	}
+}
+
+// A sync paused because the server refuses a download (syncer.ErrRefused) says Always Re-encode gets
+// round it, only when it would: under an Opus Sync Quality with Always Re-encode off.
+func TestDownloadsOffHint(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	d.client()
+	err := fmt.Errorf("%w: %w", syncer.ErrRefused, jellyfin.ErrDownloadsOff)
+	plain := jellyfin.Message(err, d.hostName())
+	for _, c := range []struct {
+		q, re string
+		hint  bool
+	}{{"original", "", false}, {"opus-128", "", true}, {"opus-128", "on", false}} {
+		if e := d.saveSettings(settings{DefaultQuality: c.q, Reencode: c.re}); e != nil {
+			t.Fatal(e)
+		}
+		want := plain
+		if c.hint {
+			want += ". Turn on Always Re-encode to sync without them"
+		}
+		if got := strings.Join(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})), "|"); !strings.Contains(got, "|"+want+"|Resume") {
+			t.Errorf("%s reencode %q: %q, want %q", c.q, c.re, got, want)
 		}
 	}
 }

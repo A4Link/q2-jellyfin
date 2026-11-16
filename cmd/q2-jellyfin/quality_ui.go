@@ -33,6 +33,18 @@ func choiceName(q string) string {
 	return quality.Name(q)
 }
 
+// reencodeRow is Quality and Storage's Always Re-encode, what it does underneath. Off (the default),
+// a song already lossy (MP3, AAC, Opus…) is synced and streamed as it is under an Opus quality:
+// encoding it again only loses more (library.Quality).
+func reencodeRow(s settings) q2spot.Row {
+	r := q2spot.Row{Kind: "action", URI: "reencode", Title: "Always Re-encode: Off",
+		Subtitle: "MP3, AAC and Opus songs stay as they are"}
+	if s.reencode() {
+		r.Title, r.Subtitle = "Always Re-encode: On", "Lossy songs too: smaller, lower quality"
+	}
+	return r
+}
+
 // syncQualityPage lists the choices for Settings → Quality and Storage → Sync Quality.
 func syncQualityPage(s settings) q2spot.Reply {
 	return q2spot.Reply{Message: "refresh", Rows: choiceRows("setdefq", s.def())}

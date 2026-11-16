@@ -40,7 +40,7 @@ Things to know:
 - The server must be `https://`; `http://` is refused. Certificates are verified, and the token is never sent to another host on a redirect.
 - **Only an access token is stored on the card**, in `.jellyfin/credentials`: the token from Quick Connect or a password sign-in, never a password. It is encrypted with a key kept on the Q2 itself, so the card on its own doesn't give it away, but whoever has both can use it. **Tip: use a Jellyfin user just for the Q2, not an admin**, so a lost Q2 opens only that user's music. If it is lost, revoke the Q2 under **Dashboard → Devices**. A Q2 signed in with an API key before this version keeps that key on the card instead; if that card or Q2 is lost, delete the key under **Dashboard → API Keys** (revoking the device doesn't cancel an API key).
 - **Settings → Account** shows the server and who is signed in; press **Signed in as** to sign in as another user with a password; **Sign Out** removes the token and shows the sign-in. Your music stays on the card.
-- Syncing in **Original** quality needs the user's **Allow media downloading** permission on the server; Opus transcodes don't.
+- Syncing in **Original** quality needs the user's **Allow media downloading** permission on the server; Opus transcodes don't. Under an Opus quality, songs that are already lossy (MP3, AAC, Opus…) still sync as the server's file, which needs the permission, unless **Always Re-encode** is on.
 
 On Q2 Pod firmware that has them, Jellyfin's Loading… and error pages have no **Stop Jellyfin** row (an error page has **Retry** and **Cancel**, Cancel going back as Return does), and **⋯** on Now Playing, while Jellyfin's songs play, opens the **Play Queue** instead of the Q2's own ⋯ page: the songs queued to play (up to 100 before the one you pressed and 400 from it on). It opens at the song playing, with the songs after it following, then *Earlier songs*. The song playing is marked *Now Playing* once the Q2 says it plays (a Q2 Pod with `now`); until then, and on an older Q2 Pod, the song you pressed is marked *Started here*. Press a song to play the queue from it. It needs no Wi-Fi to show; after the Q2 is switched off, or after Sign Out, it says *Nothing from Jellyfin is playing* until you play something again. Older firmware ignores both.
 
@@ -55,6 +55,8 @@ The app opens on its sections: **Newly Added** (the latest albums), **Albums**, 
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**.
 
 **Quality.** By default every song is the server's own file, untouched: **Original (no transcoding)**. To save space or data you can choose an **Opus** transcode instead, at 320, 288, 256, 224, 192, 160, 128, 96 or 64 kbps; the Jellyfin server does the converting, and the Q2 receives Opus files. Both qualities are set in **Settings → Quality and Storage**: **Sync Quality** is every synced song's, and **Streaming Quality** is what you stream. Each opens a list of the choices, Original first, then Opus from 320 kbps down, with the current one marked **Selected**. When you change Sync Quality, the next sync brings the songs already on the Q2 again at the new quality (the preview shows how much).
+
+**Always Re-encode** (Settings → Quality and Storage, off by default) decides what an Opus quality does to songs that are already lossy: MP3, AAC (including AAC in .m4a), Ogg Vorbis, Opus, WMA and AC-3. Off, they come as the server's file, untouched: encoding a lossy file again only loses more, and saves less than its bitrate suggests. On, they are re-encoded to the chosen Opus rate too, for smaller files at a lower quality. Lossless songs (FLAC, ALAC, WAV, APE…) are transcoded either way. The row says underneath what its setting means. Turning it on or off changes what the next sync brings, as a Sync Quality change does.
 
 Two exceptions are automatic: an original the Q2 can't play (WavPack, Musepack, …) arrives as Opus 320, and on Q2 Pod firmware without the `playlist` extension, whose folder playback plays only FLAC and MP3, a streamed transcode is MP3 at the chosen bitrate.
 
@@ -115,6 +117,10 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 | `library` | After a sync the Q2 updates its library and imports the playlists itself. A playlist you made on the Q2 is never replaced: a server playlist with the same name arrives as "<name> (Jellyfin)". | Run **Library → Update Local Music**, then **Playlists → Import playlist** yourself. |
 | `progress` | A real progress bar. | A text bar such as `[#####-----] 47 %`. |
 | `playlist` | Streaming plays the synced songs from the card inside a playlist, and streams every format the Q2 plays as it is. | Everything in the list streams, synced or not, and only FLAC and MP3 stream as they are; anything else, and any transcode, streams as MP3 (320 kbps, or the bitrate chosen). |
+
+## Known limitations
+
+- **An account without the download permission can't sync lossy songs as they are.** Under an Opus Sync Quality, MP3, AAC and Opus songs sync as the server's file, which the server sends only to a user with **Allow media downloading**. Without it the sync stops with *Downloads are turned off for this account on the server. Turn on Always Re-encode to sync without them*. Either give the user the permission, or turn on **Always Re-encode** so those songs are transcoded like the rest.
 
 ## Errors and logs
 

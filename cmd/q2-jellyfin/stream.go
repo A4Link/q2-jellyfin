@@ -43,6 +43,7 @@ type streamer struct {
 	backoff                     []time.Duration      // wait after each failed try of a song; one try per entry
 	log                         *applog.Log          // optional
 	quality                     func() string        // optional Streaming Quality: a transcode (Opus) applies to every streamed song
+	reencode                    func() bool          // optional Always Re-encode: a lossy song is transcoded too (library.Quality)
 	moving                      func(id string) bool // optional: a sync running or paused will move or remove this song
 	started                     func(jellyfin.Song)  // optional: a song streamed from the server starts playing (report.go)
 	// queued, optional, is a URL queue named in .play with now=1 (Q2 Pod's "now", now.go): its seq,
@@ -207,20 +208,23 @@ func (s *streamer) start(songs []jellyfin.Song, from int) {
 	s.clean()                              // old queue file, stale and half-fetched songs
 	jobs := make([]job, len(songs))
 	m := s.manifest()
-	sq := quality.Original
+	sq, re := quality.Original, false
 	if s.quality != nil {
 		sq = quality.Normal(s.quality()) // once: it reads settings.json
+	}
+	if s.reencode != nil {
+		re = s.reencode()
 	}
 	for i, sg := range songs {
 		if e := m.Songs[sg.ID]; s.caps.Playlist && s.synced(e) {
 			jobs[i] = job{path: e.Path}
 			continue
 		}
-		// Original (the server's file, untouched) unless Streaming Quality chooses an Opus transcode.
-		// An original the Q2 can't play becomes quality.Fallback (library.Quality). Without the
-		// firmware's playlist extension, folder playback plays only FLAC and MP3: a transcode is MP3
-		// at the same rate.
-		ext, q := strings.ToLower(sg.Suffix), library.Quality(sq, sg.Suffix)
+		// Original (the server's file, untouched) unless Streaming Quality chooses an Opus transcode,
+		// which a lossy song skips unless Always Re-encode is on. An original the Q2 can't play
+		// becomes quality.Fallback (library.Quality). Without the firmware's playlist extension,
+		// folder playback plays only FLAC and MP3: a transcode is MP3 at the same rate.
+		ext, q := strings.ToLower(sg.Suffix), library.Quality(sq, sg, re)
 		if quality.IsOriginal(q) && !s.caps.Playlist && ext != "flac" && ext != "mp3" {
 			q = quality.Fallback
 		}

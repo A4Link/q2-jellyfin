@@ -457,15 +457,35 @@ func TestPlayable(t *testing.T) {
 }
 
 // One rule for every caller: an original the Q2 can't play, or of no known format, is fetched as
-// quality.Fallback; a playable original and every transcode stay as asked.
+// quality.Fallback; a playable original stays as asked; a transcode applies to a lossless song, and
+// to a lossy one only with Always Re-encode (reencode), else the lossy file comes as it is.
 func TestQuality(t *testing.T) {
-	for _, c := range []struct{ q, sfx, want string }{
-		{quality.Original, "flac", quality.Original}, {quality.Original, "FLAC", quality.Original},
-		{quality.Original, "wv", quality.Fallback}, {quality.Original, "", quality.Fallback},
-		{"opus-128", "wv", "opus-128"}, {"mp3-320", "flac", "mp3-320"},
+	for _, c := range []struct {
+		q, sfx, codec string
+		reencode      bool
+		want          string
+	}{
+		{quality.Original, "flac", "", false, quality.Original}, {quality.Original, "FLAC", "", false, quality.Original},
+		{quality.Original, "wv", "", false, quality.Fallback}, {quality.Original, "", "", false, quality.Fallback},
+		{quality.Original, "mp3", "mp3", true, quality.Original},
+		{"opus-128", "wv", "wavpack", false, "opus-128"}, {"mp3-320", "flac", "flac", false, "mp3-320"},
+		// lossy: as it is, unless Always Re-encode
+		{"opus-128", "mp3", "mp3", false, quality.Original}, {"opus-128", "mp3", "mp3", true, "opus-128"},
+		{"opus-64", "ogg", "opus", false, quality.Original}, {"opus-64", "ogg", "vorbis", false, quality.Original},
+		{"mp3-320", "aac", "aac", false, quality.Original},
+		// m4a and wma by their codec: AAC is lossy, ALAC isn't; with no codec, not taken as lossy
+		{"opus-128", "m4a", "aac", false, quality.Original}, {"opus-128", "m4a", "alac", false, "opus-128"},
+		{"opus-128", "m4a", "", false, "opus-128"}, {"opus-128", "wma", "wmalossless", false, "opus-128"},
+		{"opus-128", "wma", "wmav2", false, quality.Original},
+		// no codec named: by the suffix
+		{"opus-128", "mp3", "", false, quality.Original}, {"opus-128", "MP3", "", false, quality.Original},
+		{"opus-128", "flac", "", false, "opus-128"},
+		// a lossy file the Q2 can't play is still transcoded
+		{"opus-128", "mpc", "musepack", false, "opus-128"},
 	} {
-		if got := Quality(c.q, c.sfx); got != c.want {
-			t.Errorf("Quality(%q, %q) = %q, want %q", c.q, c.sfx, got, c.want)
+		s := jellyfin.Song{Suffix: c.sfx, Codec: c.codec}
+		if got := Quality(c.q, s, c.reencode); got != c.want {
+			t.Errorf("Quality(%q, %q/%q, reencode %v) = %q, want %q", c.q, c.sfx, c.codec, c.reencode, got, c.want)
 		}
 	}
 }

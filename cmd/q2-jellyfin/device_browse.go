@@ -49,14 +49,15 @@ func (d *daemon) view() view {
 	d.mu.Unlock()
 	v := view{sel: sel, m: m, res: res, artists: artists, keyed: map[string][]string{}, albumOn: map[string]map[string]bool{},
 		pending: map[string]bool{}, held: map[string]bool{}, covers: &d.art.songs}
-	syncQ := d.settings().def() // every chosen item's, but a held one's: as on the card, as the plan does
+	set := d.settings()
+	syncQ := set.def() // every chosen item's, but a held one's: as on the card, as the plan does
 	for _, it := range sel.Items {
 		v.held[selection.Key(it.Kind, it.ID)] = it.Held
 		if it.Kind == selection.KindLibrary {
 			v.lib, v.libHeld = true, it.Held
 		}
 	}
-	suffix := map[string]string{} // of the fetched songs on the card
+	song := map[string]jellyfin.Song{} // the fetched songs on the card
 	for _, songs := range res {
 		for _, s := range songs {
 			if m.Songs[s.ID] == nil {
@@ -65,7 +66,7 @@ func (d *daemon) view() view {
 			if v.albumOn[s.AlbumID] == nil {
 				v.albumOn[s.AlbumID] = map[string]bool{}
 			}
-			v.albumOn[s.AlbumID][s.ID], suffix[s.ID] = true, s.Suffix
+			v.albumOn[s.AlbumID][s.ID], song[s.ID] = true, s
 		}
 	}
 	for id, e := range m.Songs {
@@ -85,9 +86,9 @@ func (d *daemon) view() view {
 				}
 			}
 		}
-		// An original the Q2 can't play syncs as quality.Fallback (library.Quality): not a change, nor
-		// is one whose format isn't known here.
-		if want == "" || e.Quality == want || e.Quality == library.Quality(want, suffix[id]) {
+		// An original the Q2 can't play syncs as quality.Fallback, a lossy song under a transcode as
+		// it is (library.Quality): not a change, nor is one whose format isn't known here.
+		if want == "" || e.Quality == want || e.Quality == library.Quality(want, song[id], set.reencode()) {
 			continue
 		}
 		for _, k := range e.Items {

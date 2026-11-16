@@ -206,6 +206,22 @@ func TestSongMapping(t *testing.T) {
 	}
 }
 
+// A song's codec is its first audio stream's, lower case (an embedded cover is a video stream);
+// none named is "".
+func TestSongCodec(t *testing.T) {
+	var w wireItem
+	if err := json.Unmarshal([]byte(`{"Id":"s1","MediaSources":[{"Container":"m4a","MediaStreams":[
+		{"Type":"Video","Codec":"mjpeg"},{"Type":"Audio","Codec":"AAC"},{"Type":"Audio","Codec":"alac"}]}]}`), &w); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.song().Codec; got != "aac" {
+		t.Errorf("codec %q, want aac", got)
+	}
+	if got := (wireItem{}).song().Codec; got != "" {
+		t.Errorf("no streams: codec %q", got)
+	}
+}
+
 func TestSuffixFromContainer(t *testing.T) {
 	for in, want := range map[string]string{"mov,mp4,m4a": "m4a", "mp3": "mp3", "ogg": "ogg"} {
 		if got := (wireItem{Container: in}).suffix(); got != want {
