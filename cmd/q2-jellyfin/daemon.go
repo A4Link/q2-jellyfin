@@ -33,7 +33,8 @@ const (
 	// previewTTL: a preview older than this is computed again when Sync is opened. Entire Library's
 	// asks the server for every song, so it is kept as long as a list (listFor): an album added or
 	// a playlist changed on the server shows on the Sync page up to 5 minutes later. A selection
-	// change (gen), Check Again and Sync Favourites (dropPreview) compute it again at once.
+	// change (gen), Check Again and Sync Favourites (dropPreview) compute it again at once, and so
+	// does a heart sent to the server with Favourites in Sync (favsChanged).
 	previewTTL  = listFor
 	clearArmFor = 10 * time.Second // Clear Playback Cache: a second press within this clears
 	logoutIn    = 5 * time.Second  // Sign Out's word to the server, in the background
