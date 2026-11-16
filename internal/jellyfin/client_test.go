@@ -638,6 +638,19 @@ func TestQuickConnectExpired(t *testing.T) {
 	}
 }
 
+// A code that expires between the poll that saw it approved and the swap for a token says so, not
+// where a signed-in Q2 signs in again (it isn't signed in).
+func TestQuickConnectSignInExpired(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/AuthenticateWithQuickConnect": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusUnauthorized) },
+	})
+	c, _ := New(Creds{Server: srv.URL}, srv.Client())
+	_, err := c.QuickConnectSignIn(context.Background(), "old")
+	if !errors.Is(err, ErrQuickConnectExpired) || Message(err, "h") != "The Quick Connect code expired. Try again" {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
 // Favourites asks for the heart-marked songs and follows every page.
 func TestFavoritesPages(t *testing.T) {
 	var starts []string
