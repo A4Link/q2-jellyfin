@@ -659,7 +659,8 @@ func getAlbum(ctx context.Context, cl *jellyfin.Client, id string) (jellyfin.Alb
 	return a, songs, err
 }
 
-// oneArtist gives an album's songs a's artist when they disagree on their album artist (getAlbum).
+// oneArtist gives an album's songs a's artist when they disagree on their album artist (getAlbum,
+// songsOf's artist).
 func oneArtist(a jellyfin.Album, songs []jellyfin.Song) {
 	for _, s := range songs {
 		if a.Artist != "" && s.AlbumArtist != songs[0].AlbumArtist {
@@ -698,11 +699,12 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		d.artistAlbums[id] = als
 		d.mu.Unlock()
 		name = a.Name
-		for _, al := range als {
-			_, s, err := getAlbum(ctx, cl, al.ID)
+		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
+			s, err := cl.AlbumSongs(ctx, al.ID)
 			if err != nil {
 				return nil, "", err
 			}
+			oneArtist(al, s)
 			songs = append(songs, s...)
 		}
 	case selection.KindSong:

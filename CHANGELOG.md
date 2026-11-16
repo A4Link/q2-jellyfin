@@ -11,6 +11,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **The Sync page is ready sooner with an artist in Sync:** each of the artist's albums is one request to the server, not two, so it takes half the time it did (an artist with many albums, such as "Various Artists" in a big library, could take long enough to time out).
 
 ## [0.7.0] - 2026-11-12
 
