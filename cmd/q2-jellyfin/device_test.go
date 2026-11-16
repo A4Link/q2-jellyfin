@@ -2166,6 +2166,96 @@ func TestEntireLibraryPagingEnds(t *testing.T) {
 	}
 }
 
+// A preview is reused for previewTTL (audit 18): opening Sync a few minutes later asks the server
+// nothing, even for Entire Library; one older is computed again, and so is one after a selection
+// change, Check Again or Sync Favourites, however new.
+func TestPreviewReused(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	age := func(by time.Duration) {
+		d.mu.Lock()
+		d.daemon.preview.at = d.daemon.preview.at.Add(-by)
+		d.mu.Unlock()
+	}
+	again := func(what string, want bool) {
+		t.Helper()
+		before := n.songListReqs.Load()
+		d.preview(t)
+		if got := n.songListReqs.Load() > before; got != want {
+			t.Errorf("%s: fetched again %v, want %v", what, got, want)
+		}
+	}
+	age(4 * time.Minute)
+	again("4 minutes on", false)
+	age(previewTTL)
+	again("past previewTTL", true)
+	d.do("check")
+	again("Check Again", true)
+	d.do("setdefq", "opus-160") // the selection's quality: a change (gen)
+	again("a selection change", true)
+	before := n.songListReqs.Load()
+	d.do("syncfav")
+	eventually(t, "Sync Favourites' preview", func() bool { return n.songListReqs.Load() > before })
+}
+
+// A heart given or taken on the Q2, once on the server, makes the next Sync compute a new preview
+// when Favourites is in Sync, however new the old one is: an un-hearted song leaves at that sync.
+// Entire Library alone keeps its preview: it would ask the server for every song again.
+func TestPreviewAfterHeart(t *testing.T) {
+	for _, c := range []struct {
+		key  string
+		want bool
+	}{{favKey, true}, {"library:all", false}} {
+		t.Run(c.key, func(t *testing.T) {
+			d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, favs: 2}, "", true)
+			d.do("toggle", c.key)
+			d.preview(t)
+			d.mu.Lock()
+			p := d.daemon.preview
+			d.mu.Unlock()
+			d.favsChanged()
+			d.preview(t)
+			d.mu.Lock()
+			again := d.daemon.preview != p
+			d.mu.Unlock()
+			if again != c.want {
+				t.Errorf("a new preview %v, want %v", again, c.want)
+			}
+		})
+	}
+}
+
+// A heart the server didn't take changed nothing there, so the Sync preview stays; one it took
+// makes the next Sync open preview again (Favourites in Sync).
+func TestPreviewAfterHeartSent(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3, favs: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", favKey)
+	same := func() bool {
+		d.mu.Lock()
+		p := d.daemon.preview
+		d.mu.Unlock()
+		d.preview(t)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.daemon.preview == p
+	}
+	d.preview(t)
+	d.rep.box.add(report{Kind: favKind, Item: "al0.0", On: true})
+	n.favStatus.Store(503)
+	d.sendNow(t)
+	if !same() {
+		t.Error("a heart that failed to send previewed again")
+	}
+	n.favStatus.Store(0)
+	d.sendNow(t)
+	if len(d.outbox()) != 0 || same() {
+		t.Errorf("a heart sent: outbox %+v, preview kept", d.outbox())
+	}
+}
+
 // Sign Out and Check Again cancel a preview still fetching (M11).
 func TestPreviewCancelled(t *testing.T) {
 	for _, op := range []string{"signout", "check"} {
