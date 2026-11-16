@@ -319,7 +319,8 @@ func (d *daemon) sendReports() {
 		var err error
 		switch {
 		case r.Kind == favKind:
-			err, favs = d.sendFav(cl, r), true
+			err = d.sendFav(cl, r)
+			favs = favs || err == nil // one not taken changed nothing on the server
 		case r.Kind == playedKind && d.reportsOn():
 			counted, err = d.sendPlayed(cl, r)
 		default:

@@ -293,7 +293,7 @@ func TestReportsSetting(t *testing.T) {
 func TestReportsSignOut(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	d.rep.box.add(report{Kind: "played", Item: "al0.0", At: 1})
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if len(d.outbox()) != 0 {
 		t.Fatalf("%+v", d.outbox())
@@ -410,7 +410,7 @@ func TestReportsStopInFlight(t *testing.T) {
 	if m := d.do("reportplays").Message; m != "Report Plays to Server: On" || exists(d.playsPath()) || len(d.outbox()) != 0 {
 		t.Fatalf("%q plays %v outbox %+v", m, exists(d.playsPath()), d.outbox())
 	}
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	d.streamStarted(jellyfin.Song{ID: "al0.3"})
 	d.bg.Wait()
@@ -603,7 +603,7 @@ func TestReportsNowOffSignedOut(t *testing.T) {
 	d.nowSteps(t, n, t0, []nowStep{
 		{40 * time.Second, "100\t0\tplaying\t40\t200", []string{"start al0.0"}},
 	})
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if exists(filepath.Join(d.tmp, "q2-jellyfin.queue")) {
 		t.Fatal("the queue is kept after Sign Out")
@@ -670,7 +670,7 @@ func TestReportsNowKeepsAppUp(t *testing.T) {
 		t.Fatal("reporting off: still up")
 	}
 	d.do("reportplays") // on
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if !d.idle(t0.Add(2*time.Hour + time.Second)) {
 		t.Fatal("signed out: still up")
