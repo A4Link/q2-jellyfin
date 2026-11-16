@@ -100,8 +100,8 @@ func (d *daemon) signInFromFile() {
 	rerr := errors.New("too big to be a sign-in file")
 	if fi.Size() <= signInFileMax {
 		b, rerr = os.ReadFile(p)
-		q2.Wipe(p) // FAT keeps a deleted file's bytes: the password goes first
 	}
+	q2.Wipe(p)                           // FAT keeps a deleted file's bytes: the password goes first, at any size
 	if err := os.Remove(p); err != nil { // a read-only card: then the sign-in couldn't be kept either
 		d.log.Printf("sign-in file: can't delete it: %v", err)
 		d.login.mu.Lock()
