@@ -11,6 +11,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **The no-Wi-Fi hint names System settings:** without Wi-Fi, Jellyfin's main page says *Turn on Wi-Fi in System settings* (the Q2's own), not *Settings*, which read as Jellyfin's Settings row just below it.
+- **Report Plays to Server: Off says so underneath:** *Plays aren't sent to your server*, instead of that your server counts the songs you play.
 
 ## [0.7.0] - 2026-11-12
 

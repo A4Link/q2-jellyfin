@@ -267,16 +267,16 @@ func TestOutboxKeepsFavourites(t *testing.T) {
 func TestReportsSetting(t *testing.T) {
 	n := &nav{}
 	d := newTestDaemon(t, n, "", true)
-	if _, ok := find(d.do("settings"), "Report Plays to Server: On"); !ok {
-		t.Fatalf("%q", titles(d.do("settings")))
+	if r, ok := find(d.do("settings"), "Report Plays to Server: On"); !ok || r.Subtitle != "Your Jellyfin server counts the songs you play" {
+		t.Fatalf("%q %q", titles(d.do("settings")), r.Subtitle)
 	}
 	d.rep.box.add(report{Kind: "played", Item: "al0.0", At: 1})
 	d.notePlays(func(*playsMark) {})
 	if m := d.do("reportplays").Message; m != "Report Plays to Server: Off" {
 		t.Fatalf("%q", m)
 	}
-	if _, ok := find(d.do("settings"), "Report Plays to Server: Off"); !ok || len(d.outbox()) != 0 || exists(d.playsPath()) {
-		t.Fatalf("%q outbox %+v plays %v", titles(d.do("settings")), d.outbox(), exists(d.playsPath()))
+	if r, ok := find(d.do("settings"), "Report Plays to Server: Off"); !ok || r.Subtitle != "Plays aren't sent to your server" || len(d.outbox()) != 0 || exists(d.playsPath()) {
+		t.Fatalf("%q %q outbox %+v plays %v", titles(d.do("settings")), r.Subtitle, d.outbox(), exists(d.playsPath()))
 	}
 	d.streamStarted(jellyfin.Song{ID: "al0.1"})
 	d.bg.Wait()
