@@ -2410,6 +2410,43 @@ func TestIncludedViaCachedArtist(t *testing.T) {
 	}
 }
 
+// After a restart, with the playlist's songs and the artist's albums not in memory, adding a song
+// or an album asks nothing more of the server: it is added on its own (audit 2026-11-16 #16). The
+// plan holds the song once, and removing the playlist and the artist leaves both in Sync.
+func TestIncludedViaNotFetched(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	file := filepath.Join(d.dir, "selection.json")
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindPlaylist, ID: "pl1", Name: "Mix"}) // al0's songs
+	sel.Save(file)
+	before := n.reqs.Load()
+	if r := d.do("toggle", "song:al0.1"); r.Message != "Added to Sync · 1 song" {
+		t.Fatalf("%q", r.Message)
+	}
+	if got := n.reqs.Load() - before; got != 3 { // the song and its music library (cl.Song), not Mix
+		t.Fatalf("%d requests", got)
+	}
+	sel, _ = selection.Load(file)
+	sel.Toggle(selection.Item{Kind: selection.KindArtist, ID: "ar1", Name: "Artist"}) // al0 and al1
+	sel.Save(file)
+	if r := d.do("toggle", "album:al1"); r.Message != "Added to Sync · 2 songs" || n.artistItemReqs.Load() != 0 {
+		t.Fatalf("%q, %d artist requests", r.Message, n.artistItemReqs.Load())
+	}
+	d.preview(t)
+	d.mu.Lock()
+	add := len(d.daemon.preview.plan.Add)
+	d.mu.Unlock()
+	if add != 4 { // the artist's 4 songs; al0.1 (in Mix and on its own too) once
+		t.Fatalf("%d songs to add", add)
+	}
+	d.do("toggle", "playlist:pl1")
+	d.do("toggle", "artist:ar1")
+	if it := d.selected(t); len(it) != 2 || it[0].ID != "al0.1" || it[1].ID != "al1" {
+		t.Fatalf("%+v", it)
+	}
+}
+
 // Two adds at once both stay in Sync: each loads the selection again after its fetch (M16).
 func TestConcurrentToggles(t *testing.T) {
 	n := &nav{albums: 2, songsPer: 2, holdAlbum: make(chan struct{})}
