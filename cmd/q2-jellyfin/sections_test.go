@@ -42,6 +42,38 @@ func TestSectionSearch(t *testing.T) {
 	}
 }
 
+// A search asks the server only for the kinds its section shows, and its later replies reuse the
+// first one's answer: one request on Artists, two (albums, songs) on Albums however many replies.
+func TestSearchAsksOnlyWhatItShows(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 60} // an album and 60 songs: more than one reply
+	d := newTestDaemon(t, n, "", true)
+	d.do("artists")
+	before := n.searchReqs.Load()
+	if got := strings.Join(titles(d.do("search", "Artist")), "|"); got != "Artist" {
+		t.Fatalf("artist search %q", got)
+	}
+	if got := n.searchReqs.Load() - before; got != 1 {
+		t.Errorf("artist search sent %d requests, want 1", got)
+	}
+	d.do("albums")
+	before = n.searchReqs.Load()
+	r := d.do("search", "x")
+	if r.Cursor == "" {
+		t.Fatalf("album search fit one reply: %d rows", len(r.Rows))
+	}
+	got := titles(r)
+	for r.Cursor != "" {
+		r = d.do("search", "x", r.Cursor)
+		got = append(got, titles(r)...)
+	}
+	if len(got) != 61 || got[0] != "Album 000" || !strings.Contains(got[60], "Song") {
+		t.Fatalf("album search %d rows: %q … %q", len(got), got[0], got[len(got)-1])
+	}
+	if got := n.searchReqs.Load() - before; got != 2 {
+		t.Errorf("album search sent %d requests, want 2", got)
+	}
+}
+
 // A search typed on Albums searches Albums even when an Artists list the user swiped away from,
 // still loading, finishes after Albums answered: Q2 Pod asks for one page at a time, so the box is
 // the page asked for last, not the one answered last.
@@ -126,8 +158,12 @@ func TestSectionsStreamErrorInSettings(t *testing.T) {
 	d.do("menu") // the firmware shows sections
 	d.do("play", "album:al0 0")
 	var r q2spot.Reply
-	eventually(t, "the stream error", func() bool { r = d.do("settings"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
-	if r.Rows[0].Title != "Couldn't stream Song 0" || r.Rows[1].Title != "Details" || r.Rows[2].Title != "Sync" {
+	const want = "Couldn't stream Song 0: Not found on the server" // as the main list says it without sections
+	eventually(t, "the stream error", func() bool { r = d.do("settings"); _, ok := find(r, want); return ok })
+	if r.Rows[0].Title != want || r.Rows[1].Title != "Details" || r.Rows[2].Title != "Sync" {
 		t.Fatalf("%q", titles(r))
+	}
+	if got := strings.Join(titles(d.do(r.Rows[1].URI, r.Rows[1].Context)), "|"); !strings.Contains(got, "Error: stream: http 404 code 70") {
+		t.Errorf("details %q", got)
 	}
 }

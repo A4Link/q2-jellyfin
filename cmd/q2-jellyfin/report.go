@@ -319,7 +319,8 @@ func (d *daemon) sendReports() {
 		var err error
 		switch {
 		case r.Kind == favKind:
-			err, favs = d.sendFav(cl, r), true
+			err = d.sendFav(cl, r)
+			favs = favs || err == nil // one not taken changed nothing on the server
 		case r.Kind == playedKind && d.reportsOn():
 			counted, err = d.sendPlayed(cl, r)
 		default:
@@ -682,14 +683,14 @@ func (idx songIndex) find(artist, album, title, track string) string {
 
 // ---- the setting ----
 
-// reportRow is Settings' Report Plays to Server.
+// reportRow is Settings' Report Plays to Server, what it does underneath.
 func reportRow(s settings) q2spot.Row {
-	state := "On"
-	if s.ReportPlays == "off" {
-		state = "Off"
-	}
-	return q2spot.Row{Kind: "action", URI: "reportplays", Title: "Report Plays to Server: " + state,
+	r := q2spot.Row{Kind: "action", URI: "reportplays", Title: "Report Plays to Server: On",
 		Subtitle: "Your Jellyfin server counts the songs you play"}
+	if s.ReportPlays == "off" {
+		r.Title, r.Subtitle = "Report Plays to Server: Off", "Plays aren't sent to your server"
+	}
+	return r
 }
 
 // toggleReports is the row's press (settingsMu held). Off forgets the plays not sent yet.

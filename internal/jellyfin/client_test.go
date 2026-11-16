@@ -117,6 +117,22 @@ func TestSignInWrongPassword(t *testing.T) {
 	}
 }
 
+// A token the server no longer takes (the Q2 revoked under Dashboard → Devices), or a library the
+// account lost, says where to sign in again, not "Wrong username or password": no password was typed.
+func TestRevokedTokenSaysSignInAgain(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusForbidden) },
+	})
+	revoked, _ := New(Creds{Server: srv.URL, User: "u", Token: "old", UserID: "u1", DeviceID: "dev"}, srv.Client())
+	err1 := revoked.Ping(context.Background())
+	_, err2 := signedIn(t, srv).Playlists(context.Background(), "name", false)
+	for _, err := range []error{err1, err2} {
+		if !errors.Is(err, ErrAuth) || Message(err, "h") != "Server refused this Q2. Sign in again: Settings → Account → Sign Out" {
+			t.Fatalf("%v / %q", err, Message(err, "h"))
+		}
+	}
+}
+
 // A server that isn't Jellyfin is refused before the password is sent.
 func TestSignInRefusesOtherServer(t *testing.T) {
 	f, srv := newFake(t, map[string]http.HandlerFunc{
@@ -331,6 +347,98 @@ func TestPlaylistOrderAndDuplicates(t *testing.T) {
 	}
 	if p.Name != "Mix" || strings.Join(ids, ",") != "b,a,b" {
 		t.Fatalf("%+v %v", p, ids)
+	}
+}
+
+// isFolderScan is the music libraries' folder lookup (musicFolders): every top-level item of lib1.
+func isFolderScan(r *http.Request) bool {
+	return r.URL.Path == "/Items" && r.URL.Query().Get("parentId") == "lib1" && r.URL.Query().Get("includeItemTypes") == ""
+}
+
+func folderScans(f *fake) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.seen {
+		if isFolderScan(r) {
+			n++
+		}
+	}
+	return n
+}
+
+// A list doesn't wait for the library's folders: the first page of Albums is the libraries'
+// lookup and the page, nothing more (audit 2026-11-16 #14).
+func TestListAsksNoFolders(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"al1","Name":"Tender"}],"TotalRecordCount":1}`))
+		},
+	})
+	if _, err := signedIn(t, srv).Albums(context.Background(), 0, 25, "name", false); err != nil {
+		t.Fatal(err)
+	}
+	if n := folderScans(f); n != 0 || len(f.seen) != 2 {
+		t.Fatalf("%d folder scans, %d requests, want 0 and 2", n, len(f.seen))
+	}
+}
+
+// The folders are asked once, for the first playlist or song, and kept for the next.
+func TestFoldersAskedOnce(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"pl1","Name":"Mix","Type":"Playlist"}`))
+		},
+		"/Playlists/pl1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"}]}`))
+		},
+		"/Items/a": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"}`))
+		},
+	})
+	c := signedIn(t, srv)
+	for i := 0; i < 2; i++ {
+		if _, s, err := c.Playlist(context.Background(), "pl1"); err != nil || len(s) != 1 {
+			t.Fatal(s, err)
+		}
+	}
+	if _, err := c.Song(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if n := folderScans(f); n != 1 {
+		t.Fatalf("%d folder scans, want 1", n)
+	}
+}
+
+// A folder lookup that runs out of time isn't kept: the next playlist asks again, and filters as
+// before.
+func TestFoldersRetriedAfterTimeout(t *testing.T) {
+	var scans atomic.Int32
+	f := &fake{h: map[string]http.HandlerFunc{
+		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"pl1","Name":"Mix","Type":"Playlist"}`))
+		},
+		"/Playlists/pl1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"a","Type":"Audio","Path":"/music/A/a.flac"},{"Id":"m","Type":"Audio","Path":"/mixed/memo.mp3"}]}`))
+		},
+	}}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isFolderScan(r) && scans.Add(1) == 1 {
+			<-r.Context().Done() // the first lookup outlasts its caller
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := signedIn(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := c.Playlist(ctx, "pl1"); err == nil {
+		t.Fatal("no error from a lookup that timed out")
+	}
+	_, s, err := c.Playlist(context.Background(), "pl1")
+	if err != nil || len(s) != 1 || s[0].ID != "a" || scans.Load() != 2 {
+		t.Fatalf("%+v %v, %d scans", s, err, scans.Load())
 	}
 }
 
@@ -685,6 +793,19 @@ func TestQuickConnectExpired(t *testing.T) {
 	c, _ := New(Creds{Server: srv.URL}, srv.Client())
 	_, err := c.QuickConnectPoll(context.Background(), "old")
 	if !errors.Is(err, ErrQuickConnectExpired) || errors.Is(err, ErrUnreachable) || Message(err, "h") != "The Quick Connect code expired. Try again" {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
+// A code that expires between the poll that saw it approved and the swap for a token says so, not
+// where a signed-in Q2 signs in again (it isn't signed in).
+func TestQuickConnectSignInExpired(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/AuthenticateWithQuickConnect": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusUnauthorized) },
+	})
+	c, _ := New(Creds{Server: srv.URL}, srv.Client())
+	_, err := c.QuickConnectSignIn(context.Background(), "old")
+	if !errors.Is(err, ErrQuickConnectExpired) || Message(err, "h") != "The Quick Connect code expired. Try again" {
 		t.Fatalf("%v / %q", err, Message(err, "h"))
 	}
 }
