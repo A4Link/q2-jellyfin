@@ -228,9 +228,10 @@ func shownServer(server string) string {
 // is on: Q2 Pod's Smart Wi-Fi turns the radio off when idle and on again 3-8 s after Streaming opens.
 const wifiWait = 15 * time.Second
 
-// netOps are the signed-in requests only the server can answer, true for an action (toasted).
+// netOps are the signed-in requests only the server can answer, true for an action (toasted). Not
+// play or npplay: a synced song may play from the card (startPlay, queuePlay).
 var netOps = map[string]bool{"latest": false, "playlists": false, "artists": false, "albums": false, "artist": false,
-	"album": false, "playlist": false, "favorites": false, "search": false, "syncpl": false, "play": true, "npplay": true, "syncfav": true}
+	"album": false, "playlist": false, "favorites": false, "search": false, "syncpl": false, "syncfav": true}
 
 // noWiFi is the page in place of one that needs the server while the Q2 has no Wi-Fi, as stock
 // Tidal's "Network Disconnected", or for an action its toast; ok is false with Wi-Fi. With the

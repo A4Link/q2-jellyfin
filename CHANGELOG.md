@@ -11,12 +11,14 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **A synced song pressed in the Play Queue plays without Wi-Fi** on Q2 Pod firmware with `playlist`, from the card, instead of *Network Disconnected*. A song that isn't synced still says so.
+- **A synced song plays without Wi-Fi when pressed in the Play Queue or on an album, playlist or Favourites page already open**, on Q2 Pod firmware with `playlist`, from the card, instead of *Network Disconnected*. A song that isn't synced still says so (as does one a paused sync is about to replace).
 - **Favourites syncs as its own playlist with Sync Entire Library on:** *Sync Favourites* and *Add to Sync* on its page add it, a **Favourites** playlist appears on the Q2 and follows your hearts (its songs, already in the library, are not downloaded twice), and it can be taken out again. Before, the Sync page said *In Sync* and no Favourites playlist ever appeared.
 - **The Favourites row in Playlists is held to add it to Sync or take it out,** and shows *Waiting to sync* or *On Q2*, as the other playlists do.
 - **Sign Out asks first**: the first press says *Press again to sign out*, as Clear Playback Cache does, since Sign Out stops a sync and the music and forgets plays and hearts not sent yet; any other press in between drops it. Afterwards the sign-in page no longer says *Signed in as* the user just signed out.
 - **Clear Playback Cache's second press clears the cache:** the Quality and Storage page, which Q2 Pod asks again after the first press's message, no longer drops that first press.
 - **A revoked or expired sign-in no longer says *Wrong username or password*** when no password was typed (the Q2 revoked under Dashboard → Devices, the server rebuilt, or a library the account lost): pages, the Sync page and Settings now say *Server refused this Q2. Sign in again: Settings → Account → Sign Out*. A wrong password typed at sign-in still says *Wrong username or password*.
-
+- 
 
 ## [0.7.0] - 2026-11-12
 
