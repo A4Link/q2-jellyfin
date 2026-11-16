@@ -1095,6 +1095,7 @@ func TestControlOpsReplyFast(t *testing.T) {
 	timed("pause")
 	timed("resume")
 	timed("cancel")
+	d.do("signout") // the first press only asks
 	timed("signout")
 	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
 }
@@ -1399,7 +1400,7 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 	t.Cleanup(func() { close(n.block) })
 	d.playMu.Lock() // a previous start still running
 	d.do("play", "album:al1 0")
-	d.do("signout")
+	pressSignOut(d)
 	time.Sleep(50 * time.Millisecond) // let an unguarded stop run first, as in the race
 	d.playMu.Unlock()
 	time.Sleep(300 * time.Millisecond)
@@ -2114,6 +2115,9 @@ func TestPreviewCancelled(t *testing.T) {
 			sel.Save(filepath.Join(d.dir, "selection.json"))
 			d.do("sync")
 			eventually(t, "the preview's request", func() bool { return n.albumReqs.Load() == 1 })
+			if op == "signout" {
+				d.do(op) // the first press only asks
+			}
 			d.do(op)
 			eventually(t, "the request cancelled", func() bool { return n.albumGaveUp.Load() == 1 })
 			close(n.holdAlbum)
@@ -2131,7 +2135,7 @@ func TestSignOutCancelsSync(t *testing.T) {
 	d.preview(t)
 	d.do("start")
 	eventually(t, "the sync to run", d.runner.Busy)
-	d.do("signout")
+	pressSignOut(d)
 	eventually(t, "the sync to stop", func() bool { return !d.runner.Busy() })
 	if st := d.runner.Snapshot().State; st != "idle" {
 		t.Fatalf("state %q", st)

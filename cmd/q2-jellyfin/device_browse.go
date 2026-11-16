@@ -306,7 +306,7 @@ func (d *daemon) browse(ctx context.Context, cl *jellyfin.Client, op, cursor str
 			return fail(err)
 		}
 		pls = shuffled(d, "playlists", s, pls)
-		rows = append(d.listTop("playlists", s), list("favorites", favName, "", favKey))
+		rows = append(d.listTop("playlists", s), v.item(selection.KindFavorites, "all", favName, "", 0))
 		for _, p := range pls {
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
 		}
@@ -573,7 +573,8 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 	d.mu.Unlock()
 	v := d.view()
 	rows := []q2spot.Row{act("toggle", "Add to Sync", key)}
-	if v.sel.Has(selection.KindLibrary, "all") { // a press could neither add nor remove it (R30, M37)
+	// a press could neither add nor remove it (R30, M37); Favourites stays its own playlist (audit 7)
+	if v.sel.Has(selection.KindLibrary, "all") && kind != selection.KindFavorites {
 		rows[0] = info("Included via Entire Library")
 	}
 	if v.sel.Has(kind, id) && rows[0].Kind == "action" {
@@ -815,7 +816,7 @@ func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r
 	switch {
 	case err != nil:
 		return sel, q2spot.Fail(q2spot.Error, selDamaged), true
-	case kind != selection.KindLibrary && sel.Has(selection.KindLibrary, "all"):
+	case kind != selection.KindLibrary && kind != selection.KindFavorites && sel.Has(selection.KindLibrary, "all"):
 		return sel, q2spot.Reply{Message: "Included via Entire Library"}, true
 	case sel.Has(kind, id):
 		sel.Toggle(selection.Item{Kind: kind, ID: id})

@@ -274,7 +274,7 @@ func TestPlayQueueEmptyAndRestart(t *testing.T) {
 	if got := strings.Join(titles(d2.do("npqueue")), "|"); got != "Song 0|Song 1" {
 		t.Fatalf("after a restart %q", got)
 	}
-	d.do("signout")
+	pressSignOut(d)
 	d.bg.Wait()
 	if got := titles(d.do("npqueue")); !reflect.DeepEqual(got, []string{"Nothing from Jellyfin is playing"}) {
 		t.Fatalf("signed out %q", got)

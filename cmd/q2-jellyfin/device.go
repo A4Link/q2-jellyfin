@@ -312,8 +312,8 @@ func (d *daemon) boxSearch(op string) (in string, box bool) {
 func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	d.mu.Lock()
 	d.lastReq = time.Now()
-	if req.Op != "clearcache" {
-		d.clearArmed = time.Time{} // any other press drops Clear Playback Cache's first press
+	if req.Op != d.armed.op && req.Op != armPage[d.armed.op] {
+		d.armed = armed{} // any other press drops Clear Playback Cache's or Sign Out's first press
 	}
 	d.mu.Unlock()
 	switch req.Op {
@@ -415,7 +415,10 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.queuePlay(req.Arg(0))
 	case "account":
 		return d.account(cl)
-	case "signout":
+	case "signout": // two presses in a row, as Clear Playback Cache: it stops the sync and the music
+		if !d.pressedAgain("signout", true) {
+			return q2spot.Reply{Message: "Press again to sign out"}
+		}
 		if d.signOut() != nil {
 			return q2spot.Fail(q2spot.Error, signOutFailed)
 		}
@@ -696,17 +699,11 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		return q2spot.Reply{Message: "Playback Cache: " + cacheName(s.PlaybackCache)}
 	case "clearcache": // two presses in a row, as Q2 Pod's Clear All Downloads asks first
 		n := d.stream.cacheSize()
-		d.mu.Lock()
-		armed := !d.clearArmed.IsZero() && time.Since(d.clearArmed) < clearArmFor
-		d.clearArmed = time.Time{}
-		if !armed && n > 0 {
-			d.clearArmed = time.Now() // only a cache with songs in it asks to be confirmed
-		}
-		d.mu.Unlock()
+		again := d.pressedAgain("clearcache", n > 0) // only a cache with songs in it asks to be confirmed
 		switch {
 		case n == 0:
 			return q2spot.Reply{Message: "The cache is empty"}
-		case !armed:
+		case !again:
 			return q2spot.Reply{Message: "Press again to remove " + size(n) + " of cached songs"}
 		}
 		return q2spot.Reply{Message: "Removed " + size(d.stream.clearCache()) + " of cached songs"}
