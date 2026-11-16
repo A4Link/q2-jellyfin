@@ -306,7 +306,7 @@ func (d *daemon) browse(ctx context.Context, cl *jellyfin.Client, op, cursor str
 			return fail(err)
 		}
 		pls = shuffled(d, "playlists", s, pls)
-		rows = append(d.listTop("playlists", s), list("favorites", favName, "", favKey))
+		rows = append(d.listTop("playlists", s), v.item(selection.KindFavorites, "all", favName, "", 0))
 		for _, p := range pls {
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
 		}
@@ -573,7 +573,8 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 	d.mu.Unlock()
 	v := d.view()
 	rows := []q2spot.Row{act("toggle", "Add to Sync", key)}
-	if v.sel.Has(selection.KindLibrary, "all") { // a press could neither add nor remove it (R30, M37)
+	// a press could neither add nor remove it (R30, M37); Favourites stays its own playlist (audit 7)
+	if v.sel.Has(selection.KindLibrary, "all") && kind != selection.KindFavorites {
 		rows[0] = info("Included via Entire Library")
 	}
 	if v.sel.Has(kind, id) && rows[0].Kind == "action" {
@@ -659,7 +660,8 @@ func getAlbum(ctx context.Context, cl *jellyfin.Client, id string) (jellyfin.Alb
 	return a, songs, err
 }
 
-// oneArtist gives an album's songs a's artist when they disagree on their album artist (getAlbum).
+// oneArtist gives an album's songs a's artist when they disagree on their album artist (getAlbum,
+// songsOf's artist).
 func oneArtist(a jellyfin.Album, songs []jellyfin.Song) {
 	for _, s := range songs {
 		if a.Artist != "" && s.AlbumArtist != songs[0].AlbumArtist {
@@ -698,11 +700,12 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		d.artistAlbums[id] = als
 		d.mu.Unlock()
 		name = a.Name
-		for _, al := range als {
-			_, s, err := getAlbum(ctx, cl, al.ID)
+		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
+			s, err := cl.AlbumSongs(ctx, al.ID)
 			if err != nil {
 				return nil, "", err
 			}
+			oneArtist(al, s)
 			songs = append(songs, s...)
 		}
 	case selection.KindSong:
@@ -815,7 +818,7 @@ func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r
 	switch {
 	case err != nil:
 		return sel, q2spot.Fail(q2spot.Error, selDamaged), true
-	case kind != selection.KindLibrary && sel.Has(selection.KindLibrary, "all"):
+	case kind != selection.KindLibrary && kind != selection.KindFavorites && sel.Has(selection.KindLibrary, "all"):
 		return sel, q2spot.Reply{Message: "Included via Entire Library"}, true
 	case sel.Has(kind, id):
 		sel.Toggle(selection.Item{Kind: kind, ID: id})
@@ -889,7 +892,8 @@ func (d *daemon) playing(title string) q2spot.Reply {
 }
 
 // startPlay starts the list and song arg names ("[song:id] <list kind:id> <index>"), reporting the
-// song's title, or a failed reply.
+// song's title, or a failed reply. Without Wi-Fi only a synced song of the page's list plays
+// (fromCard).
 func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string) (q2spot.Reply, string, bool) {
 	f := strings.Fields(arg)
 	if len(f) == 3 {
@@ -902,6 +906,9 @@ func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string)
 	kind, id := parseKey(f[0])
 	songs := d.pageSongs(cl, selection.Key(kind, id)) // the list the page showed, if fresh (audit B3)
 	if songs == nil {
+		if r, off := d.noWiFi(true); off {
+			return r, "", false
+		}
 		var err error
 		if songs, _, err = d.songsOf(ctx, cl, kind, id); err != nil {
 			return d.errToast(err), "", false
@@ -910,8 +917,19 @@ func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string)
 	if i < 0 || i >= len(songs) {
 		return q2spot.Fail(q2spot.Unavailable, "Nothing to play"), "", false
 	}
+	if !d.fromCard(songs[i].ID) {
+		if r, off := d.noWiFi(true); off {
+			return r, "", false
+		}
+	}
 	d.startSongs(songs, i, f[0])
 	return q2spot.Reply{}, songs[i].Title, true
+}
+
+// fromCard is whether song id plays from the card, without Wi-Fi: synced, with the firmware's
+// playlist extension (stream.go). Without it every song is fetched.
+func (d *daemon) fromCard(id string) bool {
+	return d.caps.Playlist && d.stream.synced(d.manifest().Songs[id])
 }
 
 // startSongs plays songs from i, of the list key ("kind:id"; status.go shows its song waiting).
@@ -923,7 +941,7 @@ func (d *daemon) startSongs(songs []jellyfin.Song, i int, key string) {
 	d.playKey = key
 	d.mu.Unlock()
 	// status.go: the list shows this song waiting until it plays; one on the card plays at once.
-	if e := d.manifest().Songs[songs[i].ID]; d.caps.URLs || d.caps.Playlist && d.stream.synced(e) {
+	if d.caps.URLs || d.fromCard(songs[i].ID) {
 		// URL queues (stream_urls.go): Now Playing shows the firmware's own buffering
 		d.stream.setStatus(streamStatus{})
 	} else {

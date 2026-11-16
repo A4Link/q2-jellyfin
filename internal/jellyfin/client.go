@@ -437,7 +437,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 	if err != nil {
 		return Playlist{}, nil, err
 	}
-	s, err := c.music(ctx)
+	s, err := c.musicFolders(ctx)
 	if err != nil {
 		return Playlist{}, nil, err
 	}
@@ -512,16 +512,26 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 	if err != nil {
 		return Album{}, nil, err
 	}
-	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}})
+	s, err := c.AlbumSongs(ctx, id)
 	if err != nil {
 		return Album{}, nil, err
 	}
 	a := w.album()
 	if a.SongCount == 0 {
-		a.SongCount = len(r.Items)
+		a.SongCount = len(s)
 	}
-	return a, songs(r.Items), nil
+	return a, s, nil
+}
+
+// AlbumSongs is Album's songs without the album: one request, for a caller that has the album
+// from a list already (an artist's albums).
+func (c *Client) AlbumSongs(ctx context.Context, id string) ([]Song, error) {
+	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
+		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}})
+	if err != nil {
+		return nil, err
+	}
+	return songs(r.Items), nil
 }
 
 // Artists lists album artists, as Jellyfin's music library does.
@@ -670,7 +680,7 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	if err != nil {
 		return Song{}, err
 	}
-	if s, err := c.music(ctx); err != nil {
+	if s, err := c.musicFolders(ctx); err != nil {
 		return Song{}, err
 	} else if !s.inMusic(w) {
 		return Song{}, &APIError{Op: "Items", HTTP: 404, Code: CodeGone, Msg: "Not in a music library"}
