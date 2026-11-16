@@ -59,7 +59,8 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		if snap.Err != nil {
 			det = withErr(det, snap.Err)
 		}
-		return q2spot.Reply{Rows: append(d.syncSources(), info(msg), act("retry", "Retry", ""), act("check", "Check Again", ""),
+		rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(snap.Err)...)
+		return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), act("check", "Check Again", ""),
 			list("details", "Details", "", det))}
 	}
 	if _, err := d.selection(); err != nil {
@@ -137,18 +138,23 @@ func (d *daemon) stopMessage(err error) string {
 	case errors.As(err, &pe):
 		return "Couldn't write to the card"
 	}
-	return d.serverMessage(err)
+	return jellyfin.Message(err, d.hostName())
 }
 
-// serverMessage is jellyfin.Message, plus the way round a refused download: under an Opus Sync
-// Quality only a song kept as it is (an MP3, AAC or Opus one) is downloaded, so Always Re-encode
-// syncs without the permission.
-func (d *daemon) serverMessage(err error) string {
-	msg := jellyfin.Message(err, d.hostName())
-	if s := d.settings(); errors.Is(err, jellyfin.ErrDownloadsOff) && !quality.IsOriginal(s.def()) && !s.reencode() {
-		msg += ". Turn on Always Re-encode to sync without them"
+// downloadsHint is the way round a refused download, a row of its own under the message: under an
+// Opus Sync Quality only a song kept as it is (an MP3, AAC or Opus one) is downloaded, so Always
+// Re-encode syncs without the permission; under Original, an Opus one with it does.
+func (d *daemon) downloadsHint(err error) []q2spot.Row {
+	s := d.settings()
+	switch {
+	case !errors.Is(err, jellyfin.ErrDownloadsOff):
+		return nil
+	case quality.IsOriginal(s.def()):
+		return []q2spot.Row{info("Or choose an Opus Sync Quality and Always Re-encode")}
+	case !s.reencode():
+		return []q2spot.Row{info("Turn on Always Re-encode in Quality and Storage")}
 	}
-	return msg
+	return nil
 }
 
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
@@ -332,7 +338,7 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		case errors.Is(s.Err, syncer.ErrCardFull):
 			rows = append(rows, info("The card is full"))
 		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
-			rows = append(rows, info(d.serverMessage(s.Err))) // with code 50 (R39) too
+			rows = append(append(rows, info(jellyfin.Message(s.Err, d.hostName()))), d.downloadsHint(s.Err)...) // with code 50 (R39) too
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {

@@ -666,7 +666,7 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 			return q2spot.Fail(q2spot.Error, settingNotSaved)
 		}
 		return q2spot.Reply{Message: "Streaming Quality: " + quality.Name(s.stream())}
-	case "reencode": // what a sync wants changes as Sync Quality's change does
+	case "reencode": // under an Opus Sync Quality, what a sync wants changes as Sync Quality's change does
 		if s.reencode() {
 			s.Reencode = ""
 		} else {
@@ -674,6 +674,9 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		}
 		if d.saveSettings(s) != nil {
 			return q2spot.Fail(q2spot.Error, settingNotSaved)
+		}
+		if quality.IsOriginal(s.def()) { // only streaming changes: a sync under way goes on
+			return q2spot.Reply{Message: reencodeRow(s).Title}
 		}
 		d.changed()
 		return q2spot.Reply{Message: reencodeRow(s).Title + d.restartSync(d.client())}

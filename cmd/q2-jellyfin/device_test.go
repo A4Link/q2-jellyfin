@@ -612,25 +612,24 @@ func TestAlwaysReencode(t *testing.T) {
 	}
 }
 
-// A sync paused because the server refuses a download (syncer.ErrRefused) says Always Re-encode gets
-// round it, only when it would: under an Opus Sync Quality with Always Re-encode off.
+// A sync paused because the server refuses a download (syncer.ErrRefused) says, in a row of its
+// own, how Always Re-encode gets round it, when it would: under an Opus Sync Quality with Always
+// Re-encode off, and under Original with an Opus one.
 func TestDownloadsOffHint(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	d.client()
 	err := fmt.Errorf("%w: %w", syncer.ErrRefused, jellyfin.ErrDownloadsOff)
 	plain := jellyfin.Message(err, d.hostName())
-	for _, c := range []struct {
-		q, re string
-		hint  bool
-	}{{"original", "", false}, {"opus-128", "", true}, {"opus-128", "on", false}} {
+	for _, c := range []struct{ q, re, hint string }{
+		{"original", "", "|Or choose an Opus Sync Quality and Always Re-encode"},
+		{"opus-128", "", "|Turn on Always Re-encode in Quality and Storage"},
+		{"opus-128", "on", ""},
+	} {
 		if e := d.saveSettings(settings{DefaultQuality: c.q, Reencode: c.re}); e != nil {
 			t.Fatal(e)
 		}
-		want := plain
-		if c.hint {
-			want += ". Turn on Always Re-encode to sync without them"
-		}
-		if got := strings.Join(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})), "|"); !strings.Contains(got, "|"+want+"|Resume") {
+		want := "|" + plain + c.hint + "|Resume"
+		if got := strings.Join(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})), "|"); !strings.Contains(got, want) {
 			t.Errorf("%s reencode %q: %q, want %q", c.q, c.re, got, want)
 		}
 	}
@@ -798,6 +797,41 @@ func TestStatusSubtitles(t *testing.T) {
 	r := d.do("albums")
 	want := map[string]string{"Album 000": "Artist · On Q2", "Album 001": "Artist · Waiting to sync",
 		"Album 002": "Artist · 1 of 3 songs on Q2", "Album 003": "Artist"}
+	for title, sub := range want {
+		if row, _ := find(r, title); row.Subtitle != sub {
+			t.Errorf("%s subtitle %q, want %q", title, row.Subtitle, sub)
+		}
+	}
+}
+
+// Under an Opus Sync Quality, status follows the plan's rule for lossy songs (library.Quality) per
+// song. After a start (nothing fetched) an MP3 album synced as it is stays On Q2, as does an .m4a one
+// (it may be ALAC: not known until fetched); an MP3 song on the card at opus-128 is Waiting to sync
+// with Always Re-encode off, as the next sync brings its original.
+func TestStatusLossySongs(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 1}, "", true)
+	if err := d.saveSettings(settings{DefaultQuality: "opus-128"}); err != nil {
+		t.Fatal(err)
+	}
+	sel := selection.Set{Version: 1}
+	for _, id := range []string{"al0", "al1", "al2"} {
+		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: id, Name: id, Quality: "opus-128"})
+	}
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for _, e := range []struct{ id, ext, q string }{{"al0.0", "mp3", "original"}, {"al1.0", "m4a", "original"}, {"al2.0", "opus", "opus-128"}} {
+		m.Songs[e.id] = &library.Entry{ID: e.id, Path: filepath.Join(d.card, "Jellyfin", e.id+"."+e.ext), Size: 1000,
+			Items: []string{"album:" + strings.TrimSuffix(e.id, ".0")}, Quality: e.q}
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.resolved = map[string][]jellyfin.Song{"album:al2": {{ID: "al2.0", AlbumID: "al2", Suffix: "mp3", Codec: "mp3"}}}
+	d.mu.Unlock()
+	r := d.do("albums")
+	want := map[string]string{"Album 000": "Artist · On Q2", "Album 001": "Artist · On Q2", "Album 002": "Artist · Waiting to sync",
+		"Sync Now": "1 waiting"}
 	for title, sub := range want {
 		if row, _ := find(r, title); row.Subtitle != sub {
 			t.Errorf("%s subtitle %q, want %q", title, row.Subtitle, sub)
@@ -2221,7 +2255,7 @@ func TestResolvedItemCountsItsOwnSongs(t *testing.T) {
 	d.do("toggle", "playlist:pl1")
 	d.syncOK(t)
 	d.mu.Lock()
-	d.resolved["playlist:pl1"] = []jellyfin.Song{{ID: "al0.0"}, {ID: "al1.0"}} // al0.1 swapped for al1.0
+	d.resolved["playlist:pl1"] = []jellyfin.Song{{ID: "al0.0", Suffix: "flac"}, {ID: "al1.0", Suffix: "flac"}} // al0.1 swapped for al1.0
 	d.mu.Unlock()
 	r := d.do("playlists")
 	if row, _ := find(r, "Mix"); row.Subtitle != "2 songs · 1 of 2 songs on Q2" {
