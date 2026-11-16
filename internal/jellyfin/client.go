@@ -637,7 +637,7 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 	if q.Get("enableUserData") == "" {
 		q.Set("enableUserData", "false") // nothing reads it
 	}
-	total, first := -1, ""
+	total := -1
 	for start := 0; ; start += listPage {
 		q.Set("startIndex", strconv.Itoa(start))
 		q.Set("limit", strconv.Itoa(listPage))
@@ -648,14 +648,10 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		if total >= 0 && r.TotalRecordCount != total {
 			return 0, ErrChanged // items shifted between pages: one may have been skipped
 		}
-		total = r.TotalRecordCount
-		if len(r.Items) > 0 {
-			k := r.Items[0].ID + "/" + r.Items[0].PlaylistItemID // a song can start two pages of a playlist
-			if k == first {
-				return 0, ErrChanged // the last page again: a server that ignores startIndex would loop
-			}
-			first = k
+		if !r.startsAt(start) {
+			return 0, ErrChanged
 		}
+		total = r.TotalRecordCount
 		for _, w := range r.Items {
 			f(w)
 		}

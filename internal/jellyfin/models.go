@@ -47,7 +47,6 @@ const artistFields = "ItemCounts"
 // wireItem is Jellyfin's BaseItemDto, only the fields this app reads.
 type wireItem struct {
 	ID                   string            `json:"Id"`
-	PlaylistItemID       string            `json:"PlaylistItemId"` // a playlist entry's own id: a song can be in it twice
 	Name                 string            `json:"Name"`
 	Type                 string            `json:"Type"`
 	CollectionType       string            `json:"CollectionType"` // a library view's ("music", "movies", …)
@@ -87,7 +86,13 @@ type wireItem struct {
 type itemPage struct {
 	Items            []wireItem `json:"Items"`
 	TotalRecordCount int        `json:"TotalRecordCount"`
+	StartIndex       *int       `json:"StartIndex"` // where the page starts, as the server says; nil when it doesn't
 }
+
+// startsAt reports whether the page starts where it was asked to. Jellyfin echoes startIndex; a
+// server or caching proxy that ignores it sends page one again under a huge total, and paging would
+// loop until the caller's deadline (audit 2026-11-16 #23). A page that doesn't say counts as right.
+func (r itemPage) startsAt(start int) bool { return r.StartIndex == nil || *r.StartIndex == start }
 
 // suffix is the song's file extension without the dot, lower case: from the file's path when the
 // server shows it, else from its container. A list ("mov,mp4,m4a") names m4a when it can, then

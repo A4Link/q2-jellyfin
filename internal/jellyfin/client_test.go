@@ -482,7 +482,7 @@ func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
 			for i := 0; i < 500; i++ {
 				items = append(items, fmt.Sprintf(item, i))
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2000000000}`, strings.Join(items, ","))
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2000000000,"StartIndex":0}`, strings.Join(items, ","))
 		}
 	}
 	_, srv := newFake(t, map[string]http.HandlerFunc{
@@ -500,8 +500,9 @@ func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
 	}
 }
 
-// A playlist of one song added 1000 times starts both pages with that song: its entries are told
-// apart by their own ids, so it is not taken for a repeated page.
+// A playlist of one song added 1000 times starts both pages with that song, and Jellyfin 12.4 gives
+// every entry of it the same PlaylistItemId (checked on the test server): pages that start where
+// they were asked are not taken for a repeated page.
 func TestPlaylistOfOneSongPaged(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{
 		"/Items/pl1": func(w http.ResponseWriter, r *http.Request) {
@@ -511,9 +512,9 @@ func TestPlaylistOfOneSongPaged(t *testing.T) {
 			start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
 			var items []string
 			for i := start; i < min(start+500, 1000); i++ {
-				items = append(items, fmt.Sprintf(`{"Id":"s1","PlaylistItemId":"e%d","Type":"Audio","Path":"/music/A/1.flac"}`, i))
+				items = append(items, `{"Id":"s1","PlaylistItemId":"s1","Type":"Audio","Path":"/music/A/1.flac"}`)
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1000}`, strings.Join(items, ","))
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1000,"StartIndex":%d}`, strings.Join(items, ","), start)
 		},
 	})
 	if _, ss, err := signedIn(t, srv).Playlist(context.Background(), "pl1"); err != nil || len(ss) != 1000 {
