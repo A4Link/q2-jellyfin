@@ -61,6 +61,7 @@ type nav struct {
 	holdArtists      chan struct{} // artist list requests wait for it
 	songArt          bool          // songs carry their album's cover (AlbumPrimaryImageTag)
 	coverStatus      int           // covers answer this HTTP status instead
+	coverSize        int           // covers are this many bytes
 	albumLists       atomic.Int32  // album list requests served (Albums, Newly Added)
 	rawStatus        atomic.Int32  // when set, every request answers this HTTP status (a proxy's 502)
 	pings            atomic.Int32  // /Users/Me requests served
@@ -269,6 +270,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
+		if n.coverSize != 0 {
+			w.Write(make([]byte, n.coverSize))
+			return
+		}
 		w.Write([]byte("ÿØjpeg " + p + " " + q.Get("fillWidth")))
 	case p == "/System/Info/Public":
 		ok(map[string]any{"ProductName": "Jellyfin Server", "Version": "10.10.7"})

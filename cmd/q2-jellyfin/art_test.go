@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // With "art", a list's rows get their covers before the reply, named by the row's URI and context
@@ -46,5 +48,85 @@ func TestListCovers(t *testing.T) {
 func TestArtKey(t *testing.T) {
 	if got := artKey("album", "album:al0"); got != "a20cd32b" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// artFiles makes n covers of size bytes in d's art dir, cover 0 the oldest; their names.
+func artFiles(t *testing.T, d *tdaemon, n, size int) []string {
+	t.Helper()
+	os.MkdirAll(d.artDir(), 0o755)
+	old := time.Now().Add(-time.Hour)
+	var names []string
+	for i := range n {
+		p := filepath.Join(d.artDir(), fmt.Sprintf("%08x.jpg", i))
+		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		os.Chtimes(p, old, old.Add(time.Duration(i)*time.Second))
+		names = append(names, p)
+	}
+	return names
+}
+
+// keptArt fails unless the oldest dropped of names are gone and the rest still there.
+func keptArt(t *testing.T, names []string, dropped int) {
+	t.Helper()
+	for i, p := range names {
+		if exists(p) == (i < dropped) {
+			t.Fatalf("cover %d of %d: there %v, want the oldest %d dropped", i, len(names), exists(p), dropped)
+		}
+	}
+}
+
+// Past artKeep covers, the oldest go, artPrune at a time: 1501 leave 1401.
+func TestArtPrunedByCount(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "art", true)
+	names := artFiles(t, d, artKeep+1, 10)
+	d.pruneArt()
+	keptArt(t, names, artPrune)
+}
+
+// Covers adding up to artBytes or more: the oldest go, artPrune at a time, until under it.
+func TestArtPrunedBySize(t *testing.T) {
+	for _, c := range []struct{ n, dropped int }{
+		{256, 100}, // exactly 8 MB: over, 156 left
+		{400, 200}, // 12.5 MB: 9.4 MB still over after one round, 6.25 MB after two
+	} {
+		d := newTestDaemon(t, &nav{}, "art", true)
+		names := artFiles(t, d, c.n, artBytes/256)
+		d.pruneArt()
+		keptArt(t, names, c.dropped)
+	}
+}
+
+// A single reply that fetched a cover prunes, not one in a hundred.
+func TestArtPrunedAfterOneReply(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "art", true)
+	names := artFiles(t, d, artKeep+1, 10)
+	d.do("albums")
+	if exists(names[0]) {
+		t.Fatal("not pruned after a reply that fetched")
+	}
+}
+
+// A cover over artMax (a server sending the whole image) isn't kept cut off, nor asked again.
+func TestBigCoverNotKept(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1, coverSize: artMax + 1}
+	d := newTestDaemon(t, n, "art", true)
+	d.do("albums")
+	if jpgs, _ := filepath.Glob(filepath.Join(d.artDir(), "*")); len(jpgs) != 0 {
+		t.Fatalf("kept %q", jpgs)
+	}
+	asked := n.images.Load()
+	d.do("albums")
+	if n.images.Load() != asked {
+		t.Fatal("a cover too big asked again")
+	}
+
+	n = &nav{albums: 1, songsPer: 1, coverSize: artMax}
+	d = newTestDaemon(t, n, "art", true)
+	d.do("albums")
+	if b, err := os.ReadFile(d.artFile("al0")); err != nil || len(b) != artMax {
+		t.Fatalf("a cover of artMax bytes: %d %v", len(b), err)
 	}
 }

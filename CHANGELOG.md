@@ -11,6 +11,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **Sync status follows the lossy rule:** under an Opus Sync Quality, an MP3 or AAC album synced as it is shows *On Q2* after a restart, instead of *Waiting to sync* and a *Sync Now* that finds nothing to do, and lossy songs at Opus that the next sync brings again as their originals show *Waiting to sync*. Always Re-encode turned on or off under Original no longer restarts a sync under way. A sync stopped because the account can't download gives the way round in a row of its own: *Turn on Always Re-encode in Quality and Storage*, or under Original *Or choose an Opus Sync Quality and Always Re-encode*.
+- **List covers stay within a limit in the Q2's memory:** the covers kept for lists are trimmed, oldest first, after every list that fetched one, to at most 1500 covers and under 8 MB, so a server that sends whole images instead of small ones no longer keeps filling the room streaming and the Q2's own pages need. A cover over 1 MB is no longer shown cut off: the row has no cover, and it isn't asked for again for 10 minutes.
 
 ## [0.7.0] - 2026-11-12
 
