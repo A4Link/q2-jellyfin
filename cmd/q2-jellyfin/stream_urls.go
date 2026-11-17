@@ -52,16 +52,10 @@ func urlField(s string) string {
 // urlsMax: the song started and those after it first, then the ones before it as room allows.
 func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi int) {
 	lo, hi = max(0, from-urlsBefore), min(len(songs), from+urlsAfter)
-	q, re := quality.Original, false
-	if s.quality != nil {
-		q = quality.Normal(s.quality()) // once: it reads settings.json
-	}
-	if s.reencode != nil {
-		re = s.reencode()
-	}
+	q, re := quality.Normal(s.quality()), s.reencode() // once: it reads settings.json
 	m := s.manifest()
 	var hearts map[string]bool
-	if s.caps.Fav && s.hearts != nil {
+	if s.caps.Fav {
 		hearts = s.hearts()
 	}
 	lines := make([]string, hi-lo)
@@ -126,7 +120,7 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	seq := strconv.FormatInt(time.Now().UnixNano(), 10)
 	// the queue the firmware gets, for Now Playing's ⋯ (playqueue.go)
 	s.saveQueue(seq, songs[lo:hi], from-lo)
-	if s.caps.Now && s.queued != nil { // before .play: the firmware tells of the queue once it plays
+	if s.caps.Now { // before .play: the firmware tells of the queue once it plays
 		m := s.manifest()
 		ids := make([]string, hi-lo)
 		for i, sg := range songs[lo:hi] {
@@ -142,7 +136,7 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	s.setStatus(streamStatus{}) // the firmware's Now Playing shows its own buffering
 	// Without the firmware's "now", of a URL queue the app knows only that the song pressed starts:
 	// the firmware's Tidal player says nothing of the ones after it.
-	if !s.caps.Now && s.started != nil && !s.synced(s.manifest().Songs[songs[from].ID]) {
+	if !s.caps.Now && !s.synced(s.manifest().Songs[songs[from].ID]) {
 		s.started(songs[from])
 	}
 	s.logf("stream: %d songs as URLs from %q", len(songs), songs[from].Title)
