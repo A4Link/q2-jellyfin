@@ -219,32 +219,100 @@ func (d *daemon) itemSongs(ctx context.Context, cl *jellyfin.Client, it selectio
 	return songs, name, nil
 }
 
-// computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
-// failure fails the preview: a missing item's songs would otherwise read as removed. The exception
-// is an item the server says it no longer has (deleted there): it is planned as having no songs, so
-// those only it wanted are removed, and it leaves Sync with Start Sync (dropGone). ctx ends with
-// the preview (dropPreview).
-func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *preview) {
-	ctx, cancel := context.WithCancel(pctx)
-	defer cancel()
+// computePreview plans the sync (planPreview) and records the preview in p, then starts the sync
+// for Sync Favourites and backfills lyrics. ctx ends with the preview (dropPreview).
+func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *preview) {
+	pl, resolved, gone, err := d.planPreview(ctx, cl)
+	d.mu.Lock()
+	p.done, p.plan, p.err, p.gone, p.at = true, &pl, err, gone, time.Now()
+	auto := d.autoStart && p == d.preview && d.cl == cl // never for an account signed out meanwhile
+	again := auto && p.gen != d.gen                     // changed again meanwhile: start from a new preview
+	if auto && !again {
+		d.autoStart = false
+	}
+	d.mu.Unlock()
+	if again {
+		d.startPreview(cl)
+		return
+	}
+	if err != nil {
+		return
+	}
+	// Sync Favourites: start without a second press, but never to take songs off the card: that
+	// waits for Start Sync, with the preview to show what goes (audit 2026-11-16 #3).
+	if auto && pl.Changes() && len(pl.Remove) == 0 {
+		if r := d.syncAction("start"); r.Message != "" {
+			d.log.Printf("sync favourites: %s", r.Message)
+		}
+	}
+	bctx, bcancel := context.WithTimeout(ctx, 10*time.Minute) // after the preview shows: a request per song
+	d.backfillLyrics(bctx, resolved, pl)
+	bcancel()
+}
+
+// planPreview resolves the selection on the server (resolveItems) and plans it against the card.
+// Any failure fails the preview: a missing item's songs would otherwise read as removed. The
+// exception is an item the server says it no longer has (deleted there): it is planned as having
+// no songs, so those only it wanted are removed, and it leaves Sync with Start Sync (dropGone). The
+// manifest is read failed or not: the pages share the copy it keeps (onQ2Subtitle).
+func (d *daemon) planPreview(ctx context.Context, cl *jellyfin.Client) (plan.Plan, map[string][]jellyfin.Song, []selection.Item, error) {
 	// The last Entire Library list goes first: a big one would be live beside the new one for the
 	// whole download, or kept after Entire Library is switched off. resolveLibrary sets it again.
 	d.mu.Lock()
 	delete(d.resolved, selection.Key(selection.KindLibrary, "all"))
 	d.mu.Unlock()
 	sel, err := d.selection()
-	resolved, names := map[string][]jellyfin.Song{}, map[string]string{}
-	var mu sync.Mutex
+	if err != nil {
+		d.manifestErr()
+		return plan.Plan{}, nil, nil, err
+	}
+	resolved, names, gone, err := d.resolveItems(ctx, cl, &sel)
+	if err == nil && len(gone) > 0 { // or the account lost its music library: nothing goes then
+		err = cl.CheckMusic(ctx)
+	}
+	var ae *jellyfin.APIError // a list of a library the account lost answers 401 (403 from a proxy)
+	if errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) {
+		if merr := cl.CheckMusic(ctx); errors.Is(merr, jellyfin.ErrNoMusic) {
+			err = merr
+		}
+	}
+	man, merr := d.manifestErr() // Sync Favourites and a hold start one with no Sync page to stop it
+	if err = cmp.Or(err, merr); err != nil {
+		return plan.Plan{}, nil, nil, err
+	}
+	sel.Items = slices.DeleteFunc(sel.Items, func(it selection.Item) bool { return isGone(gone, it) })
+	// Songs deleted from the card are planned again, not taken as there (I9). The plan reads
+	// the manifest again below: DropMissing may have changed it.
+	if derr := d.runner.DropMissing(man); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
+		d.log.Printf("sync: %v", derr)
+	}
+	// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts
+	// what the sync needs (cache.go).
+	pl := plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
+	// The items holding songs already on the card, recorded now: an up-to-date preview starts
+	// no sync, and status reads them after a restart (I12). A running sync records its own.
+	if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
+		d.log.Printf("sync: refresh: %v", rerr)
+	}
+	if !pl.Changes() {
+		d.dropGone(gone) // nothing on the Q2 is left to remove for them: no Start Sync to wait for
+	}
+	return pl, resolved, gone, nil
+}
+
+// resolveItems resolves every item of sel to its songs, 4 at a time; Entire Library adds its
+// playlists to sel. The first failure cancels the rest. An item the server no longer has (but
+// Favourites) is in gone, with no songs.
+func (d *daemon) resolveItems(ctx context.Context, cl *jellyfin.Client, sel *selection.Set) (resolved map[string][]jellyfin.Song, names map[string]string, gone []selection.Item, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resolved, names = map[string][]jellyfin.Song{}, map[string]string{}
+	var mu sync.Mutex // guards resolved, names, gone, err and sel.Items
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	var werr error            // the first worker's failure, under mu; it cancels ctx, so the rest return at once
-	var gone []selection.Item // under mu
 	items := sel.Items
 	got := songBatch(ctx, cl, items)
 	for _, it := range items {
-		if err != nil {
-			break // the selection didn't load; no worker has started
-		}
 		wg.Add(1)
 		go func(it selection.Item) {
 			defer wg.Done()
@@ -253,8 +321,8 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 				lib, e := d.resolveLibrary(ctx, cl, sem)
 				mu.Lock()
 				defer mu.Unlock()
-				if e != nil && werr == nil {
-					werr = e
+				if e != nil && err == nil {
+					err = e
 					cancel()
 				}
 				key := selection.Key(it.Kind, it.ID)
@@ -280,76 +348,15 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 			if it.Kind != selection.KindFavorites && errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
 				gone, e = append(gone, it), nil
 			}
-			if e != nil && werr == nil {
-				werr = e
+			if e != nil && err == nil {
+				err = e
 				cancel()
 			}
 			resolved[key], names[key] = songs, name
 		}(it)
 	}
 	wg.Wait()
-	if err == nil {
-		err = werr
-	}
-	if err == nil && len(gone) > 0 { // or the account lost its music library: nothing goes then
-		if err = cl.CheckMusic(ctx); err != nil {
-			gone = nil
-		}
-	}
-	var ae *jellyfin.APIError // a list of a library the account lost answers 401 (403 from a proxy)
-	if errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) {
-		if merr := cl.CheckMusic(pctx); errors.Is(merr, jellyfin.ErrNoMusic) { // ctx: cancelled by the failure
-			err = merr
-		}
-	}
-	sel.Items = slices.DeleteFunc(sel.Items, func(it selection.Item) bool { return isGone(gone, it) })
-	man, merr := d.manifestErr()
-	if err == nil { // Sync Favourites and a hold start one with no Sync page to stop it
-		err = merr
-	}
-	var pl plan.Plan
-	if err == nil {
-		// Songs deleted from the card are planned again, not taken as there (I9). The plan reads
-		// the manifest again below: DropMissing may have changed it.
-		if derr := d.runner.DropMissing(man); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
-			d.log.Printf("sync: %v", derr)
-		}
-		// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts
-		// what the sync needs (cache.go).
-		pl = plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
-		// The items holding songs already on the card, recorded now: an up-to-date preview starts
-		// no sync, and status reads them after a restart (I12). A running sync records its own.
-		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
-			d.log.Printf("sync: refresh: %v", rerr)
-		}
-	}
-	if err == nil && !pl.Changes() {
-		d.dropGone(gone) // nothing on the Q2 is left to remove for them: no Start Sync to wait for
-	}
-	d.mu.Lock()
-	p.done, p.plan, p.err, p.gone, p.at = true, &pl, err, gone, time.Now()
-	auto := d.autoStart && p == d.preview && d.cl == cl // never for an account signed out meanwhile
-	again := auto && p.gen != d.gen                     // changed again meanwhile: start from a new preview
-	if auto && !again {
-		d.autoStart = false
-	}
-	d.mu.Unlock()
-	if again {
-		d.startPreview(cl)
-		return
-	}
-	// Sync Favourites: start without a second press, but never to take songs off the card: that
-	// waits for Start Sync, with the preview to show what goes (audit 2026-11-16 #3).
-	if auto && err == nil && pl.Changes() && len(pl.Remove) == 0 {
-		if r := d.syncAction("start"); r.Message != "" {
-			d.log.Printf("sync favourites: %s", r.Message)
-		}
-	}
-	if err == nil { // after the preview shows: a request per song
-		bctx, bcancel := context.WithTimeout(ctx, 10*time.Minute)
-		d.backfillLyrics(bctx, resolved, pl)
-		bcancel()
-	}
+	return resolved, names, gone, err
 }
 
 // dropGone takes the items the server no longer has out of Sync. They had no songs in the plan, so
