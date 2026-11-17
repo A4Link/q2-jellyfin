@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	margin     = 16 << 20
+	Margin     = 16 << 20  // room kept free on top of what a sync needs (Fits)
 	coverBytes = 256 << 10 // a cover.jpg at 600 px, counted once per new album folder
 )
 
@@ -44,6 +44,28 @@ type Plan struct {
 	RemoveBytes          int64 // what the removals free (a run short of space removes them first)
 	Fits                 bool
 	Whole                bool // the selection holds Entire Library: no song of it can be taken out of Sync (I2)
+}
+
+// Changes reports whether p has anything to do: a song to move, a playlist file to write or
+// delete, or a file an earlier sync left to delete.
+func (p *Plan) Changes() bool {
+	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged+p.Leftover > 0 || p.PlaylistsStale
+}
+
+// Moving is the songs p renames, replaces or removes, by id: a path of theirs on the card is
+// about to go.
+func (p *Plan) Moving() map[string]bool {
+	ids := map[string]bool{}
+	for _, mv := range p.Rename {
+		ids[mv.ID] = true
+	}
+	for _, w := range p.Replace {
+		ids[w.Song.ID] = true
+	}
+	for _, e := range p.Remove {
+		ids[e.ID] = true
+	}
+	return ids
 }
 
 // estimate is the bytes a song takes at q: its server size for Original, else its duration at the
@@ -240,6 +262,6 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 	sort.Slice(p.Rename, func(i, j int) bool { return p.Rename[i].To < p.Rename[j].To })
 	sort.Slice(p.Remove, func(i, j int) bool { return p.Remove[i].Path < p.Remove[j].Path })
 	p.FreeBytes = free
-	p.Fits = p.NeedBytes <= 0 || p.NeedBytes-p.RemoveBytes+margin <= free // freeing space always fits
+	p.Fits = p.NeedBytes <= 0 || p.NeedBytes-p.RemoveBytes+Margin <= free // freeing space always fits
 	return p
 }
