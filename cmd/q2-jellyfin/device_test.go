@@ -2607,7 +2607,7 @@ func TestDetailsNames(t *testing.T) {
 		return r.Rows[len(r.Rows)-1].Context
 	}
 	listCtx := func(err error) string {
-		f := strings.SplitN(d.errRows(err, "").Rows[1].Context, "|", 5)
+		f := strings.SplitN(d.errRows(err).Rows[1].Context, "|", 5)
 		f[3] = "now" // the time of the list's failure
 		return strings.Join(f, "|")
 	}

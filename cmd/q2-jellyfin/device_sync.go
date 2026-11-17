@@ -67,7 +67,7 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		}
 		return checking
 	case err != nil: // offline too: the options stay, On This Q2 needs no server
-		r := d.errRows(err, "")
+		r := d.errRows(err)
 		r.Rows = append(d.syncSources(), r.Rows[0], act("check", "Check Again", ""), r.Rows[1])
 		return r
 	}
