@@ -87,6 +87,18 @@ func kindOn(err, k error, status ...int) error {
 	return err
 }
 
+// listErr is err from a list whose 404 says no item was deleted (an artist's albums, a library's
+// folders): an HTTP error, not CodeGone, so its playlist or artist doesn't leave Sync.
+func listErr(err error) error {
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Code == CodeGone {
+		e := *ae
+		e.Code, e.kind = 0, ErrUnreachable
+		return &e
+	}
+	return err
+}
+
 // timeKnown is tlsroots.Known, injectable for tests.
 var timeKnown = tlsroots.Known
 
