@@ -2,7 +2,6 @@ package jellyfin
 
 import (
 	"context"
-	"errors"
 	"net/url"
 )
 
@@ -23,11 +22,7 @@ func (c *Client) QuickConnectInitiate(ctx context.Context) (code, secret string,
 		Secret string `json:"Secret"`
 	}
 	if err := c.call(ctx, "POST", "/QuickConnect/Initiate", nil, nil, &r); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && (ae.HTTP == 401 || ae.HTTP == 403) {
-			ae.kind = ErrQuickConnectOff
-		}
-		return "", "", err
+		return "", "", kindOn(err, ErrQuickConnectOff, 401, 403)
 	}
 	if r.Code == "" || r.Secret == "" {
 		return "", "", &APIError{Op: "Initiate", Msg: "no code in the answer", kind: ErrNotJellyfin}
@@ -41,11 +36,7 @@ func (c *Client) QuickConnectPoll(ctx context.Context, secret string) (bool, err
 		Authenticated bool `json:"Authenticated"`
 	}
 	if err := c.call(ctx, "GET", "/QuickConnect/Connect", url.Values{"secret": {secret}}, nil, &r); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && ae.HTTP == 404 { // "Unknown quick connect secret": it expired
-			ae.kind = ErrQuickConnectExpired
-		}
-		return false, err
+		return false, kindOn(err, ErrQuickConnectExpired, 404) // "Unknown quick connect secret": it expired
 	}
 	return r.Authenticated, nil
 }
@@ -54,11 +45,7 @@ func (c *Client) QuickConnectPoll(ctx context.Context, secret string) (bool, err
 func (c *Client) QuickConnectSignIn(ctx context.Context, secret string) (Creds, error) {
 	var r authResult
 	if err := c.call(ctx, "POST", "/Users/AuthenticateWithQuickConnect", nil, map[string]string{"Secret": secret}, &r); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && ae.HTTP == 401 { // the code expired between the poll and now
-			ae.kind = ErrQuickConnectExpired
-		}
-		return Creds{}, err
+		return Creds{}, kindOn(err, ErrQuickConnectExpired, 401) // the code expired between the poll and now
 	}
 	if r.AccessToken == "" {
 		return Creds{}, &APIError{Op: "AuthenticateWithQuickConnect", Msg: "no access token in the answer", kind: ErrNotJellyfin}
