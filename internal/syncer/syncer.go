@@ -583,7 +583,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			j.save()
 		}
 	}()
-	for _, phase := range []func() error{j.renames, j.downloads, j.keep, j.playlists, j.removals} {
+	for _, phase := range []func() error{j.renames, j.downloads, j.keep, j.playlists, j.prunePlaylists, j.removals} {
 		if err := phase(); err != nil {
 			return err
 		}
@@ -606,7 +606,7 @@ type job struct {
 	saved   time.Time // when the manifest was last saved
 	failed  int       // songs whose download failed this run ...
 	arrived int       // ... and songs downloaded or taken from the cache
-	hold    bool      // a failure the whole sync shares, or a stop short of space: nothing is removed (I2)
+	hold    bool      // a failure the whole sync shares: nothing is removed (I2)
 	removed bool      // the removals ran (space ran them early)
 	// recorded counts the songs recorded at each file (lower case): two at one, from older builds,
 	// keep it when one of them is replaced or removed.
@@ -662,7 +662,6 @@ func (j *job) space(w plan.Want) error {
 	if e := j.m.Songs[w.Song.ID]; e != nil && e.Size > w.Bytes && left >= w.Bytes {
 		return nil
 	}
-	held, shared := j.held() && !j.removed && j.toRemove() > 0, j.hold
 	if !j.held() && !j.removed && len(j.p.Remove) > 0 {
 		j.logf("sync: short of space: removing the songs taken out of Sync first")
 		if err := j.removals(); err != nil {
@@ -672,13 +671,12 @@ func (j *job) space(w plan.Want) error {
 			return nil
 		}
 	}
-	j.hold = true
-	for _, phase := range []func() error{j.keep, j.playlists} {
+	for _, phase := range []func() error{j.keep, j.playlists} { // no prunePlaylists: nothing more is removed (I2)
 		if err := phase(); err != nil {
 			return err
 		}
 	}
-	err := &SpaceLowError{Left: left, Next: w.Bytes, Reserve: reserve, Held: held, Retry: shared}
+	err := &SpaceLowError{Left: left, Next: w.Bytes, Reserve: reserve, Held: j.held() && !j.removed && j.toRemove() > 0, Retry: j.hold}
 	j.logf("sync: stopped: %v", err)
 	return err
 }
@@ -912,8 +910,7 @@ func (j *job) keep() error {
 	return nil
 }
 
-// playlists writes every selected playlist's .m3u, naming where each song is, and deletes the
-// recorded ones no longer selected (unless failed songs hold the removals, I2).
+// playlists writes every selected playlist's .m3u, naming where each song is.
 func (j *job) playlists() error {
 	m, p := j.m, j.p
 	for name, f := range m.Playlists {
@@ -979,19 +976,24 @@ func (j *job) playlists() error {
 		j.unsaved++                                                   // saved with a stop between playlists too
 		j.op("playlist", f)
 	}
-	if !j.held() {
-		for name, f := range m.Playlists {
-			if _, ok := p.Playlists[name]; !ok {
-				if m.Remove(j.root, f) == nil {
-					delete(m.Playlists, name)
-					delete(m.PlaylistSums, name)
-					delete(m.Imported, f) // the user may make their own of that name: added back, it goes as "add" (R35)
-				}
-			}
-		}
-	}
 	m.PlaylistsStale = false
 	j.unsaved++ // saved by work's last save, or on a stop by its deferred one
+	return nil
+}
+
+// prunePlaylists deletes the recorded playlists no longer selected, unless failed songs hold the
+// removals (I2). A stop short of space (space) never runs it.
+func (j *job) prunePlaylists() error {
+	if j.held() {
+		return nil
+	}
+	for name, f := range j.m.Playlists {
+		if _, ok := j.p.Playlists[name]; !ok && j.m.Remove(j.root, f) == nil {
+			delete(j.m.Playlists, name)
+			delete(j.m.PlaylistSums, name)
+			delete(j.m.Imported, f) // the user may make their own of that name: added back, it goes as "add" (R35)
+		}
+	}
 	return nil
 }
 
