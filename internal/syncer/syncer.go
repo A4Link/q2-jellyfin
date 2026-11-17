@@ -117,30 +117,24 @@ type Runner struct {
 	// editMu, taken before fileMu, lets edits wait for each other: fileMu is then only a run's.
 	fileMu, editMu sync.Mutex
 
-	mu                    sync.Mutex
-	plan                  *plan.Plan
-	moving                map[string]bool // the songs plan renames, replaces or removes, for Moving
-	state, stopAs         string
-	ending                bool // a run is done, and its OnDone hasn't returned yet
-	err                   error
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	doneN, total, failedN int
-	renamedN, removedN    int
-	heldN                 int  // songs taken out of Sync that the removals left (I2)
-	heldRetry             bool // heldN came from a shared failure (j.hold)
-	deletedN              int
-	errAt                 time.Time
-	bytesDone, bytesTotal int64
-	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
-	current, part         string
-	failures              []Failure
-	meter                 meter
+	mu     sync.Mutex
+	plan   *plan.Plan
+	moving map[string]bool // the songs plan renames, replaces or removes, for Moving
+	stopAs string
+	ending bool // a run is done, and its OnDone hasn't returned yet
+	cancel context.CancelFunc
+	done   chan struct{}
+	// stat is the run as Snapshot shows it, kept as it goes: BytesDone counts the files finished,
+	// and Snapshot adds the one in flight and works out Permille and ETA.
+	stat        Snapshot
+	cur, curMax int64 // the file in flight: bytes on the card, its planned size
+	part        string
+	meter       meter
 }
 
 func New(root string, src MediaSource, log *applog.Log) *Runner {
 	return &Runner{Backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
-		CardMounted: q2.CardMounted, Now: time.Now, Net: Net, root: root, src: src, log: log, state: "idle"}
+		CardMounted: q2.CardMounted, Now: time.Now, Net: Net, root: root, src: src, log: log, stat: Snapshot{State: "idle"}}
 }
 
 func (r *Runner) manifestPath() string { return filepath.Join(r.root, ".jellyfin", "manifest.json") }
@@ -156,7 +150,7 @@ func (r *Runner) logf(format string, a ...any) {
 func (r *Runner) Start(p plan.Plan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == "running" {
+	if r.stat.State == "running" {
 		return ErrBusy
 	}
 	// Older builds kept the whole plan here, megabytes for an Entire Library that ran the app out of
@@ -197,14 +191,12 @@ func (r *Runner) launch() {
 	p := *r.plan
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel, r.done = cancel, make(chan struct{})
-	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
-	r.doneN, r.failedN, r.total, r.renamedN, r.removedN, r.heldN = 0, 0, len(p.Add)+len(p.Replace), 0, 0, 0
-	r.deletedN = 0
-	r.heldRetry = false
-	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
+	// a new run's numbers; ErrAt stays, as it always has, until a stop sets it again
+	r.stat = Snapshot{State: "running", Total: len(p.Add) + len(p.Replace), ErrAt: r.stat.ErrAt}
+	r.meter, r.cur, r.curMax = meter{}, 0, 0
 	for _, ws := range [][]plan.Want{p.Add, p.Replace} {
 		for _, w := range ws {
-			r.bytesTotal += w.Bytes
+			r.stat.BytesTotal += w.Bytes
 		}
 	}
 	r.moving = p.Moving()
@@ -227,22 +219,22 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 	}()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.current = ""
+	r.stat.Current = ""
 	switch {
 	case ctx.Err() != nil:
-		r.state = r.stopAs
+		r.stat.State = r.stopAs
 	case errors.Is(err, q2.ErrNoCard):
-		r.state, r.err, r.errAt = "paused", q2.ErrNoCard, r.Now()
+		r.stat.State, r.stat.Err, r.stat.ErrAt = "paused", q2.ErrNoCard, r.Now()
 	case errors.Is(err, ErrOffline) || errors.Is(err, ErrCardFull) || errors.Is(err, ErrRefused) || errors.Is(err, ErrSpaceLow):
-		r.state, r.err, r.errAt = "paused", err, r.Now() // Resume, or the next Sync, continues once it is back
+		r.stat.State, r.stat.Err, r.stat.ErrAt = "paused", err, r.Now() // Resume, or the next Sync, continues once it is back
 		r.logf("sync: paused: %v", err)
 	case err != nil:
-		r.state, r.err, r.errAt = "error", err, r.Now()
+		r.stat.State, r.stat.Err, r.stat.ErrAt = "error", err, r.Now()
 		r.logf("sync: %v", err)
 	default:
-		r.state, finished, r.ending = "done", true, true
+		r.stat.State, finished, r.ending = "done", true, true
 		r.moving = nil // Moving answers only while running or paused
-		if r.failedN == 0 {
+		if r.stat.Failed == 0 {
 			r.plan = nil // only Retry Failed reads it again; a big plan is megabytes
 		}
 	}
@@ -250,7 +242,7 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 
 func (r *Runner) stop(as string) {
 	r.mu.Lock()
-	if r.state != "running" {
+	if r.stat.State != "running" {
 		r.mu.Unlock()
 		return
 	}
@@ -348,7 +340,7 @@ func (r *Runner) edit(wait bool, f func(*library.Manifest) (bool, error)) error 
 	}
 	defer r.fileMu.Unlock()
 	r.mu.Lock()
-	running := r.state == "running" // launched, its work not yet holding fileMu
+	running := r.stat.State == "running" // launched, its work not yet holding fileMu
 	r.mu.Unlock()
 	if running {
 		return ErrBusy
@@ -389,7 +381,7 @@ func (r *Runner) Pause() { r.stop("paused") }
 func (r *Runner) Resume() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == "paused" && r.plan != nil {
+	if r.stat.State == "paused" && r.plan != nil {
 		r.launch()
 	}
 }
@@ -398,7 +390,7 @@ func (r *Runner) Resume() {
 func (r *Runner) Cancel() {
 	r.stop("idle")
 	r.mu.Lock()
-	r.state, r.err, r.plan, r.moving, r.current = "idle", nil, nil, nil, ""
+	r.stat.State, r.stat.Err, r.plan, r.moving, r.stat.Current = "idle", nil, nil, nil, ""
 	part := r.part
 	r.part = ""
 	r.mu.Unlock()
@@ -413,7 +405,7 @@ func (r *Runner) Cancel() {
 func (r *Runner) RetryFailed() bool {
 	r.mu.Lock()
 	p := r.plan
-	ok := p != nil && (r.state == "error" || r.state == "paused" || r.state == "done" && r.failedN > 0)
+	ok := p != nil && (r.stat.State == "error" || r.stat.State == "paused" || r.stat.State == "done" && r.stat.Failed > 0)
 	r.mu.Unlock()
 	return ok && r.Start(*p) == nil
 }
@@ -423,7 +415,7 @@ func (r *Runner) RetryFailed() bool {
 func (r *Runner) Forget() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == "done" || r.state == "error" {
+	if r.stat.State == "done" || r.stat.State == "error" {
 		r.plan, r.moving = nil, nil
 	}
 }
@@ -477,33 +469,32 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 func (r *Runner) Moving(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return (r.state == "running" || r.state == "paused") && r.moving[id]
+	return (r.stat.State == "running" || r.stat.State == "paused") && r.moving[id]
 }
 
 // Busy is whether a sync runs, or has just ended and its OnDone hasn't returned (I15).
 func (r *Runner) Busy() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state == "running" || r.ending
+	return r.stat.State == "running" || r.ending
 }
 
 func (r *Runner) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	done := r.bytesDone + min(r.cur, r.curMax)
-	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
-		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, ErrAt: r.errAt,
-		Renamed: r.renamedN, Removed: r.removedN, Held: r.heldN, HeldRetry: r.heldRetry, Deleted: r.deletedN, Failures: append([]Failure(nil), r.failures...)}
+	s := r.stat
+	s.BytesDone += min(r.cur, r.curMax)
+	s.Failures = append([]Failure(nil), r.stat.Failures...)
 	switch {
 	case s.State == "done":
 		s.Permille = 1000
-	case r.bytesTotal > 0:
-		s.Permille = permille(done, r.bytesTotal)
+	case s.BytesTotal > 0:
+		s.Permille = permille(s.BytesDone, s.BytesTotal)
 	default:
-		s.Permille = permille(int64(r.doneN), int64(r.total))
+		s.Permille = permille(int64(s.Done), int64(s.Total))
 	}
 	if s.State == "running" {
-		s.ETA = r.meter.eta(r.Now(), r.bytesTotal-done)
+		s.ETA = r.meter.eta(r.Now(), s.BytesTotal-s.BytesDone)
 	}
 	return s
 }
@@ -521,18 +512,18 @@ func (r *Runner) fail(id, title, op string, err error) {
 	r.logf("sync: %s %s failed: %s", op, id, f.Msg)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.failedN++
-	if r.failedN > maxFailures { // counted, not listed
+	r.stat.Failed++
+	if r.stat.Failed > maxFailures { // counted, not listed
 		return
 	}
-	r.failures = append(r.failures, f)
+	r.stat.Failures = append(r.stat.Failures, f)
 }
 
 func (r *Runner) finished(w plan.Want) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.doneN++
-	r.bytesDone += w.Bytes
+	r.stat.Done++
+	r.stat.BytesDone += w.Bytes
 	r.cur, r.curMax = 0, 0
 }
 
@@ -576,7 +567,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	j.dropParts()
 	n := j.dropStale() // what a stop left of the last run's
 	j.mu.Lock()
-	j.deletedN = n
+	j.stat.Deleted = n
 	j.mu.Unlock()
 	defer func() { // a stop keeps what is done; a crash re-fetches at most the songs since the last save
 		if j.unsaved > 0 {
@@ -773,7 +764,7 @@ func (j *job) renames() error {
 			j.recorded[strings.ToLower(e.Path)]--
 			j.recorded[strings.ToLower(mv.To)]++
 			e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
-			j.count(&j.renamedN)
+			j.count(&j.stat.Renamed)
 			j.unsaved++
 		}
 	}
@@ -807,9 +798,9 @@ func (j *job) downloads() error {
 					return err
 				}
 				j.mu.Lock()
-				j.current = w.Song.Title
+				j.stat.Current = w.Song.Title
 				if w.Song.Artist != "" {
-					j.current = w.Song.Artist + " – " + w.Song.Title
+					j.stat.Current = w.Song.Artist + " – " + w.Song.Title
 				}
 				j.mu.Unlock()
 				if once {
@@ -1019,7 +1010,7 @@ func (j *job) removals() error {
 	}
 	if j.held() { // I2: what was asked for didn't come, so what it replaces stays; Retry Failed or the next Sync removes
 		j.mu.Lock()
-		j.heldN, j.heldRetry = j.toRemove(), j.hold
+		j.stat.Held, j.stat.HeldRetry = j.toRemove(), j.hold
 		j.mu.Unlock()
 		return nil
 	}
@@ -1053,7 +1044,7 @@ func (j *job) removals() error {
 			return err
 		}
 		j.mu.Lock()
-		j.removedN += n
+		j.stat.Removed += n
 		j.mu.Unlock()
 	}
 	return nil
