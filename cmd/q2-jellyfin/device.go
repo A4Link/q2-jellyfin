@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,33 +193,6 @@ func (d *daemon) listErr(err error, cursor string) q2spot.Reply {
 	return r
 }
 
-// serverRow opens the Server page, the signed-in server's address beneath.
-func (d *daemon) serverRow() q2spot.Row {
-	d.mu.Lock()
-	server := d.server
-	d.mu.Unlock()
-	return list("server", "Server", shownServer(server), "")
-}
-
-// serverPage is the server's address, pressed to type another; a text typed in it comes back as a
-// search, which goes to setTypedServer as this page was asked for last (searchSections), or signed
-// out as the root's box does. It is the page's only row, what a new address does beneath it: Q2 Pod
-// makes a first search row the title bar's search icon unless it is the only one.
-func (d *daemon) serverPage() q2spot.Reply {
-	server, note := d.serverRow().Subtitle, "A new address signs you out"
-	if d.client() == nil {
-		server, note = shownServer(d.loginServer()), "Press to type another address"
-		d.login.mu.Lock()
-		d.login.pending = fieldServer
-		d.login.mu.Unlock()
-	}
-	if d.caps.Field { // Q2 Pod sends a text typed in it to setserver: the reply is this page's (login.go)
-		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "field", URI: "setserver", Context: "server", Title: "Server Address:",
-			Subtitle: server}, info(note)}}
-	}
-	return q2spot.Reply{Rows: []q2spot.Row{{Kind: "search", Title: server, Subtitle: note}}}
-}
-
 // home is the signed-in root's rows, for a sign-in page Q2 Pod asks for again once signed in
 // (Return goes back a page at a time): Newly Added is a press away. Sections are the first page's.
 func (d *daemon) home() q2spot.Reply {
@@ -229,17 +201,6 @@ func (d *daemon) home() q2spot.Reply {
 		r.Message = ""
 	}
 	return r
-}
-
-// shownServer is a server's address for the screen: never a proxy's user:password@, the host in
-// lower case as typed on the T9 box it may not be.
-func shownServer(server string) string {
-	u, err := url.Parse(server)
-	if err != nil {
-		return ""
-	}
-	u.User, u.Host = nil, strings.ToLower(u.Host)
-	return u.String()
 }
 
 // wifiWait is how long a request without Wi-Fi says "Connecting to Wi-Fi…" while the user's switch
@@ -720,24 +681,4 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		reportRow(s),
 		list("account", "Account", user, ""),
 		info("Version " + strings.TrimPrefix(version, "q2-v"))}...)}
-}
-
-func (d *daemon) account(cl *jellyfin.Client) q2spot.Reply {
-	d.mu.Lock()
-	user := d.user
-	d.mu.Unlock()
-	rows := []q2spot.Row{d.serverRow(), {Kind: "search", Title: "Signed in as:", Subtitle: user}}
-	if d.caps.Field { // the password page (login.go pwForm), what was typed there forgotten
-		rows[1] = list("pwlogin", "Signed in as:", user, "")
-		d.clearForm()
-	}
-	if cl.KeyAuth() { // signed in with a key before API key sign-in was turned off
-		rows = append(rows, info("An admin-level API key is stored on this card"))
-	}
-	// Signed in as is the box for another user's name, then a password, as a first sign-in
-	// (typedSignedIn); the sign-in now is replaced only once the new one works.
-	d.login.mu.Lock()
-	d.login.pending = fieldUser
-	d.login.mu.Unlock()
-	return q2spot.Reply{Rows: append(rows, act("signout", "Sign Out", ""))}
 }
