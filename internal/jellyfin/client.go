@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -310,7 +311,7 @@ func arrayValues(data []byte) int {
 // ("Items", "Playlists", "Users"), or the last for media ("Download", "universal", "stream").
 func opName(p string) string {
 	switch b := path.Base(p); b {
-	case "Download", "universal", "stream", "Primary", "Lyrics", "AuthenticateByName", "AuthenticateWithQuickConnect", "Initiate", "Connect", "Enabled", "Me", "Public":
+	case "Download", "universal", "stream", "Primary", "Lyrics", "AuthenticateByName", "AuthenticateWithQuickConnect", "Initiate", "Connect", "Me", "Public":
 		return b
 	}
 	seg := strings.Split(strings.Trim(p, "/"), "/")
@@ -335,7 +336,7 @@ func (c *Client) keep(r authResult) Creds {
 // is checked (GET /Users/Me); else the password is exchanged for a token (POST
 // /Users/AuthenticateByName) and dropped. The server must be Jellyfin (GET /System/Info/Public).
 func (c *Client) SignIn(ctx context.Context) (Creds, error) {
-	if err := c.checkServer(ctx); err != nil {
+	if err := c.CheckServer(ctx); err != nil {
 		return Creds{}, err
 	}
 	if c.c.Token != "" {
@@ -365,7 +366,7 @@ func (c *Client) SignIn(ctx context.Context) (Creds, error) {
 // a Jellyfin API key can't be swapped for a narrower token.
 // TODO(verify): confirm GET /Users answers an API key on the Jellyfin versions you support.
 func (c *Client) SignInWithKey(ctx context.Context, user string) (Creds, error) {
-	if err := c.checkServer(ctx); err != nil {
+	if err := c.CheckServer(ctx); err != nil {
 		return Creds{}, err
 	}
 	var users []struct {
@@ -388,11 +389,8 @@ func (c *Client) SignInWithKey(ctx context.Context, user string) (Creds, error) 
 }
 
 // CheckServer reports ErrNotJellyfin (or why it can't tell) for a server whose public info doesn't
-// name Jellyfin. It sends no credentials.
-func (c *Client) CheckServer(ctx context.Context) error { return c.checkServer(ctx) }
-
-// checkServer reports ErrNotJellyfin for a server whose public info doesn't name Jellyfin.
-func (c *Client) checkServer(ctx context.Context) error {
+// name Jellyfin. A client made without a sign-in sends no credentials.
+func (c *Client) CheckServer(ctx context.Context) error {
 	var info struct {
 		ProductName string `json:"ProductName"`
 		Version     string `json:"Version"`
@@ -613,8 +611,8 @@ func (c *Client) Artists(ctx context.Context, order string, reverse bool) ([]Art
 			return nil, err
 		}
 	}
-	if order == "name" && !reverse { // several libraries' artists as one list by name; any other
-		sortByName(out, func(a Artist) string { return a.Name }, len(s.libs)) // order: library by library
+	if order == "name" && !reverse && len(s.libs) > 1 { // one list by name; any other order: library by library
+		sort.SliceStable(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	}
 	return out, nil
 }

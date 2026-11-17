@@ -126,11 +126,6 @@ func Save(dir string, c jellyfin.Creds) error {
 	if err != nil {
 		logOnce("credentials: no key at %s (%v): stored unencrypted", KeyPath, err)
 	}
-	return save(dir, c, k)
-}
-
-// save writes c sealed with k, or plain when k is nil.
-func save(dir string, c jellyfin.Creds, k []byte) error {
 	b, err := json.Marshal(c)
 	if err != nil {
 		return err

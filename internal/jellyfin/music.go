@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -279,11 +278,4 @@ func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int)
 		skip = 0
 	}
 	return out, nil
-}
-
-// sortByName orders xs by name when they came from more than one library.
-func sortByName[T any](xs []T, name func(T) string, libs int) {
-	if libs > 1 {
-		sort.SliceStable(xs, func(i, j int) bool { return strings.ToLower(name(xs[i])) < strings.ToLower(name(xs[j])) })
-	}
 }
