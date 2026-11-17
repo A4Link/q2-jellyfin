@@ -19,7 +19,6 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/fw"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/library"
-	"github.com/A4Link/q2-jellyfin/internal/plan"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/quality"
@@ -104,16 +103,6 @@ func (s *stateKeys) flush() error {
 		m["hold"] = "1"
 	}
 	return s.st.Write(m)
-}
-
-type preview struct {
-	gen    int
-	at     time.Time
-	done   bool
-	plan   *plan.Plan
-	err    error
-	gone   []selection.Item   // chosen items the server no longer has: out of Sync at Start Sync
-	cancel context.CancelFunc // stops its fetches (dropPreview)
 }
 
 // daemon is the running app: the Q2SPOT/1 handler (device) and what it drives.
