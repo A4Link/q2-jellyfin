@@ -588,7 +588,7 @@ func (c *Client) Artists(ctx context.Context, order string, reverse bool) ([]Art
 	seen := map[string]bool{} // an artist in two music libraries is listed once
 	for _, lib := range s.libs {
 		q := url.Values{"parentId": {lib}, "userId": {c.c.UserID}, "fields": {artistFields},
-			"sortBy": base["sortBy"], "sortOrder": base["sortOrder"]}
+			"sortBy": base["sortBy"], "sortOrder": base["sortOrder"], "enableUserData": {"false"}}
 		_, err := c.eachPage(ctx, "/Artists/AlbumArtists", q, func(w wireItem) {
 			if !seen[w.ID] {
 				seen[w.ID] = true
@@ -610,34 +610,15 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 	if err != nil {
 		return Artist{}, nil, err
 	}
-	s, err := c.music(ctx)
-	if err != nil {
-		return Artist{}, nil, err
-	}
 	// Paged (listPage a request): "Various Artists" in a big library has thousands of albums, more
 	// than one answer may hold (maxBody; audit 2026-11-10 #4). An album in two libraries comes once.
-	// As for songs (allMusic), DateCreated breaks ties and an album missed between pages is
+	// As for songs (allMusicItems), DateCreated breaks ties and an album missed between pages is
 	// ErrChanged: an artist in Sync would otherwise have that album's songs deleted.
 	var als []wireItem
-	seen := map[string]bool{}
-	for _, lib := range s.libs {
-		q := url.Values{"albumArtistIds": {id}, "includeItemTypes": {"MusicAlbum"}, "recursive": {"true"},
-			"sortBy": {"ProductionYear,SortName,DateCreated"}, "parentId": {lib}, "userId": {c.c.UserID},
-			"fields": {itemFields}, "enableImageTypes": {"Primary"}}
-		got := map[string]bool{}
-		total, err := c.eachPage(ctx, "/Items", q, func(x wireItem) {
-			got[x.ID] = true
-			if !seen[x.ID] {
-				seen[x.ID] = true
-				als = append(als, x)
-			}
-		})
-		if err == nil && len(got) < total {
-			err = ErrChanged
-		}
-		if err != nil {
-			return Artist{}, nil, err
-		}
+	err = c.allMusicItems(ctx, url.Values{"albumArtistIds": {id}, "includeItemTypes": {"MusicAlbum"}, "recursive": {"true"},
+		"sortBy": {"ProductionYear,SortName,DateCreated"}, "enableUserData": {"false"}}, func(x wireItem) { als = append(als, x) })
+	if err != nil {
+		return Artist{}, nil, listErr(err)
 	}
 	a := w.artist()
 	if a.AlbumCount == 0 {
@@ -685,9 +666,6 @@ const listPage = 500
 // eachPage calls f for every item of GET p with q, listPage at a time, in order, and returns the
 // server's total.
 func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wireItem)) (int, error) {
-	if q.Get("enableUserData") == "" {
-		q.Set("enableUserData", "false") // nothing reads it
-	}
 	total := -1
 	for start := 0; ; start += listPage {
 		q.Set("startIndex", strconv.Itoa(start))
@@ -699,12 +677,6 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 			err = c.call(ctx, "GET", p, q, nil, &r)
 		}
 		if err != nil {
-			var ae *APIError
-			if errors.As(err, &ae) && ae.Code == CodeGone { // a list's 404 is no item deleted: an HTTP error
-				e := *ae
-				e.Code, e.kind = 0, ErrUnreachable
-				err = &e
-			}
 			return 0, err
 		}
 		if total >= 0 && r.TotalRecordCount != total {
@@ -727,7 +699,7 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 // and track, as a music library lists them.
 func (c *Client) Favorites(ctx context.Context) ([]Song, error) {
 	return c.allMusic(ctx, url.Values{"isFavorite": {"true"}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {songOrder}}, listPage)
+		"sortBy": {songOrder}})
 }
 
 func (c *Client) Song(ctx context.Context, id string) (Song, error) {
