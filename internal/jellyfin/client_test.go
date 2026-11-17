@@ -1308,7 +1308,7 @@ func TestArtistAlbumListNotFound(t *testing.T) {
 }
 
 // A Favourites or Entire Library song list that answers 404 is "not found" (CodeGone); the Sync
-// preview decides what that means for each (device_sync.go).
+// preview decides what that means for each (preview.go).
 func TestSongListsNotFound(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{
 		"/Items": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
