@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -127,7 +129,7 @@ func SongPath(root string, s jellyfin.Song, quality string, multiDisc bool) stri
 	artist := artistOf(s)
 	album := s.Album
 	if album == "" {
-		album = "Unknown Album"
+		album = unknownAlbum
 	}
 	if s.Year > 0 {
 		album = fmt.Sprintf("%d - %s", s.Year, album)
@@ -151,6 +153,73 @@ func WithID(path, id string) string {
 		stem = strings.TrimRight(stem[:n], ". ")
 	}
 	return dir + stem + tag + e
+}
+
+// unknownAlbum is the folder of a song with no album (SongPath, SongFinder).
+const unknownAlbum = "Unknown Album"
+
+// SongFinder indexes man's songs under card once and returns find over that index: the song of a
+// listen Q2 Pod logged, from its artist, album, title and track tags (cmd's play reports).
+func SongFinder(card string, man *Manifest) func(artist, album, title, track string) string {
+	return newSongIndex(card, man).find
+}
+
+// songIndex finds a synced song from the tags Q2 Pod logs, through the path the sync gave it
+// (SongPath: Jellyfin/<album artist>/<year - ><album>/<disc->track - title>[ [id]].ext),
+// keyed by album and title as SafeName makes them, in lower case. The tags are the file's own,
+// which a transcode carries from the server's file, and the path the server's: they agree unless
+// the server's metadata was edited away from the file's tags; such a song is not found.
+type songIndex map[[2]string][]indexed
+
+type indexed struct {
+	id, artist string
+	track      int
+}
+
+var (
+	trackPrefix = regexp.MustCompile(`^(?:\d+-)?(\d+) - `)
+	yearPrefix  = regexp.MustCompile(`^\d+ - `)
+)
+
+func newSongIndex(card string, man *Manifest) songIndex {
+	top := filepath.Join(card, "Jellyfin")
+	idx := songIndex{}
+	for id, e := range man.Songs {
+		rel, err := filepath.Rel(top, e.Path)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if err != nil || len(parts) != 3 {
+			continue
+		}
+		stem := strings.TrimSuffix(parts[2], filepath.Ext(parts[2]))
+		stem = strings.TrimSuffix(stem, " ["+SafeName(id)+"]")
+		track := 0
+		if m := trackPrefix.FindStringSubmatch(stem); m != nil {
+			track, _ = strconv.Atoi(m[1])
+			stem = stem[len(m[0]):]
+		}
+		k := [2]string{strings.ToLower(yearPrefix.ReplaceAllString(parts[1], "")), strings.ToLower(stem)}
+		idx[k] = append(idx[k], indexed{id, strings.ToLower(parts[0]), track})
+	}
+	return idx
+}
+
+// find is the song of a logged listen, "" when none or more than one fit.
+func (idx songIndex) find(artist, album, title, track string) string {
+	if album == "" {
+		album = unknownAlbum
+	}
+	fold := func(s string) string { return strings.ToLower(SafeName(s)) }
+	c := idx[[2]string{fold(album), fold(title)}]
+	if n, err := strconv.Atoi(track); err == nil && len(c) > 1 {
+		c = slices.DeleteFunc(slices.Clone(c), func(x indexed) bool { return x.track != n })
+	}
+	if len(c) > 1 {
+		c = slices.DeleteFunc(slices.Clone(c), func(x indexed) bool { return x.artist != fold(artist) })
+	}
+	if len(c) != 1 {
+		return ""
+	}
+	return c[0].id
 }
 
 // MetaKey hashes the fields that build the path, so a metadata change is detectable.
