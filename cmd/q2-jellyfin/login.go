@@ -251,12 +251,6 @@ func (d *daemon) checkServer(server string, in time.Duration) error {
 	return err
 }
 
-// loginClient is a client for the saved server with c's sign-in (c.Server is filled in).
-func (d *daemon) loginClient(c jellyfin.Creds) (*jellyfin.Client, error) {
-	c.Server = d.loginServer()
-	return d.clientFor(c)
-}
-
 // clientFor is a client for c, logging to log.txt (redacted).
 func (d *daemon) clientFor(c jellyfin.Creds) (*jellyfin.Client, error) {
 	cl, err := d.newClient(c)
@@ -292,7 +286,7 @@ func (d *daemon) startQC() q2spot.Reply {
 		return q2spot.Fail(q2spot.Error, "Set the server first")
 	}
 	d.cancelQC()
-	cl, err := d.loginClient(jellyfin.Creds{})
+	cl, err := d.clientFor(jellyfin.Creds{Server: d.loginServer()})
 	if err != nil {
 		return q2spot.Fail(q2spot.Error, jellyfin.Message(err, hostOf(server)))
 	}
@@ -466,24 +460,33 @@ func (d *daemon) typed(text string) q2spot.Reply {
 // typedSignIn signs in with c, a user and a password or API key; a sign-in already made (Account's
 // Signed in as) is replaced only by one that worked.
 func (d *daemon) typedSignIn(c jellyfin.Creds) error {
-	user := c.User
-	cl, err := d.loginClient(c)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), d.answerIn*7/8)
-		if c.Kind == jellyfin.KindAPIKey {
-			c, err = cl.SignInWithKey(ctx, user)
-		} else {
-			c, err = cl.SignIn(ctx) // the password is swapped for a token and dropped
-		}
-		cancel()
-	}
-	if err == nil && d.client() != nil && d.signOut() != nil {
-		err = errors.New(signOutFailed)
-	}
+	c.Server = d.loginServer()
+	c, err := d.trySignIn(c, d.answerIn*7/8)
 	if err == nil {
 		err = d.signedIn(c)
 	}
 	return err
+}
+
+// trySignIn swaps c's password or API key for a sign-in to c.Server within in. Only one that worked
+// signs out the sign-in on the Q2 (as the Server page does), so a typo or a wrong password changes
+// nothing (audit 2026-11-10 #6). The caller keeps the new one (signedIn).
+func (d *daemon) trySignIn(c jellyfin.Creds, in time.Duration) (jellyfin.Creds, error) {
+	cl, err := d.clientFor(c)
+	if err != nil {
+		return c, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), in)
+	if c.Kind == jellyfin.KindAPIKey {
+		c, err = cl.SignInWithKey(ctx, c.User)
+	} else {
+		c, err = cl.SignIn(ctx) // the password is swapped for a token and dropped
+	}
+	cancel()
+	if err == nil && d.client() != nil && d.signOut() != nil {
+		err = errors.New(signOutFailed)
+	}
+	return c, err
 }
 
 // ---- the password page with field rows (Q2 Pod's field cap) ----

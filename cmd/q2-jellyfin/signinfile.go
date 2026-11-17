@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -138,19 +137,7 @@ func (d *daemon) signInWith(server string, f fileSignIn) {
 	}
 	err := d.checkServer(server, loginIn)
 	if err == nil {
-		var cl *jellyfin.Client
-		if cl, err = d.clientFor(c); err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), loginIn)
-			if f.hasKey {
-				c, err = cl.SignInWithKey(ctx, f.user)
-			} else {
-				c, err = cl.SignIn(ctx) // the password is swapped for a token and dropped
-			}
-			cancel()
-		}
-		if err == nil && d.client() != nil && d.signOut() != nil {
-			err = errors.New(signOutFailed)
-		}
+		c, err = d.trySignIn(c, loginIn) // login.go
 		if d.client() == nil {
 			if serr := d.setServer(server); err == nil {
 				err = serr
