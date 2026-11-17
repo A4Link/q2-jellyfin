@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -48,23 +47,3 @@ func (c *Client) Lyrics(ctx context.Context, id string) (string, error) {
 // lyricsMax is the most of a song's lyrics kept: Q2 Pod reads no more of a .lrc (lyrics.c
 // LYRIC_TAG_MAX), and they are kept in /tmp, which is RAM, and on the card.
 const lyricsMax = 64 << 10
-
-// latestPage is how many albums Newly Added lists.
-const latestPage = 50
-
-// Latest is the music libraries' most recently added albums, newest first.
-func (c *Client) Latest(ctx context.Context) ([]Album, error) {
-	var items []wireItem
-	err := c.eachMusic(ctx, "/Items", url.Values{"includeItemTypes": {"MusicAlbum"}, "recursive": {"true"},
-		"sortBy": {"DateCreated,SortName"}, "sortOrder": {"Descending"}, "limit": {fmt.Sprint(latestPage)}},
-		func(w wireItem) { items = append(items, w) })
-	if err != nil {
-		return nil, err
-	}
-	// Several libraries: one list, newest first (DateCreated is ISO 8601, so it sorts as text).
-	sort.SliceStable(items, func(i, j int) bool { return items[i].DateCreated > items[j].DateCreated })
-	if len(items) > latestPage {
-		items = items[:latestPage]
-	}
-	return albums(items), nil
-}

@@ -219,13 +219,6 @@ func (c *Client) allMusic(ctx context.Context, q url.Values) ([]Song, error) {
 	return out, nil
 }
 
-// AllSongs is every song of the music libraries, 500 a request, by album artist, album and track:
-// Entire Library's songs in about one request per 500, not one per album.
-func (c *Client) AllSongs(ctx context.Context) ([]Song, error) {
-	return c.allMusic(ctx, url.Values{"includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {songOrder}, "enableUserData": {"false"}}) // nothing reads a synced song's user data
-}
-
 // pagedMusic is one page (offset, size) of q across the music libraries, taken in library order:
 // each library's total first (limit 0), then the slice that falls in the window.
 func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int) ([]wireItem, error) {
