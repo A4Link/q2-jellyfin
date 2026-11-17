@@ -517,7 +517,7 @@ func TestProgressPermilleAndETA(t *testing.T) {
 	clock := t0
 	r.Now = func() time.Time { return clock }
 	r.mu.Lock()
-	r.state, r.bytesTotal, r.bytesDone = "running", 1000, 500
+	r.stat.State, r.stat.BytesTotal, r.stat.BytesDone = "running", 1000, 500
 	r.mu.Unlock()
 	if s := r.Snapshot(); s.Permille != 500 || s.ETA != 0 || s.BytesDone != 500 {
 		t.Fatalf("%+v", s)
