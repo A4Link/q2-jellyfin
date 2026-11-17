@@ -34,12 +34,6 @@ import (
 // server's favourite (fav.go); firmware without it gets six fields. With the firmware's "now", the
 // header asks it to say which line plays (now=1), for the server's play reports (now.go).
 
-// playerSource is a stream source that can also give URLs for the firmware's own player.
-type playerSource interface {
-	PlayerURL(id, quality string) string
-	PlayerCoverURL(id string) string
-}
-
 const (
 	urlsBefore = 100       // songs kept in the queue before the one started
 	urlsAfter  = 400       // and from it on
@@ -56,7 +50,7 @@ func urlField(s string) string {
 
 // urlsQueue is the Q2URLS/1 file for songs from from on, and the songs[lo:hi] it holds. It fits in
 // urlsMax: the song started and those after it first, then the ones before it as room allows.
-func (s *streamer) urlsQueue(songs []jellyfin.Song, from int, ps playerSource) (b []byte, lo, hi int) {
+func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi int) {
 	lo, hi = max(0, from-urlsBefore), min(len(songs), from+urlsAfter)
 	q, re := quality.Original, false
 	if s.quality != nil {
@@ -76,11 +70,11 @@ func (s *streamer) urlsQueue(songs []jellyfin.Song, from int, ps playerSource) (
 		if e := m.Songs[sg.ID]; s.synced(e) {
 			src = e.Path // on the card: played as a local file within the queue
 		} else {
-			src = ps.PlayerURL(sg.ID, library.Quality(q, sg, re))
+			src = playerURL(sg.ID, library.Quality(q, sg, re))
 		}
 		cover := ""
 		if sg.CoverArt != "" {
-			cover = ps.PlayerCoverURL(sg.CoverArt)
+			cover = playerCoverURL(sg.CoverArt)
 		}
 		lines[i] = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d", urlField(src), urlField(sg.Title), urlField(sg.Artist),
 			urlField(sg.Album), urlField(cover), sg.Duration)
@@ -120,17 +114,13 @@ func (s *streamer) urlsFile() string {
 	return filepath.Join(filepath.Dir(s.playFile), "q2-jellyfin.urls")
 }
 
-// startURLs plays songs from from as a URL queue; false when the source can't make player URLs.
-func (s *streamer) startURLs(songs []jellyfin.Song, from int) bool {
-	ps, ok := s.src.(playerSource)
-	if !ok {
-		return false
-	}
+// startURLs plays songs from from as a URL queue.
+func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	path := s.urlsFile()
-	b, lo, hi := s.urlsQueue(songs, from, ps)
+	b, lo, hi := s.urlsQueue(songs, from)
 	if err := q2.WriteFile(path, b); err != nil {
 		s.logf("stream: urls: %v", err)
-		return true
+		return
 	}
 	s.urlsLyrics(songs[lo:hi], from-lo, filepath.Join(filepath.Dir(s.playFile), "q2-jellyfin.lyrics"))
 	seq := strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -156,7 +146,6 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) bool {
 		s.started(songs[from])
 	}
 	s.logf("stream: %d songs as URLs from %q", len(songs), songs[from].Title)
-	return true
 }
 
 // urlsLyrics gives a URL queue's songs their server lyrics for Q2 Pod's Now Playing: dir/<line>.lrc,
