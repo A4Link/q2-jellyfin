@@ -207,16 +207,7 @@ func (r *Runner) launch() {
 			r.bytesTotal += w.Bytes
 		}
 	}
-	r.moving = map[string]bool{}
-	for _, mv := range p.Rename {
-		r.moving[mv.ID] = true
-	}
-	for _, w := range p.Replace {
-		r.moving[w.Song.ID] = true
-	}
-	for _, e := range p.Remove {
-		r.moving[e.ID] = true
-	}
+	r.moving = p.Moving()
 	go r.run(ctx, p, r.done)
 }
 

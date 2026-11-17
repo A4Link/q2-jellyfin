@@ -151,7 +151,7 @@ func TestHeldLibraryHoldsItsPlaylists(t *testing.T) {
 	d.mu.Lock()
 	pl := d.daemon.preview.plan
 	d.mu.Unlock()
-	if changes(*pl) {
+	if pl.Changes() {
 		t.Fatalf("plan %+v", *pl)
 	}
 	if row, ok := find(d.do("playlists"), "Sync Now"); ok {
