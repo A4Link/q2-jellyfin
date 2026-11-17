@@ -39,13 +39,13 @@ import (
 // queue's URLs stay good from one run of the app to the next.
 const relayAddr = "127.0.0.1:2317"
 
-// PlayerURL is song id at quality q for the firmware's player: the relay's URL for it.
-func (s src) PlayerURL(id, q string) string {
+// playerURL is song id at quality q for the firmware's player: the relay's URL for it.
+func playerURL(id, q string) string {
 	return "http://" + relayAddr + "/song/" + url.PathEscape(id) + "?q=" + url.QueryEscape(q)
 }
 
-// PlayerCoverURL is id's cover for Now Playing, through the relay.
-func (s src) PlayerCoverURL(id string) string {
+// playerCoverURL is id's cover for Now Playing, through the relay.
+func playerCoverURL(id string) string {
 	return "http://" + relayAddr + "/cover/" + url.PathEscape(id)
 }
 

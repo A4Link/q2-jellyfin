@@ -20,8 +20,8 @@ import (
 // urlSrc is fakeSrc with player URLs: the relay's (relay.go).
 type urlSrc struct{ *fakeSrc }
 
-func (urlSrc) PlayerURL(id, q string) string   { return src{}.PlayerURL(id, q) }
-func (urlSrc) PlayerCoverURL(id string) string { return src{}.PlayerCoverURL(id) }
+func (urlSrc) PlayerURL(id, q string) string   { return playerURL(id, q) }
+func (urlSrc) PlayerCoverURL(id string) string { return playerCoverURL(id) }
 
 // With "urls", Play writes the Q2URLS/1 queue and names it in .play; nothing downloads; a song on
 // the card stays its card path; tabs in titles become spaces.
