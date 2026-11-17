@@ -30,8 +30,6 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
 
-const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync needs
-
 // syncPage is the Sync screen: the running sync, the one just finished, or the preview, computed
 // in the background while the page refreshes. Its options (syncSources) come first in every state:
 // the firmware keeps the highlight at the same position when the page redraws (M33), and the rows
@@ -325,7 +323,7 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 			d.log.Printf("sync: refresh: %v", rerr)
 		}
 	}
-	if err == nil && !changes(pl) {
+	if err == nil && !pl.Changes() {
 		d.dropGone(gone) // nothing on the Q2 is left to remove for them: no Start Sync to wait for
 	}
 	d.mu.Lock()
@@ -342,7 +340,7 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 	}
 	// Sync Favourites: start without a second press, but never to take songs off the card: that
 	// waits for Start Sync, with the preview to show what goes (audit 2026-11-16 #3).
-	if auto && err == nil && changes(pl) && len(pl.Remove) == 0 {
+	if auto && err == nil && pl.Changes() && len(pl.Remove) == 0 {
 		if r := d.syncAction("start"); r.Message != "" {
 			d.log.Printf("sync favourites: %s", r.Message)
 		}
@@ -376,13 +374,8 @@ func isGone(gone []selection.Item, it selection.Item) bool {
 	return slices.ContainsFunc(gone, func(g selection.Item) bool { return g.Kind == it.Kind && g.ID == it.ID })
 }
 
-// changes reports whether p has anything to do: a song to move, or a playlist file to write or delete.
-func changes(p plan.Plan) bool {
-	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged+p.Leftover > 0 || p.PlaylistsStale
-}
-
 func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
-	if !changes(*p) {
+	if !p.Changes() {
 		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
 	}
 	var rows []q2spot.Row
@@ -394,11 +387,7 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 		rows = append(rows, list("added", "+"+plural(len(p.Add), "song")+" · "+size(b), "", ""))
 	}
 	if len(p.Remove) > 0 {
-		var b int64
-		for _, e := range p.Remove {
-			b += e.Size
-		}
-		rows = append(rows, list("removed", "−"+plural(len(p.Remove), "song")+" · "+size(b), "", ""))
+		rows = append(rows, list("removed", "−"+plural(len(p.Remove), "song")+" · "+size(p.RemoveBytes), "", ""))
 		if len(p.Remove)*2 > onCard { // a library the server lost, or a Remove from Sync too many
 			rows = append(rows, info("Removes most of the synced songs"))
 		}
@@ -426,7 +415,7 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 	// Whether it all fits keeps Space to Keep Free in hand too: a sync that would end under it pauses
 	// there. It starts anyway, and the run pauses before the card falls under it. The removals count
 	// as freed: a run short of space removes them first (syncer space).
-	if p.NeedBytes > 0 && p.NeedBytes-p.RemoveBytes+planMargin+reserve > p.FreeBytes {
+	if p.NeedBytes > 0 && p.NeedBytes-p.RemoveBytes+plan.Margin+reserve > p.FreeBytes {
 		rows = append(rows, info("Not all of it fits on the card"), info("It pauses with "+size(reserve)+" left"))
 	}
 	rows = append(rows, act("start", "Start Sync", ""))
@@ -747,7 +736,7 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		// Songs the sync takes from the playback cache stay in it until then, and need no room.
 		keep, cached := d.stream.cachedFor(p.plan.Add, p.plan.Replace)
 		if net := p.plan.NeedBytes - p.plan.RemoveBytes - cached; net > 0 {
-			need := net + planMargin + keepFreeBytes(d.settings().KeepFree)
+			need := net + plan.Margin + keepFreeBytes(d.settings().KeepFree)
 			d.stream.evictFor(need, func() int64 { return d.free(d.card) }, keep)
 		}
 		d.stream.keepForSync(keep)
@@ -1055,7 +1044,7 @@ func there(paths []string) []string {
 func (d *daemon) syncDone(p plan.Plan) {
 	d.mu.Lock()
 	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
-	send := d.caps.Library && changes(p)
+	send := d.caps.Library && p.Changes()
 	if send {
 		if err := q2.WriteFile(d.libMore(), []byte("more")); err != nil {
 			d.log.Printf("library: %v", err)
@@ -1205,16 +1194,7 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 // marked before the request, so an overlapping backfill doesn't ask too, and unmarked when no
 // answer came (the preview dropped, the server out of reach), so a later preview asks again.
 func (d *daemon) backfillLyrics(ctx context.Context, resolved map[string][]jellyfin.Song, pl plan.Plan) {
-	busy := map[string]bool{}
-	for _, w := range pl.Replace {
-		busy[w.Song.ID] = true
-	}
-	for _, mv := range pl.Rename {
-		busy[mv.ID] = true
-	}
-	for _, e := range pl.Remove {
-		busy[e.ID] = true
-	}
+	busy := pl.Moving()
 	m := d.manifest()
 	for _, songs := range resolved {
 		for _, s := range songs {
