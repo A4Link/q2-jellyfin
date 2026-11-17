@@ -470,13 +470,8 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 func (d *daemon) errRows(err error, song string) q2spot.Reply {
 	host := d.hostName()
 	d.log.Printf("error: %v", err)
-	var ae *jellyfin.APIError
-	op, h, code := "", 0, 0
-	if errors.As(err, &ae) {
-		op, h, code = ae.Op, ae.HTTP, ae.Code
-	}
 	return q2spot.Reply{Rows: []q2spot.Row{info(jellyfin.Message(err, host)),
-		list("details", "Details", "", detailsCtx(op, h, code, time.Now(), song))}}
+		list("details", "Details", "", errDetails(err, "", time.Now(), song))}}
 }
 
 // errToast is a failed action's reply: the firmware toasts its message.
@@ -494,6 +489,17 @@ func (d *daemon) errToast(err error) q2spot.Reply {
 // then |error when withErr adds one.
 func detailsCtx(op string, h, code int, at time.Time, song string) string {
 	return fmt.Sprintf("%s|%d|%d|%d|%s", op, h, code, at.Unix(), song)
+}
+
+// errDetails is err's Details context: the op, HTTP status and code of the server's answer, or op
+// with none when there was no answer.
+func errDetails(err error, op string, at time.Time, song string) string {
+	h, code := 0, 0
+	var ae *jellyfin.APIError
+	if errors.As(err, &ae) {
+		op, h, code = ae.Op, ae.HTTP, ae.Code
+	}
+	return detailsCtx(op, h, code, at, song)
 }
 
 // withErr adds err's text to a Details context, for a failure no op, HTTP status or code explains.
@@ -555,11 +561,6 @@ func (d *daemon) streamErrRows() []q2spot.Row {
 	if e == nil {
 		return nil
 	}
-	op, h, code := "stream", 0, 0
-	var ae *jellyfin.APIError
-	if errors.As(e, &ae) {
-		op, h, code = ae.Op, ae.HTTP, ae.Code
-	}
 	msg := e.Error()
 	if !e.skipped { // a skip says why already
 		why := e.err
@@ -568,7 +569,7 @@ func (d *daemon) streamErrRows() []q2spot.Row {
 		}
 		msg += ": " + d.stopMessage(why)
 	}
-	return []q2spot.Row{info(msg), list("details", "Details", "", withErr(detailsCtx(op, h, code, e.at, e.id), e.err))}
+	return []q2spot.Row{info(msg), list("details", "Details", "", withErr(errDetails(e.err, "stream", e.at, e.id), e.err))}
 }
 
 func (d *daemon) syncSubtitle(cl *jellyfin.Client) string {
