@@ -297,11 +297,11 @@ func (r *streamRun) writeQueue() error {
 	return nil
 }
 
-// gone reports the server's own word that a song isn't there (Jellyfin 70, HTTP 410), which no
+// gone reports the server's own word that a song isn't there (CodeGone, HTTP 410), which no
 // retry changes.
 func gone(err error) bool {
 	var ae *jellyfin.APIError
-	return errors.As(err, &ae) && (ae.Code == 70 || ae.HTTP == 410)
+	return errors.As(err, &ae) && (ae.Code == jellyfin.CodeGone || ae.HTTP == 410)
 }
 
 // failed counts a failed try of song i and reports whether the run goes on, and whether the song
