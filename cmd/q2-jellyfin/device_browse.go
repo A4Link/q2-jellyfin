@@ -989,27 +989,6 @@ func (d *daemon) startSongs(songs []jellyfin.Song, i int, key string) {
 	})
 }
 
-// onQ2Subtitle is On This Q2's subtitle: how many items are chosen, and the bytes on the card. sel
-// and err are the selection syncSources already read.
-func (d *daemon) onQ2Subtitle(sel selection.Set, err error) string {
-	if err != nil {
-		return "Selection file is damaged"
-	}
-	// While a sync runs, the copy already read: reading each save again would hold two copies
-	// (the bytes catch up when it ends).
-	d.manMu.Lock()
-	m := d.man
-	d.manMu.Unlock()
-	if m == nil || !d.runner.Busy() {
-		m = d.manifest()
-	}
-	var bytes int64
-	for _, e := range m.Songs {
-		bytes += e.Size
-	}
-	return plural(len(sel.Items), "item") + " · " + size(bytes)
-}
-
 // latest is Newly Added: the albums most recently added to the music libraries, newest first.
 func (d *daemon) latest(ctx context.Context, cl *jellyfin.Client, cursor string) q2spot.Reply {
 	// Kept for listFor: its second page (the reply is split in two, audit B10) and coming back reuse it.

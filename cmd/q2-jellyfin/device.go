@@ -617,65 +617,6 @@ func when(t, now time.Time) string {
 	return t.Format("Jan 2 15:04")
 }
 
-// libraryRow is Sync Entire Library: Off, On, or On with the counts once the preview has resolved it.
-func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
-	sub := "Off"
-	if sel.Has(selection.KindLibrary, "all") {
-		sub = "On"
-		d.mu.Lock()
-		c, known := d.libCount, d.libKnown // kept while a check drops the list
-		d.mu.Unlock()
-		if known {
-			sub = fmt.Sprintf("On · %s · %s", plural(c[0], "album"), plural(c[1], "playlist"))
-		}
-	}
-	return q2spot.Row{Kind: "action", URI: "toggle", Title: "Sync Entire Library", Subtitle: sub,
-		Context: "library:all", Position: "toggle"}
-}
-
-// onQ2 is the selection, each with its status and size on the card; a hold takes one out. Entire
-// Library is switched from the Sync page; here it shows only while on, as one of the items.
-func (d *daemon) onQ2(cursor string) q2spot.Reply {
-	if _, err := d.selection(); err != nil {
-		return damagedSelection()
-	}
-	gone := d.previewGone()
-	v := d.view()
-	var rows []q2spot.Row
-	if len(v.sel.Items) == 0 {
-		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: "Nothing chosen yet",
-			Subtitle: "Open a playlist, album or artist and press Add to Sync"}}}
-	}
-	for _, it := range v.sel.Items {
-		key := selection.Key(it.Kind, it.ID)
-		if it.Kind == selection.KindLibrary {
-			lib := d.libraryRow(v.sel) // inert here, as songs are; a hold still takes it out
-			lib.Kind, lib.URI, lib.Title = "info", "", "Entire Library"
-			rows = append([]q2spot.Row{lib}, rows...)
-			continue
-		}
-		var b int64
-		for _, sid := range v.keyed[key] {
-			b += v.m.Songs[sid].Size
-		}
-		total := 0
-		if it.Kind == selection.KindSong {
-			total = 1
-		}
-		row := v.item(it.Kind, it.ID, it.Name, "", total)
-		row.Subtitle = join(row.Subtitle, size(b))
-		gn := isGone(gone, it)
-		if gn { // as Sync Jobs says; its page would fail, and a hold still takes it out
-			row.Subtitle = join("No longer on the server", size(b))
-		}
-		if it.Kind == selection.KindSong || gn {
-			row.Kind, row.URI = "info", ""
-		}
-		rows = append(rows, row)
-	}
-	return page(rows, cursor)
-}
-
 var settingsMu sync.Mutex
 
 const settingNotSaved = "Couldn't save the setting"
