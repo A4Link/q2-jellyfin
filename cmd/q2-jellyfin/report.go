@@ -10,7 +10,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,8 +34,8 @@ import (
 //     at that time.
 //   - A synced song, played from the Q2's library whether the app runs or not, is found later in Q2
 //     Pod's play log (.scrobbler.log on the card, and .scrobbler.log.sent where Q2 Pod's scrobble
-//     upload moves the lines it sent), matched to its song through the manifest (songIndex), and
-//     reported as played at its time (POST /UserPlayedItems/{id}?datePlayed=).
+//     upload moves the lines it sent), matched to its song through the manifest
+//     (library.SongFinder), and reported as played at its time (POST /UserPlayedItems/{id}?datePlayed=).
 //
 // The outbox, .jellyfin/outbox.json, is what is still to send, written whole (aside, then renamed).
 // An entry leaves it only once the server took it (2xx), or refused it for good (an item it doesn't
@@ -552,7 +551,8 @@ func (d *daemon) readPlays() {
 // hour after now (logged under a clock since set back) waits for its time, not to move the mark
 // past the listens to come.
 func listens(card string, man *library.Manifest, m playsMark, now time.Time) ([]report, playsMark) {
-	var idx songIndex // built at the first new listen: a send with nothing new builds nothing
+	// The song index is built at the first new listen: a send with nothing new builds nothing.
+	var find func(artist, album, title, track string) string
 	next := m
 	seen := map[string]bool{}
 	for _, h := range m.Seen {
@@ -582,10 +582,10 @@ func listens(card string, man *library.Manifest, m playsMark, now time.Time) ([]
 			if t == next.At {
 				next.Seen = append(next.Seen, h)
 			}
-			if idx == nil {
-				idx = newSongIndex(card, man)
+			if find == nil {
+				find = library.SongFinder(card, man)
 			}
-			if id := idx.find(f[0], f[1], f[2], f[3]); id != "" && !liveNear(m.Live, id, t) {
+			if id := find(f[0], f[1], f[2], f[3]); id != "" && !liveNear(m.Live, id, t) {
 				rs = append(rs, report{Kind: playedKind, Item: id, At: t})
 			}
 		})
@@ -624,64 +624,6 @@ func liveNear(live []liveMark, id string, t int64) bool {
 		}
 	}
 	return false
-}
-
-// songIndex finds a synced song from the tags Q2 Pod logs, through the path the sync gave it
-// (library.SongPath: Jellyfin/<album artist>/<year - ><album>/<disc->track - title>[ [id]].ext),
-// keyed by album and title as SafeName makes them, in lower case. The tags are the file's own,
-// which a transcode carries from the server's file, and the path the server's: they agree unless
-// the server's metadata was edited away from the file's tags; such a song is not found.
-type songIndex map[[2]string][]indexed
-
-type indexed struct {
-	id, artist string
-	track      int
-}
-
-var (
-	trackPrefix = regexp.MustCompile(`^(?:\d+-)?(\d+) - `)
-	yearPrefix  = regexp.MustCompile(`^\d+ - `)
-)
-
-func newSongIndex(card string, man *library.Manifest) songIndex {
-	top := filepath.Join(card, "Jellyfin")
-	idx := songIndex{}
-	for id, e := range man.Songs {
-		rel, err := filepath.Rel(top, e.Path)
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if err != nil || len(parts) != 3 {
-			continue
-		}
-		stem := strings.TrimSuffix(parts[2], filepath.Ext(parts[2]))
-		stem = strings.TrimSuffix(stem, " ["+library.SafeName(id)+"]")
-		track := 0
-		if m := trackPrefix.FindStringSubmatch(stem); m != nil {
-			track, _ = strconv.Atoi(m[1])
-			stem = stem[len(m[0]):]
-		}
-		k := [2]string{strings.ToLower(yearPrefix.ReplaceAllString(parts[1], "")), strings.ToLower(stem)}
-		idx[k] = append(idx[k], indexed{id, strings.ToLower(parts[0]), track})
-	}
-	return idx
-}
-
-// find is the song of a logged listen, "" when none or more than one fit.
-func (idx songIndex) find(artist, album, title, track string) string {
-	if album == "" {
-		album = "Unknown Album"
-	}
-	fold := func(s string) string { return strings.ToLower(library.SafeName(s)) }
-	c := idx[[2]string{fold(album), fold(title)}]
-	if n, err := strconv.Atoi(track); err == nil && len(c) > 1 {
-		c = slices.DeleteFunc(slices.Clone(c), func(x indexed) bool { return x.track != n })
-	}
-	if len(c) > 1 {
-		c = slices.DeleteFunc(slices.Clone(c), func(x indexed) bool { return x.artist != fold(artist) })
-	}
-	if len(c) != 1 {
-		return ""
-	}
-	return c[0].id
 }
 
 // ---- the setting ----
