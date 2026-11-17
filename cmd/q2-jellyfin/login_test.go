@@ -714,6 +714,24 @@ func TestSignInAsAnotherUser(t *testing.T) {
 	noSecretOnCard(t, d)
 }
 
+// Signed in as another user when the old sign-in can't be signed out (the card can't be written):
+// the typed sign-in fails, saying so, and the old one stays.
+func TestSignInAsAnotherUserSignOutFails(t *testing.T) {
+	d, _ := loginDaemon(t)
+	signInWithPassword(t, d)
+	d.do("account") // the sign-in loaded, so the next one must sign it out
+	p := filepath.Join(d.dir, "credentials")
+	os.Remove(p)
+	os.MkdirAll(filepath.Join(p, "x"), 0o755) // a folder with something in it: os.Remove fails
+	d.do("search", "u")
+	if r := d.do("search", typedPassword); r.Message != "Couldn't sign out: the card can't be written" {
+		t.Fatalf("%+v", r)
+	}
+	if d.client() == nil {
+		t.Fatal("signed out")
+	}
+}
+
 // Signed in as another user with no Wi-Fi: the password typed fails, never the Wi-Fi page (live,
 // so Q2 Pod would keep it titled with the password).
 func TestSignInAsAnotherUserNoWiFi(t *testing.T) {

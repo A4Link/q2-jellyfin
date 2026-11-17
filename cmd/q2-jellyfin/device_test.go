@@ -2593,6 +2593,42 @@ func TestStreamErrorReason(t *testing.T) {
 	}
 }
 
+// Each Details row names what failed: the server's answer when there was one, else its own name
+// ("" for a list, "stream" for a stream, "sync" for a sync), with its time and song.
+func TestDetailsNames(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	t0 := time.Unix(1_000_000, 0)
+	streamCtx := func(err error) string {
+		d.stream.setErr(&streamErr{title: "Song 0", id: "al0.0", at: t0, err: err})
+		return d.streamErrRows()[1].Context
+	}
+	stoppedCtx := func(err error) string {
+		r := d.stoppedRows(syncer.Snapshot{State: "error", Err: err, ErrAt: t0})
+		return r.Rows[len(r.Rows)-1].Context
+	}
+	listCtx := func(err error) string {
+		f := strings.SplitN(d.errRows(err, "").Rows[1].Context, "|", 5)
+		f[3] = "now" // the time of the list's failure
+		return strings.Join(f, "|")
+	}
+	api := &jellyfin.APIError{Op: "download", HTTP: 500}
+	for _, c := range []struct {
+		ctx, want string
+	}{
+		{listCtx(io.ErrUnexpectedEOF), "|0|0|now|"},
+		{listCtx(api), "download|500|0|now|"},
+		{streamCtx(io.ErrUnexpectedEOF), "stream|0|0|1000000|al0.0|"},
+		{streamCtx(api), "download|500|0|1000000|al0.0|"},
+		{stoppedCtx(os.ErrPermission), "sync|0|0|1000000||"},
+		{stoppedCtx(api), "download|500|0|1000000||"},
+		{stoppedCtx(nil), "sync|0|0|1000000|"},
+	} {
+		if !strings.HasPrefix(c.ctx, c.want) {
+			t.Errorf("%q, want %q…", c.ctx, c.want)
+		}
+	}
+}
+
 // Songs an earlier run streamed are deleted when the app starts (M26).
 func TestStreamFolderEmptiedAtStart(t *testing.T) {
 	card := t.TempDir()
