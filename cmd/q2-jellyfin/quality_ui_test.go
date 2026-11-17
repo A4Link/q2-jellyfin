@@ -227,6 +227,26 @@ func TestPausedSyncQualityChangeWaitsForStart(t *testing.T) {
 	}
 }
 
+// A sync stopped by a change of Sync Quality doesn't start again by itself when the new preview
+// can't read the selection: the preview fails.
+func TestRestartWithDamagedSelection(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3, block: make(chan struct{})}
+	d := runningSync(t, n)
+	os.WriteFile(filepath.Join(d.dir, "selection.json"), []byte(`{"items":[{"kind":`), 0o644)
+	d.do("setdefq", "opus-128")
+	close(n.block)
+	d.bg.Wait()
+	d.mu.Lock()
+	p, auto := d.daemon.preview, d.autoStart
+	d.mu.Unlock()
+	if p == nil || !p.done || p.err == nil || auto {
+		t.Fatalf("preview %+v, autoStart %v", p, auto)
+	}
+	if st := d.runner.Snapshot().State; st == "running" {
+		t.Fatalf("a sync started: %s", st)
+	}
+}
+
 // Sync Quality chosen again as it is changes nothing: a sync under way goes on, its download kept.
 func TestSyncQualitySameKeepsSync(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 3, block: make(chan struct{})}

@@ -2683,3 +2683,52 @@ func TestRunTakesFromCache(t *testing.T) {
 		t.Fatal(".part.key left")
 	}
 }
+
+// Stopped at the reserve with no song failed, the run writes the playlists of what arrived and
+// removes nothing more (I2): a recorded playlist taken out of Sync stays, and the stop says no
+// failure held anything back.
+func TestSpaceLowKeepsPlaylistTakenOut(t *testing.T) {
+	_, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	stale := library.PlaylistFile(root, "Gone")
+	put(t, stale, "#EXTM3U\n")
+	(&library.Manifest{Songs: map[string]*library.Entry{}, Playlists: map[string]string{"Gone": stale}}).Save(root, root+"/.jellyfin/manifest.json")
+	var calls atomic.Int32
+	r.Free = func() int64 { // room for a, then none
+		if calls.Add(1) == 1 {
+			return 1 << 30
+		}
+		return 0
+	}
+	r.Reserve = func() int64 { return 1 }
+	r.Start(plan.Plan{Add: []plan.Want{a, b}, Playlists: map[string][]string{}})
+	s := wait(t, r)
+	var sl *SpaceLowError
+	if !errors.As(s.Err, &sl) || sl.Held || sl.Retry || s.Done != 1 {
+		t.Fatalf("%+v %+v", s, sl)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("a playlist taken out of Sync went at a stop short of space: %v", err)
+	}
+	if m := manifest(t, root); m.Playlists["Gone"] != stale {
+		t.Errorf("%+v", m.Playlists)
+	}
+}
+
+// A run keeps the time the run before it stopped (ErrAt) until it stops with an error itself:
+// launch has never cleared it.
+func TestErrAtKeptAcrossLaunch(t *testing.T) {
+	_, r, root := setup(t)
+	r.Now = func() time.Time { return time.Unix(1_000_000, 0) }
+	os.MkdirAll(root+"/.jellyfin", 0o755)
+	os.WriteFile(root+"/.jellyfin/manifest.json", []byte("{"), 0o644)
+	r.Start(plan.Plan{})
+	if s := wait(t, r); s.State != "error" {
+		t.Fatalf("%+v", s)
+	}
+	os.Remove(root + "/.jellyfin/manifest.json")
+	r.Start(plan.Plan{})
+	if s := wait(t, r); s.State != "done" || !s.ErrAt.Equal(time.Unix(1_000_000, 0)) {
+		t.Fatalf("%+v", s)
+	}
+}
