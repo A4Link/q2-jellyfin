@@ -2,7 +2,7 @@ package jellyfin
 
 import (
 	"context"
-	"errors"
+	"maps"
 	"net/url"
 	"path"
 	"strconv"
@@ -85,7 +85,7 @@ func (c *Client) musicFolders(ctx context.Context) (musicRoots, error) {
 	for _, lib := range s.libs {
 		// Every top-level item, paged, not just the first 200: a library can have more than one
 		// content folder, and a song in a later one must not be filtered out as non-music (audit S15).
-		q := url.Values{"userId": {c.c.UserID}, "parentId": {lib}, "fields": {"Path"}}
+		q := url.Values{"userId": {c.c.UserID}, "parentId": {lib}, "fields": {"Path"}, "enableUserData": {"false"}}
 		_, err := c.eachPage(ctx, "/Items", q, func(k wireItem) {
 			if p := slashPath(k.Path); p != "" {
 				if dir := path.Dir(p); !seen[dir] {
@@ -95,7 +95,7 @@ func (c *Client) musicFolders(ctx context.Context) (musicRoots, error) {
 			}
 		})
 		if err != nil {
-			return nil, err
+			return nil, listErr(err)
 		}
 	}
 	c.scope.roots, c.scope.scanned = roots, true
@@ -145,10 +145,7 @@ func (c *Client) eachMusic(ctx context.Context, p string, q url.Values, f func(w
 	}
 	seen := map[string]bool{}
 	for _, lib := range s.libs {
-		lq := url.Values{}
-		for k, v := range q {
-			lq[k] = v
-		}
+		lq := maps.Clone(q)
 		lq.Set("parentId", lib)
 		lq.Set("userId", c.c.UserID)
 		if p == "/Items" {
@@ -173,58 +170,51 @@ func (c *Client) eachMusic(ctx context.Context, p string, q url.Values, f func(w
 // an album) keep one order from page to page. The API has no sort by id.
 const songOrder = "AlbumArtist,Album,ParentIndexNumber,IndexNumber,SortName,DateCreated"
 
-// allMusic is every song of q in every music library, converted page by page so a big library's
-// raw items never pile up.
-func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, error) {
+// allMusicItems calls f once for each item of GET /Items with q in every music library, every page
+// (eachPage), in library order: an item in two libraries comes once. Items tied on every sort key
+// can swap between pages, one coming twice and another never, so a library that sends fewer items
+// than its total is ErrChanged: a sync would otherwise delete the one missed (audit 2026-11-10 #3).
+func (c *Client) allMusicItems(ctx context.Context, q url.Values, f func(wireItem)) error {
 	s, err := c.music(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	out := []Song{} // never nil: an empty list is still an answer
 	seen := map[string]bool{}
 	for _, lib := range s.libs {
-		total := -1
-		got := map[string]bool{} // this library's songs: fewer than its total means one was skipped
-		for start := 0; ; start += page {
-			lq := url.Values{}
-			for k, v := range q {
-				lq[k] = v
+		lq := maps.Clone(q)
+		lq.Set("parentId", lib)
+		lq.Set("userId", c.c.UserID)
+		lq.Set("fields", itemFields)
+		lq.Set("enableImageTypes", "Primary")
+		got := map[string]bool{} // this library's items: fewer than its total means one was skipped
+		total, err := c.eachPage(ctx, "/Items", lq, func(w wireItem) {
+			got[w.ID] = true
+			if !seen[w.ID] {
+				seen[w.ID] = true
+				f(w)
 			}
-			lq.Set("parentId", lib)
-			lq.Set("startIndex", strconv.Itoa(start))
-			lq.Set("limit", strconv.Itoa(page))
-			r, err := c.items(ctx, lq)
-			if errors.Is(err, ErrUnreachable) && ctx.Err() == nil { // once more: a dropped page ends no check
-				r, err = c.items(ctx, lq)
-			}
-			if err != nil {
-				return nil, err
-			}
-			if total >= 0 && r.TotalRecordCount != total {
-				return nil, ErrChanged // items shifted between pages: one may have been skipped
-			}
-			if !r.startsAt(start) {
-				return nil, ErrChanged
-			}
-			total = r.TotalRecordCount
-			fresh := r.Items[:0]
-			for _, w := range r.Items {
-				got[w.ID] = true
-				if !seen[w.ID] {
-					seen[w.ID] = true
-					fresh = append(fresh, w)
-				}
-			}
-			out = append(out, songs(fresh)...)
-			if len(r.Items) < page || start+len(r.Items) >= r.TotalRecordCount {
-				break
-			}
+		})
+		if err == nil && len(got) < total {
+			err = ErrChanged
 		}
-		// Songs tied on every sort key can swap between pages, one coming twice and another never:
-		// a sync would then delete the one missed (audit 2026-11-10 #3).
-		if len(got) < total {
-			return nil, ErrChanged
+		if err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// allMusic is every song of q in every music library, each converted as it comes so a big
+// library's raw items never pile up.
+func (c *Client) allMusic(ctx context.Context, q url.Values) ([]Song, error) {
+	out := []Song{} // never nil: an empty list is still an answer
+	err := c.allMusicItems(ctx, q, func(w wireItem) {
+		if w.Type == "" || w.Type == "Audio" {
+			out = append(out, w.song())
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -233,7 +223,7 @@ func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, 
 // Entire Library's songs in about one request per 500, not one per album.
 func (c *Client) AllSongs(ctx context.Context) ([]Song, error) {
 	return c.allMusic(ctx, url.Values{"includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {songOrder}, "enableUserData": {"false"}}, 500) // nothing reads a synced song's user data
+		"sortBy": {songOrder}, "enableUserData": {"false"}}) // nothing reads a synced song's user data
 }
 
 // pagedMusic is one page (offset, size) of q across the music libraries, taken in library order:
@@ -249,10 +239,7 @@ func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int)
 		if len(out) >= size {
 			break
 		}
-		lq := url.Values{}
-		for k, v := range q {
-			lq[k] = v
-		}
+		lq := maps.Clone(q)
 		lq.Set("parentId", lib)
 		if len(s.libs) > 1 { // where does this library's share of the window start?
 			lq.Set("limit", "0")
