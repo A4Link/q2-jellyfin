@@ -520,7 +520,7 @@ func (d *daemon) idle(now time.Time) bool {
 	last := d.lastReq
 	d.mu.Unlock()
 	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.stream.active() && !d.qcWaiting() &&
-		d.relayIdle(now) && !d.nowKeeps(now) // now.go: its URL queue playing, to report each song
+		d.relayIdle(now) && !d.nowKeeps(now) // now.go: its URL queue playing, streamed through the relay
 }
 
 // relayIdle is whether the relay moved nothing for idleAfter (relay.go).
