@@ -348,11 +348,7 @@ func (c *Client) SignIn(ctx context.Context) (Creds, error) {
 	var r authResult
 	in := map[string]string{"Username": c.c.User, "Pw": c.c.Password}
 	if err := c.call(ctx, "POST", "/Users/AuthenticateByName", nil, in, &r); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && (ae.HTTP == 400 || ae.HTTP == 401) {
-			ae.kind = ErrAuth
-		}
-		return Creds{}, err
+		return Creds{}, kindOn(err, ErrAuth, 400, 401)
 	}
 	if r.AccessToken == "" {
 		return Creds{}, &APIError{Op: "AuthenticateByName", Msg: "no access token in the answer", kind: ErrNotJellyfin}
@@ -374,11 +370,7 @@ func (c *Client) SignInWithKey(ctx context.Context, user string) (Creds, error) 
 		Name string `json:"Name"`
 	}
 	if err := c.call(ctx, "GET", "/Users", nil, nil, &users); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && (ae.HTTP == 401 || ae.HTTP == 403) {
-			ae.kind = ErrBadKey
-		}
-		return Creds{}, err
+		return Creds{}, kindOn(err, ErrBadKey, 401, 403)
 	}
 	for _, u := range users {
 		if strings.EqualFold(u.Name, strings.TrimSpace(user)) {
@@ -396,11 +388,7 @@ func (c *Client) CheckServer(ctx context.Context) error {
 		Version     string `json:"Version"`
 	}
 	if err := c.call(ctx, "GET", "/System/Info/Public", nil, nil, &info); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && ae.HTTP == 404 {
-			ae.kind = ErrNotJellyfin
-		}
-		return err
+		return kindOn(err, ErrNotJellyfin, 404)
 	}
 	if !strings.Contains(strings.ToLower(info.ProductName), "jellyfin") {
 		return &APIError{Op: "Public", Msg: "not a Jellyfin server", kind: ErrNotJellyfin}
