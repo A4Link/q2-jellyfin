@@ -202,7 +202,8 @@ func (s *streamer) start(songs []jellyfin.Song, from int) {
 		return
 	}
 	s.setErr(nil)
-	if s.caps.URLs && s.startURLs(songs, from) { // stream_urls.go: the firmware streams them itself
+	if s.caps.URLs { // stream_urls.go: the firmware streams them itself
+		s.startURLs(songs, from)
 		return
 	}
 	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list

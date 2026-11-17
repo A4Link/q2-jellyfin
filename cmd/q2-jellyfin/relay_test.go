@@ -240,7 +240,7 @@ func TestURLQueueNoToken(t *testing.T) {
 			t.Errorf("line %d holds the token: %q", i, l)
 		}
 	}
-	if u := (src{d.daemon}).PlayerCoverURL("al0"); u != "http://127.0.0.1:2317/cover/al0" { // nav's songs have no cover
+	if u := playerCoverURL("al0"); u != "http://127.0.0.1:2317/cover/al0" { // nav's songs have no cover
 		t.Errorf("cover %q", u)
 	}
 }
