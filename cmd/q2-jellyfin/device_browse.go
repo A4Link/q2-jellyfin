@@ -459,7 +459,7 @@ type itemList struct {
 }
 
 // shownList is the item page's list while it is key's and fresh (listFor), as itemPage last fetched
-// it, so Add to Sync pressed there asks the server nothing.
+// it, so Add to Sync or Play pressed there asks the server nothing.
 func (d *daemon) shownList(cl *jellyfin.Client, key string) (itemList, bool) {
 	c := &d.lists
 	c.mu.Lock()
@@ -933,7 +933,8 @@ func (d *daemon) startPlay(ctx context.Context, cl *jellyfin.Client, arg string)
 	}
 	i, _ := strconv.Atoi(f[1])
 	kind, id := parseKey(f[0])
-	songs := d.pageSongs(cl, selection.Key(kind, id)) // the list the page showed, if fresh (audit B3)
+	l, _ := d.shownList(cl, selection.Key(kind, id)) // the list the page showed, if fresh (audit B3)
+	songs := l.songs
 	if songs == nil {
 		if r, off := d.noWiFi(true); off {
 			return r, "", false
@@ -986,20 +987,6 @@ func (d *daemon) startSongs(songs []jellyfin.Song, i int, key string) {
 			d.stream.start(songs, i)
 		}
 	})
-}
-
-// pageSongs is the songs item key's page fetched, within listFor: what the row pressed was counted
-// in, without asking the server for the whole list again. Nil when the page's list is another
-// item's, an artist's albums, or older.
-func (d *daemon) pageSongs(cl *jellyfin.Client, key string) []jellyfin.Song {
-	c := &d.lists
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	l, ok := c.vals["item"].(itemList)
-	if c.cl != cl || !ok || l.key != key || l.songs == nil || time.Since(c.at["item"]) >= listFor {
-		return nil
-	}
-	return l.songs
 }
 
 // onQ2Subtitle is On This Q2's subtitle: how many items are chosen, and the bytes on the card. sel
