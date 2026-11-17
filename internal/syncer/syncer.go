@@ -528,9 +528,6 @@ func (r *Runner) fail(id, title, op string, err error) {
 		f.HTTP, f.Code = ae.HTTP, ae.Code
 	}
 	r.logf("sync: %s %s failed: %s", op, id, f.Msg)
-	if op == "cover" { // logged only: no page lists a cover
-		return
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failedN++
@@ -1245,13 +1242,7 @@ func (r *Runner) carryCover(from, to string) {
 		return
 	}
 	defer f.Close()
-	q2.WriteWith(dst, func(w io.Writer) error { // streamed, as cover() saves it
-		n, err := io.Copy(w, io.LimitReader(f, maxCover+1))
-		if err == nil && n > maxCover {
-			err = errors.New("cover larger than 16 MiB") // one planted over Wi-Fi Transfer
-		}
-		return err
-	})
+	writeCover(dst, f) // one planted over Wi-Fi Transfer past maxCover is refused
 }
 
 // fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but
@@ -1515,25 +1506,31 @@ func (r *Runner) cover(ctx context.Context, w plan.Want) {
 			return err
 		}
 		defer resp.Body.Close()
-		big := errors.New("cover larger than 16 MiB")
 		if resp.ContentLength > maxCover {
-			return big
+			return errBigCover
 		}
-		// Streamed: a server that can't resize sends the original, many megabytes.
-		return q2.WriteWith(c, func(f io.Writer) error {
-			n, err := io.Copy(f, io.LimitReader(resp.Body, maxCover+1))
-			if err == nil && n > maxCover {
-				err = big // WriteWith then removes the cut file
-			}
-			return err
-		})
+		return writeCover(c, resp.Body) // streamed: a server that can't resize sends the original, many megabytes
 	}()
 	if err != nil && ctx.Err() == nil {
-		r.fail(w.Song.ID, w.Song.Title, "cover", err)
+		r.logf("sync: cover %s failed: %s", w.Song.ID, applog.Redact(err.Error())) // logged only: no page lists a cover
 	}
 }
 
 const maxCover = 16 << 20
+
+var errBigCover = errors.New("cover larger than 16 MiB")
+
+// writeCover streams r to the cover.jpg at path, refusing one past maxCover: WriteWith then
+// removes the cut file.
+func writeCover(path string, r io.Reader) error {
+	return q2.WriteWith(path, func(w io.Writer) error {
+		n, err := io.Copy(w, io.LimitReader(r, maxCover+1))
+		if err == nil && n > maxCover {
+			err = errBigCover
+		}
+		return err
+	})
+}
 
 // sized asks the image endpoint for at most 600 px: the original can be many megabytes (M19),
 // which the plan's space estimate doesn't count.
