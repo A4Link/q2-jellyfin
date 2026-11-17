@@ -347,3 +347,12 @@ func TestBigHeaderRefused(t *testing.T) {
 		}
 	}
 }
+
+// Clients with the same timeout share one transport, so idle connections and TLS sessions are
+// reused (a full handshake is slow on MIPS); another timeout gets its own.
+func TestClientsShareTransport(t *testing.T) {
+	a, b, c := Client(time.Second), Client(time.Second), Client(2*time.Second)
+	if a.Transport != b.Transport || a.Transport == c.Transport {
+		t.Fatal("transport not shared by timeout")
+	}
+}

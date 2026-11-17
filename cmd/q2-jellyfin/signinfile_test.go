@@ -232,6 +232,26 @@ func TestSignInFileFailsWhileSignedIn(t *testing.T) {
 	}
 }
 
+// Signed in, a file whose sign-in works but whose old sign-in can't be signed out (the card can't
+// be written) fails, saying so: still signed in as before, on the same server.
+func TestSignInFileSignOutFails(t *testing.T) {
+	d, srv := fileDaemon(t, true)
+	d.do("menu") // the sign-in loaded, so the file's must sign it out
+	c := filepath.Join(d.dir, "credentials")
+	os.Remove(c)
+	os.MkdirAll(filepath.Join(c, "x"), 0o755) // a folder with something in it: os.Remove fails
+	p := writeSignIn(t, d, "server="+srv+"\nuser=u\npassword="+typedPassword+"\n")
+	d.do("menu")
+	fileGone(t, p)
+	d.bg.Wait()
+	if rows := d.fileRows(); len(rows) != 1 || rows[0].Title != "Jellyfin sign-in.txt: Couldn't sign out: the card can't be written" {
+		t.Fatalf("%+v", rows)
+	}
+	if d.client() == nil || d.loginServer() == srv {
+		t.Fatalf("signed out, or server %q", d.loginServer())
+	}
+}
+
 // Without Wi-Fi the file is left as it is, and taken once Wi-Fi is back.
 func TestSignInFileWaitsForWiFi(t *testing.T) {
 	d, srv := fileDaemon(t, false)

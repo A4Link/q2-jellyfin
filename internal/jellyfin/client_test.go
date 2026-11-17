@@ -1271,3 +1271,200 @@ func TestImageTagsOnlyPrimary(t *testing.T) {
 		t.Errorf("real-shaped answer: cover %q", w.song().CoverArt)
 	}
 }
+
+// Favourites asks for the songs' user data (it sends no enableUserData), so each song keeps its
+// heart: Jellyfin leaves UserData out when told enableUserData=false.
+func TestFavoritesKeepHearts(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			ud := `,"UserData":{"IsFavorite":true}`
+			if r.URL.Query().Get("enableUserData") == "false" {
+				ud = ""
+			}
+			fmt.Fprintf(w, `{"Items":[{"Id":"s1","Type":"Audio"%s}],"TotalRecordCount":1}`, ud)
+		},
+	})
+	got, err := signedIn(t, srv).Favorites(context.Background())
+	if err != nil || len(got) != 1 || !got[0].Favorite {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+// An artist's album list that answers 404 is an HTTP error, not the artist deleted: only the
+// artist's own lookup says that.
+func TestArtistAlbumListNotFound(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items/ar1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"ar1","Type":"MusicArtist","Name":"A"}`))
+		},
+		"/Items": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
+	})
+	_, _, err := signedIn(t, srv).Artist(context.Background(), "ar1")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.HTTP != 404 || ae.Code != 0 || !errors.Is(err, ErrUnreachable) ||
+		Message(err, "h") != "The server answered HTTP 404" {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
+// A Favourites or Entire Library song list that answers 404 is "not found" (CodeGone); the Sync
+// preview decides what that means for each (device_sync.go).
+func TestSongListsNotFound(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
+	})
+	c := signedIn(t, srv)
+	_, err1 := c.Favorites(context.Background())
+	_, err2 := c.AllSongs(context.Background())
+	for _, err := range []error{err1, err2} {
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.Code != CodeGone || Message(err, "h") != "Not found on the server" {
+			t.Fatalf("%v / %q", err, Message(err, "h"))
+		}
+	}
+}
+
+// The music folders scan (when a playlist or a song is checked) asks for no user data.
+func TestFolderScanAsksNoUserData(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items/s1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"s1","Type":"Audio","Path":"/music/Artist/1.flac"}`))
+		},
+	})
+	if _, err := signedIn(t, srv).Song(context.Background(), "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if folderScans(f) == 0 {
+		t.Fatal("no folder scan")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.seen {
+		if isFolderScan(r) && r.URL.Query().Get("enableUserData") != "false" {
+			t.Errorf("folder scan %s", r.URL)
+		}
+	}
+}
+
+// twoLibraries is a fake whose account sees two music libraries, lib1 and lib2.
+func twoLibraries(t *testing.T, h map[string]http.HandlerFunc) *httptest.Server {
+	f := &fake{h: h}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/UserViews" {
+			w.Write([]byte(`{"Items":[{"Id":"lib1","CollectionType":"music"},{"Id":"films","CollectionType":"movies"},{"Id":"lib2","CollectionType":"music"}]}`))
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// With two music libraries: an artist's album in both comes once (and is no skipped album),
+// Favourites lists lib1's songs before lib2's, and Artists by name is one list A to Z, any case,
+// while any other order keeps each library's own.
+func TestTwoMusicLibraries(t *testing.T) {
+	srv := twoLibraries(t, map[string]http.HandlerFunc{
+		"/Items/ar1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"ar1","Type":"MusicArtist","Name":"A"}`))
+		},
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			lib := q.Get("parentId")
+			switch q.Get("includeItemTypes") {
+			case "MusicAlbum":
+				items := map[string]string{"lib1": `{"Id":"al1","Type":"MusicAlbum"},{"Id":"al2","Type":"MusicAlbum"}`,
+					"lib2": `{"Id":"al1","Type":"MusicAlbum"},{"Id":"al3","Type":"MusicAlbum"}`}[lib]
+				fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2}`, items)
+			case "Audio":
+				fmt.Fprintf(w, `{"Items":[{"Id":"s-%s","Type":"Audio"}],"TotalRecordCount":1}`, lib)
+			}
+		},
+		"/Artists/AlbumArtists": func(w http.ResponseWriter, r *http.Request) {
+			items := map[string]string{"lib1": `{"Id":"a1","Name":"beta"},{"Id":"a2","Name":"Delta"}`,
+				"lib2": `{"Id":"a3","Name":"Alpha"},{"Id":"a4","Name":"charlie"}`}[r.URL.Query().Get("parentId")]
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2}`, items)
+		},
+	})
+	c := signedIn(t, srv)
+	ctx := context.Background()
+	_, als, err := c.Artist(ctx, "ar1")
+	var ids []string
+	for _, a := range als {
+		ids = append(ids, a.ID)
+	}
+	if err != nil || strings.Join(ids, ",") != "al1,al2,al3" {
+		t.Fatalf("artist's albums %v, %v", ids, err)
+	}
+	fav, err := c.Favorites(ctx)
+	if err != nil || len(fav) != 2 || fav[0].ID != "s-lib1" || fav[1].ID != "s-lib2" {
+		t.Fatalf("favourites %+v, %v", fav, err)
+	}
+	for _, o := range []struct {
+		order   string
+		reverse bool
+		want    string
+	}{
+		{"name", false, "Alpha,beta,charlie,Delta"},
+		{"name", true, "beta,Delta,Alpha,charlie"},
+		{"added", false, "beta,Delta,Alpha,charlie"},
+	} {
+		ar, err := c.Artists(ctx, o.order, o.reverse)
+		var names []string
+		for _, a := range ar {
+			names = append(names, a.Name)
+		}
+		if err != nil || strings.Join(names, ",") != o.want {
+			t.Errorf("%s %v: %v, %v", o.order, o.reverse, names, err)
+		}
+	}
+}
+
+// Each sign-in and Quick Connect request gives its own meaning to the answers it expects: a
+// refused password or key, Quick Connect off, an expired code, a server that isn't Jellyfin. Any
+// other status keeps its usual meaning.
+func TestStatusMeaningPerRequest(t *testing.T) {
+	ctx := context.Background()
+	for _, s := range []struct {
+		path string
+		kind error
+		on   string // which of 400 401 403 404 500 502 are kind
+		run  func(c *Client) error
+	}{
+		{"/System/Info/Public", ErrNotJellyfin, "404", func(c *Client) error { return c.CheckServer(ctx) }},
+		{"/Users/AuthenticateByName", ErrAuth, "400 401 403", func(c *Client) error {
+			_, err := c.SignIn(ctx)
+			return err
+		}},
+		{"/Users", ErrBadKey, "401 403", func(c *Client) error {
+			_, err := c.SignInWithKey(ctx, "u")
+			return err
+		}},
+		{"/QuickConnect/Initiate", ErrQuickConnectOff, "401 403", func(c *Client) error {
+			_, _, err := c.QuickConnectInitiate(ctx)
+			return err
+		}},
+		{"/QuickConnect/Connect", ErrQuickConnectExpired, "404", func(c *Client) error {
+			_, err := c.QuickConnectPoll(ctx, "s")
+			return err
+		}},
+		{"/Users/AuthenticateWithQuickConnect", ErrQuickConnectExpired, "401", func(c *Client) error {
+			_, err := c.QuickConnectSignIn(ctx, "s")
+			return err
+		}},
+	} {
+		var on []string
+		for _, st := range []int{400, 401, 403, 404, 500, 502} {
+			_, srv := newFake(t, map[string]http.HandlerFunc{
+				s.path: func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", st) },
+			})
+			c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+			if errors.Is(s.run(c), s.kind) {
+				on = append(on, strconv.Itoa(st))
+			}
+		}
+		if got := strings.Join(on, " "); got != s.on {
+			t.Errorf("%s: %s on %q, want %q", s.path, s.kind, got, s.on)
+		}
+	}
+}
