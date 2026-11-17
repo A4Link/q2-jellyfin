@@ -186,7 +186,7 @@ func (d *daemon) listErr(err error, cursor string) q2spot.Reply {
 	if cursor != "" {
 		return d.errToast(err)
 	}
-	r := d.errRows(err, "")
+	r := d.errRows(err)
 	if errors.Is(err, jellyfin.ErrUnreachable) { // maybe the server moved
 		r.Rows = append(r.Rows, d.serverRow())
 	}
@@ -428,11 +428,11 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 
 // errRows is a failed list: the message and a Details row. The status stays ok because the
 // firmware shows only the message and Retry, never the rows, for any other status.
-func (d *daemon) errRows(err error, song string) q2spot.Reply {
+func (d *daemon) errRows(err error) q2spot.Reply {
 	host := d.hostName()
 	d.log.Printf("error: %v", err)
 	return q2spot.Reply{Rows: []q2spot.Row{info(jellyfin.Message(err, host)),
-		list("details", "Details", "", errDetails(err, "", time.Now(), song))}}
+		list("details", "Details", "", errDetails(err, "", time.Now(), ""))}}
 }
 
 // errToast is a failed action's reply: the firmware toasts its message.
