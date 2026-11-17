@@ -11,7 +11,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -659,6 +658,26 @@ func (c *Client) SearchArtists(ctx context.Context, q string, offset int) ([]Art
 	return artists(ar), nil
 }
 
+// latestPage is how many albums Newly Added lists.
+const latestPage = 50
+
+// Latest is the music libraries' most recently added albums, newest first.
+func (c *Client) Latest(ctx context.Context) ([]Album, error) {
+	var items []wireItem
+	err := c.eachMusic(ctx, "/Items", url.Values{"includeItemTypes": {"MusicAlbum"}, "recursive": {"true"},
+		"sortBy": {"DateCreated,SortName"}, "sortOrder": {"Descending"}, "limit": {fmt.Sprint(latestPage)}},
+		func(w wireItem) { items = append(items, w) })
+	if err != nil {
+		return nil, err
+	}
+	// Several libraries: one list, newest first (DateCreated is ISO 8601, so it sorts as text).
+	sort.SliceStable(items, func(i, j int) bool { return items[i].DateCreated > items[j].DateCreated })
+	if len(items) > latestPage {
+		items = items[:latestPage]
+	}
+	return albums(items), nil
+}
+
 // listPage is how many items one request of a long list asks for: a whole big playlist or every
 // album artist in one answer can pass maxBody.
 const listPage = 500
@@ -700,6 +719,13 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 func (c *Client) Favorites(ctx context.Context) ([]Song, error) {
 	return c.allMusic(ctx, url.Values{"isFavorite": {"true"}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
 		"sortBy": {songOrder}})
+}
+
+// AllSongs is every song of the music libraries, 500 a request, by album artist, album and track:
+// Entire Library's songs in about one request per 500, not one per album.
+func (c *Client) AllSongs(ctx context.Context) ([]Song, error) {
+	return c.allMusic(ctx, url.Values{"includeItemTypes": {"Audio"}, "recursive": {"true"},
+		"sortBy": {songOrder}, "enableUserData": {"false"}}) // nothing reads a synced song's user data
 }
 
 func (c *Client) Song(ctx context.Context, id string) (Song, error) {
@@ -865,20 +891,6 @@ func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
 		c.logf("%s %s -> %d", req.Method, req.URL, code)
 	}
 	return resp, nil
-}
-
-func transportKind(err error) error {
-	switch {
-	case errors.Is(err, ErrInsecure):
-		return ErrInsecure
-	case isCert(err):
-		var ci x509.CertificateInvalidError
-		if errors.As(err, &ci) && ci.Reason == x509.Expired && !timeKnown() {
-			return ErrUnreachable // the clock is unset and the server's time couldn't be read
-		}
-		return ErrCert
-	}
-	return ErrUnreachable
 }
 
 // Logout ends the signed-in session on the server (POST /Sessions/Logout), so its token stops working.

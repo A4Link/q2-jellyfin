@@ -99,6 +99,20 @@ func listErr(err error) error {
 	return err
 }
 
+func transportKind(err error) error {
+	switch {
+	case errors.Is(err, ErrInsecure):
+		return ErrInsecure
+	case isCert(err):
+		var ci x509.CertificateInvalidError
+		if errors.As(err, &ci) && ci.Reason == x509.Expired && !timeKnown() {
+			return ErrUnreachable // the clock is unset and the server's time couldn't be read
+		}
+		return ErrCert
+	}
+	return ErrUnreachable
+}
+
 // timeKnown is tlsroots.Known, injectable for tests.
 var timeKnown = tlsroots.Known
 
