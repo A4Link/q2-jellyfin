@@ -42,23 +42,22 @@ type streamer struct {
 	poll                        time.Duration
 	backoff                     []time.Duration      // wait after each failed try of a song; one try per entry
 	log                         *applog.Log          // optional
-	quality                     func() string        // optional Streaming Quality: a transcode (Opus) applies to every streamed song
-	reencode                    func() bool          // optional Always Re-encode: a lossy song is transcoded too (library.Quality)
-	moving                      func(id string) bool // optional: a sync running or paused will move or remove this song
-	started                     func(jellyfin.Song)  // optional: a song streamed from the server starts playing (report.go)
-	// queued, optional, is a URL queue named in .play with now=1 (Q2 Pod's "now", now.go): its seq,
-	// and its songs' ids by line, "" for one played from the card.
+	quality                     func() string        // Streaming Quality: a transcode (Opus) applies to every streamed song
+	reencode                    func() bool          // Always Re-encode: a lossy song is transcoded too (library.Quality)
+	moving                      func(id string) bool // a sync running or paused will move or remove this song
+	started                     func(jellyfin.Song)  // a song streamed from the server starts playing (report.go)
+	// queued is a URL queue named in .play with now=1 (Q2 Pod's "now", now.go): its seq, and its
+	// songs' ids by line, "" for one played from the card.
 	queued func(seq string, ids []string)
 	// idle ends a stream when no new song has played for this long after the one playing should
 	// have ended, and nothing is left to fetch: the firmware leaves .playing alone once it plays
 	// anything else, so this is also how a stream learns that it was left. Default idleAfter.
 	idle time.Duration
-	// hearts, optional, are the hearts pressed that the songs fetched may not have yet (fav.go).
+	// hearts are the hearts pressed that the songs fetched may not have yet (fav.go).
 	hearts func() map[string]bool
 	// gap is the least time between two writes of a queue file: the firmware reads it again when
 	// its mtime's second changes, and FAT32 keeps mtimes in 2 s.
 	gap time.Duration
-	now func() time.Time // early start's clock; time.Now unless a test sets it
 
 	errMu sync.Mutex
 	err   *streamErr
@@ -66,11 +65,11 @@ type streamer struct {
 	statMu sync.Mutex
 	stat   streamStatus // the song the player waits for, or plays (status.go)
 
-	cacheLimit func() int64    // optional: the playback cache's cap in bytes; 0 (or nil) keeps nothing (cache.go)
-	spare      func() int64    // optional: the card's free bytes over Space to Keep Free; under 0 keeps nothing
+	cacheLimit func() int64    // the playback cache's cap in bytes; 0 keeps nothing (cache.go)
+	spare      func() int64    // the card's free bytes over Space to Keep Free; under 0 keeps nothing
 	cacheMu    sync.Mutex      // one trim, eviction or clear at a time
 	syncKeep   map[string]bool // cached files the sync under way takes: trim keeps them (cacheMu)
-	syncing    func() bool     // optional: a sync runs or is paused, so syncKeep holds
+	syncing    func() bool     // a sync runs or is paused, so syncKeep holds
 	keptMu     sync.Mutex
 	kept       map[string]cacheKey // stream-folder files fetched whole, and the song they are
 
@@ -84,11 +83,18 @@ type streamer struct {
 	done   chan struct{}
 }
 
+// newStreamer's hooks do nothing until the daemon sets them: Original quality, no re-encode, no
+// sync moving songs, no reports or hearts, no playback cache.
 func newStreamer(root, play, playing string, caps fw.Caps, src streamSource, man func() *library.Manifest,
 	net *syncer.NetSlot, poll time.Duration) *streamer {
 	return &streamer{root: root, playFile: play, playingFile: playing, caps: caps, src: src, manifest: man, net: net, poll: poll,
 		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
-		gap:     2100 * time.Millisecond} // 2 s and a tick of the kernel's coarse clock
+		gap:     2100 * time.Millisecond, // 2 s and a tick of the kernel's coarse clock
+		idle:    idleAfter,
+		quality: func() string { return quality.Original }, reencode: func() bool { return false },
+		moving: func(string) bool { return false }, started: func(jellyfin.Song) {}, queued: func(string, []string) {},
+		hearts: func() map[string]bool { return nil }, cacheLimit: func() int64 { return 0 },
+		spare: func() int64 { return 0 }, syncing: func() bool { return false }}
 }
 
 // streamErr is a song that failed all its tries: what the root shows, and its Details.
@@ -190,7 +196,7 @@ type job struct {
 // move or remove it (M24). (The firmware passes over only a real ".." segment, which a Clean path
 // has none of, so an ellipsis in a name plays: I19.)
 func (s *streamer) synced(e *library.Entry) bool {
-	return e != nil && exists(e.Path) && (s.moving == nil || !s.moving(e.ID))
+	return e != nil && exists(e.Path) && !s.moving(e.ID)
 }
 
 // start replaces whatever streams with songs, playing from index from.
@@ -210,13 +216,7 @@ func (s *streamer) start(songs []jellyfin.Song, from int) {
 	s.clean()                              // old queue file, stale and half-fetched songs
 	jobs := make([]job, len(songs))
 	m := s.manifest()
-	sq, re := quality.Original, false
-	if s.quality != nil {
-		sq = quality.Normal(s.quality()) // once: it reads settings.json
-	}
-	if s.reencode != nil {
-		re = s.reencode()
-	}
+	sq, re := quality.Normal(s.quality()), s.reencode() // once: it reads settings.json
 	for i, sg := range songs {
 		if e := m.Songs[sg.ID]; s.caps.Playlist && s.synced(e) {
 			jobs[i] = job{path: e.Path}
@@ -381,7 +381,7 @@ func (r *streamRun) mark(i int) {
 	if _, ok := r.began[i]; !ok {
 		r.began[i] = time.Now()
 		r.s.playingNow(r.seq, i, r.songs[i].ID, r.songs[i].Title)
-		if r.jobs[i].fetch && r.s.started != nil { // a synced song's play is in Q2 Pod's log
+		if r.jobs[i].fetch { // a synced song's play is in Q2 Pod's log
 			r.s.started(r.songs[i])
 		}
 	}
@@ -409,10 +409,6 @@ const turnAhead = 5 * time.Second
 
 func (r *streamRun) run() {
 	defer r.s.xfer.Store(false)
-	idle := r.s.idle
-	if idle == 0 {
-		idle = idleAfter
-	}
 	seen, since := "", time.Now() // .playing as read last, and since when
 	for r.ctx.Err() == nil {
 		cur, now := r.current()
@@ -452,7 +448,7 @@ func (r *streamRun) run() {
 		// have ended (paused, or the firmware plays something else): nothing more to fetch. The songs
 		// around it stay, as the firmware has them queued; those behind went above, and the rest go
 		// at the next Play or start-up (M26).
-		long := idle + time.Duration(r.songs[cur].Duration)*time.Second
+		long := r.s.idle + time.Duration(r.songs[cur].Duration)*time.Second
 		if want < 0 && (cur == len(r.jobs)-1 || time.Since(since) >= long) {
 			return
 		}
@@ -511,15 +507,11 @@ func (r *streamRun) fetch(sg jellyfin.Song, j job, i int) error {
 	if total <= 0 {
 		total = expect(sg, j.quality)
 	}
-	now := s.now
-	if now == nil {
-		now = time.Now
-	}
 	// The song plays as soon as early.go allows: renamed into place while it still downloads.
 	// Every song of the window starts as early as its link allows, not only the one the player
 	// waits for: the firmware queues a song only once its file is there, so a song ahead that
 	// waited to be whole couldn't be skipped to (Next has nothing to go to) until it was.
-	early := newEarly(sg, j.quality, j.ext, total, now)
+	early := newEarly(sg, j.quality, j.ext, total, time.Now)
 	var lastNeed time.Time // needs reads .playing: at most twice a second for the status
 	waiting := r.needs(i)
 	n, released, err := copyEarly(f, io.LimitReader(resp.Body, limit+1), early, func() error {
