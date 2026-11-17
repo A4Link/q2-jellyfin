@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -217,6 +218,29 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 	return q2spot.Reply{Message: "refresh", Rows: rows}
 }
 
+// syncSources are the Sync page's options, in every state of it: Sync Jobs, On This Q2, Sync
+// Favourites, Choose Playlists and Sync Entire Library. A damaged selection still lists them, so
+// On This Q2 can reset it; the others say so when pressed.
+func (d *daemon) syncSources() []q2spot.Row {
+	sel, err := d.selection()
+	fav := q2spot.Row{Kind: "action", URI: "syncfav", Title: "Sync Favourites", Subtitle: "Add your favourites to Sync"}
+	if sel.Has(selection.KindFavorites, "all") {
+		fav.Subtitle = "In Sync · press to check for new hearts"
+	}
+	n := 0
+	for _, it := range sel.Items {
+		if it.Kind == selection.KindPlaylist {
+			n++
+		}
+	}
+	pl := plural(n, "playlist") + " in Sync"
+	if sel.Has(selection.KindLibrary, "all") { // as the rows of Choose Playlists say
+		pl = "Included via Entire Library"
+	}
+	return []q2spot.Row{jobsRow, list("onq2", "On This Q2", d.onQ2Subtitle(sel, err), ""), fav,
+		list("syncpl", "Choose Playlists", pl, ""), d.libraryRow(sel)}
+}
+
 // jobsRow opens Sync Jobs.
 var jobsRow = list("jobs", "Sync Jobs", "Hold or resume what syncs", "")
 
@@ -309,6 +333,163 @@ func (d *daemon) restartSync(cl *jellyfin.Client) string {
 		return " · press Start Sync to continue"
 	}
 	return " · checking the sync again"
+}
+
+// onQ2Subtitle is On This Q2's subtitle: how many items are chosen, and the bytes on the card. sel
+// and err are the selection syncSources already read.
+func (d *daemon) onQ2Subtitle(sel selection.Set, err error) string {
+	if err != nil {
+		return "Selection file is damaged"
+	}
+	// While a sync runs, the copy already read: reading each save again would hold two copies
+	// (the bytes catch up when it ends).
+	d.manMu.Lock()
+	m := d.man
+	d.manMu.Unlock()
+	if m == nil || !d.runner.Busy() {
+		m = d.manifest()
+	}
+	var bytes int64
+	for _, e := range m.Songs {
+		bytes += e.Size
+	}
+	return plural(len(sel.Items), "item") + " · " + size(bytes)
+}
+
+// onQ2 is the selection, each with its status and size on the card; a hold takes one out. Entire
+// Library is switched from the Sync page; here it shows only while on, as one of the items.
+func (d *daemon) onQ2(cursor string) q2spot.Reply {
+	if _, err := d.selection(); err != nil {
+		return damagedSelection()
+	}
+	gone := d.previewGone()
+	v := d.view()
+	var rows []q2spot.Row
+	if len(v.sel.Items) == 0 {
+		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: "Nothing chosen yet",
+			Subtitle: "Open a playlist, album or artist and press Add to Sync"}}}
+	}
+	for _, it := range v.sel.Items {
+		key := selection.Key(it.Kind, it.ID)
+		if it.Kind == selection.KindLibrary {
+			lib := d.libraryRow(v.sel) // inert here, as songs are; a hold still takes it out
+			lib.Kind, lib.URI, lib.Title = "info", "", "Entire Library"
+			rows = append([]q2spot.Row{lib}, rows...)
+			continue
+		}
+		var b int64
+		for _, sid := range v.keyed[key] {
+			b += v.m.Songs[sid].Size
+		}
+		total := 0
+		if it.Kind == selection.KindSong {
+			total = 1
+		}
+		row := v.item(it.Kind, it.ID, it.Name, "", total)
+		row.Subtitle = join(row.Subtitle, size(b))
+		gn := isGone(gone, it)
+		if gn { // as Sync Jobs says; its page would fail, and a hold still takes it out
+			row.Subtitle = join("No longer on the server", size(b))
+		}
+		if it.Kind == selection.KindSong || gn {
+			row.Kind, row.URI = "info", ""
+		}
+		rows = append(rows, row)
+	}
+	return page(rows, cursor)
+}
+
+// syncFavourites is Sync Favourites: Favourites joins Sync (at Sync Quality) if it isn't there,
+// held in Sync Jobs it is resumed, and the sync starts by itself once its preview is ready, unless
+// it removes songs. As every sync, it downloads what is missing for the whole selection and stops
+// before the card falls under Space to Keep Free.
+func (d *daemon) syncFavourites(ctx context.Context, cl *jellyfin.Client) q2spot.Reply {
+	if st := d.runner.Snapshot().State; st == "running" || st == "paused" {
+		return q2spot.Reply{Message: "A sync is already under way"}
+	}
+	d.selMu.Lock()
+	sel, err := d.selection()
+	if err != nil {
+		d.selMu.Unlock()
+		return q2spot.Fail(q2spot.Error, selDamaged)
+	}
+	i := slices.IndexFunc(sel.Items, func(it selection.Item) bool { return it.Kind == selection.KindFavorites && it.ID == "all" })
+	if i >= 0 && sel.Items[i].Held { // held, it would add no new hearts
+		sel.SetHeld(selection.KindFavorites, "all", false)
+		err = d.saveSelection(sel)
+	}
+	d.selMu.Unlock()
+	if err != nil {
+		return q2spot.Fail(q2spot.Error, "Couldn't save")
+	}
+	// No start is promised: a sync that removes songs waits for Start Sync.
+	msg := "Checking Favourites"
+	if i < 0 { // Entire Library has its songs, not its playlist
+		r := d.toggle(ctx, cl, favKey)
+		if r.Status != "" && r.Status != q2spot.OK {
+			return r
+		}
+		msg = r.Message // "Added to Sync · N songs"
+	}
+	d.mu.Lock()
+	d.autoStart, d.showDone = true, false
+	d.dropPreview()
+	d.mu.Unlock()
+	d.startPreview(cl)
+	return q2spot.Reply{Message: msg}
+}
+
+// syncPlaylists is Choose Playlists: every music playlist, each pressed to join or leave Sync.
+func (d *daemon) syncPlaylists(ctx context.Context, cl *jellyfin.Client, cursor string) q2spot.Reply {
+	// The Playlists list, fetched at most once a listFor: the page asks again every 2 s, and a press
+	// changes only its subtitle, which the selection gives.
+	pls, err := cachedList(d, cl, "playlists", false, func() ([]jellyfin.Playlist, error) { return cl.Playlists(ctx, "name", false) })
+	if err != nil {
+		r := d.listErr(err, cursor)
+		if cursor == "" { // live still, so it shows the list once the server answers
+			r.Message = "refresh"
+		}
+		return r
+	}
+	if len(pls) == 0 {
+		return q2spot.Reply{Rows: []q2spot.Row{info("No playlists on the server")}}
+	}
+	sel, err := d.selection()
+	if err != nil {
+		return damagedSelection()
+	}
+	all := sel.Has(selection.KindLibrary, "all")
+	var rows []q2spot.Row
+	for _, p := range pls {
+		sub := plural(p.SongCount, "song")
+		switch {
+		case all:
+			sub = "Included via Entire Library"
+		case sel.Has(selection.KindPlaylist, p.ID):
+			sub = "In Sync · " + sub
+		}
+		rows = append(rows, q2spot.Row{Kind: "action", URI: "toggle", Title: p.Name, Subtitle: sub,
+			Context: selection.Key(selection.KindPlaylist, p.ID)})
+	}
+	r := page(rows, cursor)
+	r.Message = "refresh" // every page: a press changes its row
+	return r
+}
+
+// libraryRow is Sync Entire Library: Off, On, or On with the counts once the preview has resolved it.
+func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
+	sub := "Off"
+	if sel.Has(selection.KindLibrary, "all") {
+		sub = "On"
+		d.mu.Lock()
+		c, known := d.libCount, d.libKnown // kept while a check drops the list
+		d.mu.Unlock()
+		if known {
+			sub = fmt.Sprintf("On · %s · %s", plural(c[0], "album"), plural(c[1], "playlist"))
+		}
+	}
+	return q2spot.Row{Kind: "action", URI: "toggle", Title: "Sync Entire Library", Subtitle: sub,
+		Context: "library:all", Position: "toggle"}
 }
 
 func eta(t time.Duration) string {
