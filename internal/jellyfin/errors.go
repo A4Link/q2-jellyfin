@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/A4Link/q2-jellyfin/internal/tlsroots"
 )
@@ -74,6 +75,16 @@ func statusError(op string, status int) *APIError {
 		e.kind = ErrUnreachable
 	}
 	return e
+}
+
+// kindOn gives err the kind k when the server answered one of status: what that answer means to
+// the one request that got it (a password refused, a Quick Connect code expired).
+func kindOn(err, k error, status ...int) error {
+	var ae *APIError
+	if errors.As(err, &ae) && slices.Contains(status, ae.HTTP) {
+		ae.kind = k
+	}
+	return err
 }
 
 // timeKnown is tlsroots.Known, injectable for tests.
