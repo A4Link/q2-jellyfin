@@ -601,12 +601,7 @@ func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
 	if s.Err != nil {
 		msg += " · " + d.stopMessage(s.Err)
 	}
-	op, h, code := "sync", 0, 0
-	var ae *jellyfin.APIError
-	if errors.As(s.Err, &ae) {
-		op, h, code = ae.Op, ae.HTTP, ae.Code
-	}
-	det := detailsCtx(op, h, code, s.ErrAt, "") // when it stopped (review G3, Minor 3)
+	det := errDetails(s.Err, "sync", s.ErrAt, "") // when it stopped (review G3, Minor 3)
 	if s.Err != nil {
 		det = withErr(det, s.Err)
 	}
