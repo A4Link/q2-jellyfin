@@ -116,14 +116,6 @@ type preview struct {
 	cancel context.CancelFunc // stops its fetches (dropPreview)
 }
 
-type libJob struct {
-	seq    int64
-	done   bool
-	ok     bool
-	msg    string
-	doneAt time.Time
-}
-
 // daemon is the running app: the Q2SPOT/1 handler (device) and what it drives.
 type daemon struct {
 	dir, card, tmp string // the app folder (.jellyfin), the card's root, /tmp
@@ -527,17 +519,6 @@ func (d *daemon) idle(now time.Time) bool {
 func (d *daemon) relayIdle(now time.Time) bool {
 	at := d.relayAt.Load()
 	return at == 0 || now.Sub(relayEpoch)-time.Duration(at) >= idleAfter
-}
-
-// libWait bounds how long a library request awaiting its answer has the running app tick every
-// second, so its follow-ups go at once (libPoll). The firmware may hold one for ever (playback under
-// a lit screen, a page it won't leave).
-const libWait = 2 * time.Hour
-
-// libWaiting is whether the followed library request awaits its answer, sent less than libWait
-// ago: its seq is the time it was written. d.mu is held.
-func (d *daemon) libWaiting(now time.Time) bool {
-	return d.lib != nil && !d.lib.done && now.Sub(time.Unix(0, d.lib.seq)) < libWait
 }
 
 // close ends what the app runs before it exits; a sync paused here resumes at the next Sync.
