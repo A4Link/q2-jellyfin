@@ -78,16 +78,9 @@ func (s *streamer) cachePath(k cacheKey) string {
 	return filepath.Join(s.cacheDir(), library.SafeName(k.id)+"-"+k.quality+"."+k.ext)
 }
 
-func (s *streamer) cacheCap() int64 {
-	if s.cacheLimit == nil {
-		return 0
-	}
-	return s.cacheLimit()
-}
-
 // fromCache moves the cached copy of k to path, reporting whether there was one.
 func (s *streamer) fromCache(k cacheKey, path string) bool {
-	if s.cacheCap() <= 0 || !s.take(s.cachePath(k), path) {
+	if s.cacheLimit() <= 0 || !s.take(s.cachePath(k), path) {
 		return false
 	}
 	s.logf("stream: %s from the cache", k.id)
@@ -151,13 +144,13 @@ func (s *streamer) retire(path string) {
 	k, ok := s.kept[path]
 	delete(s.kept, path)
 	s.keptMu.Unlock()
-	if ok && s.cacheCap() > 0 && (s.spare == nil || s.spare() >= 0) && exists(path) && os.MkdirAll(s.cacheDir(), 0o755) == nil {
+	if ok && s.cacheLimit() > 0 && s.spare() >= 0 && exists(path) && os.MkdirAll(s.cacheDir(), 0o755) == nil {
 		c := s.cachePath(k)
 		if os.Rename(path, c) == nil {
 			os.Rename(library.LyricsPath(path), library.LyricsPath(c)) // its lyrics stay with it
 			now := time.Now()
 			os.Chtimes(c, now, now) // the most recently played goes last
-			s.trim(s.cacheCap())
+			s.trim(s.cacheLimit())
 			return
 		}
 	}
@@ -200,7 +193,7 @@ func (s *streamer) cacheSize() int64 {
 func (s *streamer) trim(limit int64) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if s.syncing == nil || !s.syncing() {
+	if !s.syncing() {
 		s.syncKeep = nil // the sync ended, however: done, stopped, cancelled or failed
 	}
 	files := s.cacheFiles()
