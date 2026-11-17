@@ -180,21 +180,21 @@ func dateTransport(roots *x509.CertPool, host string) *http.Transport {
 
 // Client is an HTTPS client verifying against Pool() at Now(). The timeout bounds connecting, the
 // handshake and the wait for headers, not the body, so long downloads and streams are not cut.
+// Clients with the same timeout share one transport: its idle connections and TLS sessions.
 func Client(timeout time.Duration) *http.Client {
-	return &http.Client{Transport: transport(Pool(), timeout)}
-}
-
-func transport(roots *x509.CertPool, timeout time.Duration) *http.Transport {
+	roots := Pool()
 	mu.Lock()
 	defer mu.Unlock()
-	return newTransport(roots, timeout)
+	t := transports[timeout]
+	if t == nil {
+		t = newTransport(roots, timeout)
+		transports[timeout] = t
+	}
+	return &http.Client{Transport: t}
 }
 
 func newTransport(roots *x509.CertPool, timeout time.Duration) *http.Transport {
-	if t := transports[timeout]; t != nil && roots == pool {
-		return t
-	}
-	t := &http.Transport{
+	return &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
@@ -208,8 +208,4 @@ func newTransport(roots *x509.CertPool, timeout time.Duration) *http.Transport {
 		// Jellyfin's headers are a few hundred bytes; Go's default allows 10 MB per answer.
 		MaxResponseHeaderBytes: 64 << 10,
 	}
-	if roots == pool {
-		transports[timeout] = t
-	}
-	return t
 }
