@@ -214,7 +214,7 @@ func (d *daemon) resolveItems(ctx context.Context, cl *jellyfin.Client, sel *sel
 		go func(it selection.Item) {
 			defer wg.Done()
 			if it.Kind == selection.KindLibrary {
-				// Holds no slot itself: its requests take them, so 4 stay the most in flight.
+				// Holds no slot itself: its requests take them (an artist item has 4 more of its own).
 				lib, e := d.resolveLibrary(ctx, cl, sem)
 				mu.Lock()
 				defer mu.Unlock()
