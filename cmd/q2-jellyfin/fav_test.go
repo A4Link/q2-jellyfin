@@ -202,9 +202,15 @@ func TestFavRetryAndRefused(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(d.dir, "log.txt")); !strings.Contains(string(b), "reports: favourite al0.1 refused") {
 		t.Fatalf("log %s", b)
 	}
-	rows := titles(d.do("menu"))
+	d.do("menu") // sections: the notice is in Settings
+	rows := titles(d.do("settings"))
 	if c := slices.Index(rows, "A favourite wasn't saved on the server"); c < 0 || slices.Index(rows[c+1:], rows[c]) >= 0 {
-		t.Fatalf("%q", rows)
+		t.Fatalf("settings %q", rows)
+	}
+	d.do("swipe") // off: it ends the main list
+	rows = titles(d.do("menu"))
+	if c := slices.Index(rows, "A favourite wasn't saved on the server"); c < 0 || slices.Index(rows[c+1:], rows[c]) >= 0 {
+		t.Fatalf("menu %q", rows)
 	}
 }
 

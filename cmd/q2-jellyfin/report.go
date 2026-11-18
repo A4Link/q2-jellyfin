@@ -27,11 +27,10 @@ import (
 // and last-played dates.
 //
 //   - A streamed song is reported live: when it starts (POST /Sessions/Playing, which counts the
-//     play), and when the next one starts or it should have ended (/Sessions/Playing/Stopped). The
-//     app knows a song starts from the firmware's .playing (folder and .m3u queues); of a URL queue,
-//     which the firmware's Tidal player plays, from Q2 Pod's .now (now.go: with progress), or
-//     without it only the song pressed. A start the server didn't take goes in the outbox as a play
-//     at that time.
+//     play), and when the next one starts or it should have ended (/Sessions/Playing/Stopped). Of a
+//     URL queue, which the firmware's Tidal player plays, the app knows a song starts from Q2 Pod's
+//     .now (now.go: with progress), or without it only the song pressed. A start the server didn't
+//     take goes in the outbox as a play at that time.
 //   - A synced song, played from the Q2's library whether the app runs or not, is found later in Q2
 //     Pod's play log (.scrobbler.log on the card, and .scrobbler.log.sent where Q2 Pod's scrobble
 //     upload moves the lines it sent), matched to its song through the manifest

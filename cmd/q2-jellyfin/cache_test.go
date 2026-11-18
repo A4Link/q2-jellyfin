@@ -1,140 +1,45 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/A4Link/q2-jellyfin/internal/fw"
-	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
-	"github.com/A4Link/q2-jellyfin/internal/library"
-	"github.com/A4Link/q2-jellyfin/internal/plan"
+	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
-func (e *env) cached(id, q, ext string) string {
-	return filepath.Join(e.root, ".jellyfin", "cache", id+"-"+q+"."+ext)
-}
-
-// Songs played past the window go to the cache, and so does the rest of the list when another
-// starts; a song played again at the same quality comes from the cache, with no request.
-func TestCacheKeepsAndReplays(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	e.s.cacheLimit = func() int64 { return 1 << 30 }
-	e.s.start(songs(8, "flac"), 0)
-	until(t, "0-2", func() bool { return exists(e.stream(2, "flac")) })
-	os.WriteFile(e.playing, []byte(e.stream(5, "flac")), 0o644)
-	until(t, "0-2 retired", func() bool {
-		return !exists(e.stream(0, "flac")) && exists(e.cached("s0", "original", "flac")) && exists(e.cached("s2", "original", "flac"))
-	})
-	before := e.src.tries("s0")
-	e.s.start(songs(3, "flac"), 0) // s0 again
-	until(t, "s0 back", func() bool { return exists(e.stream(0, "flac")) })
-	if n := e.src.tries("s0"); n != before {
-		t.Fatalf("s0 fetched again: %d requests, was %d", n, before)
-	}
-	if exists(e.cached("s0", "original", "flac")) {
-		t.Fatal("s0 both in the cache and playing")
-	}
-	if b, _ := os.ReadFile(e.stream(0, "flac")); string(b) != "data-p:s0:original" {
-		t.Fatalf("cached copy %q", b)
-	}
-}
-
-// A different quality is a different file: the original in the cache doesn't stand in for MP3 320.
-func TestCacheKeyedByQuality(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	e.s.cacheLimit = func() int64 { return 1 << 30 }
-	os.MkdirAll(filepath.Dir(e.cached("s0", "original", "flac")), 0o755)
-	os.WriteFile(e.cached("s0", "original", "flac"), []byte("orig"), 0o644)
-	e.s.quality = func() string { return "mp3-320" }
-	e.s.start(songs(1, "flac"), 0)
-	until(t, "s0", func() bool { return exists(e.stream(0, "mp3")) })
-	if e.src.tries("s0") != 1 || !exists(e.cached("s0", "original", "flac")) {
-		t.Fatalf("tries %d", e.src.tries("s0"))
-	}
-}
-
-// Off (the default for a streamer without a cap), played songs are deleted as before.
-func TestCacheOffDeletes(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	e.s.start(songs(8, "flac"), 0)
-	until(t, "0-2", func() bool { return exists(e.stream(2, "flac")) })
-	os.WriteFile(e.playing, []byte(e.stream(5, "flac")), 0o644)
-	until(t, "trim", func() bool { return !exists(e.stream(0, "flac")) })
-	if _, err := os.Stat(filepath.Join(e.root, ".jellyfin", "cache")); !os.IsNotExist(err) {
-		t.Fatal("cache folder made while off")
-	}
-}
-
-// putCache writes a cached song of n bytes, played at.
-func putCache(t *testing.T, e *env, id string, n int, at time.Time) string {
+// putCache puts a song of n bytes in the playback cache, as an earlier version left it.
+func putCache(t *testing.T, d *tdaemon, name string, n int) string {
 	t.Helper()
-	p := e.cached(id, "original", "flac")
+	p := filepath.Join(d.card, ".jellyfin", "cache", name)
 	os.MkdirAll(filepath.Dir(p), 0o755)
-	if err := os.WriteFile(p, []byte(strings.Repeat("x", n)), 0o644); err != nil {
+	if err := os.WriteFile(p, make([]byte, n), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	os.Chtimes(p, at, at)
 	return p
 }
 
-// Over its cap, the cache loses the least recently played first.
-func TestCacheTrimsOldest(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	now := time.Now()
-	old := putCache(t, e, "old", 100, now.Add(-3*time.Hour))
-	mid := putCache(t, e, "mid", 100, now.Add(-2*time.Hour))
-	recent := putCache(t, e, "new", 100, now.Add(-time.Hour))
-	e.s.trim(250)
-	if exists(old) || !exists(mid) || !exists(recent) || e.s.cacheSize() != 200 {
-		t.Fatalf("old %v mid %v new %v size %d", exists(old), exists(mid), exists(recent), e.s.cacheSize())
-	}
-}
-
-// A sync comes first: the cache gives up its oldest songs until the card has the room asked for.
-func TestCacheEvictForSync(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	now := time.Now()
-	a := putCache(t, e, "a", 100, now.Add(-2*time.Hour))
-	b := putCache(t, e, "b", 100, now.Add(-time.Hour))
-	free := func() int64 { return 300 - e.s.cacheSize() } // a 300-byte card
-	e.s.evictFor(200, free, nil)
-	if exists(a) || !exists(b) || free() != 200 {
-		t.Fatalf("a %v b %v free %d", exists(a), exists(b), free())
-	}
-}
-
 func TestCacheClear(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	putCache(t, e, "a", 100, time.Now())
-	putCache(t, e, "b", 50, time.Now())
-	if n := e.s.clearCache(); n != 150 || e.s.cacheSize() != 0 {
-		t.Fatalf("cleared %d, left %d", n, e.s.cacheSize())
+	d := newTestDaemon(t, &nav{}, "urls", true)
+	putCache(t, d, "a-original.flac", 100)
+	putCache(t, d, "b-original.flac", 50)
+	if n := d.clearCache(); n != 150 || d.cacheSize() != 0 {
+		t.Fatalf("cleared %d, left %d", n, d.cacheSize())
 	}
 }
 
-// Quality and Storage: Playback Cache steps Off, 512 MB … 8 GB (2 GB by default), and Clear Playback Cache
-// asks first, as Q2 Pod's Clear All Downloads does.
+// Clear Playback Cache asks first, as Q2 Pod's Clear All Downloads does, and still empties the
+// songs an earlier version cached; nothing sets the cache's size any more.
 func TestCacheSettings(t *testing.T) {
-	d := newTestDaemon(t, &nav{}, "", true)
-	r := d.do("storage")
-	if _, ok := find(r, "Playback Cache: 2 GB"); !ok {
-		t.Fatalf("%q", titles(r))
-	}
-	for _, want := range []string{"4 GB", "8 GB", "Off", "512 MB", "1 GB", "2 GB"} {
-		if m := d.do("cache").Message; m != "Playback Cache: "+want {
-			t.Fatalf("got %q, want %s", m, want)
-		}
+	d := newTestDaemon(t, &nav{}, "urls", true)
+	if r := d.do("cache"); r.Status != q2spot.Unsupported {
+		t.Fatalf("Playback Cache's size: %+v", r)
 	}
 	if m := d.do("clearcache").Message; m != "The cache is empty" {
 		t.Fatalf("%q", m)
 	}
-	p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
-	os.MkdirAll(filepath.Dir(p), 0o755)
-	os.WriteFile(p, make([]byte, 3e6), 0o644)
+	p := putCache(t, d, "s-original.flac", 3e6)
 	if m := d.do("clearcache").Message; m != "Press again to remove 3 MB of cached songs" || !exists(p) {
 		t.Fatalf("first press %q", m)
 	}
@@ -143,8 +48,7 @@ func TestCacheSettings(t *testing.T) {
 		t.Fatalf("second press %q", m)
 	}
 	// Another press in between drops the first: nothing is removed without asking again.
-	os.MkdirAll(filepath.Dir(p), 0o755) // the clear pruned the empty folder
-	os.WriteFile(p, make([]byte, 3e6), 0o644)
+	putCache(t, d, "s-original.flac", 3e6) // the clear pruned the empty folder
 	d.do("clearcache")
 	d.do("settings")
 	if m := d.do("clearcache").Message; m != "Press again to remove 3 MB of cached songs" || !exists(p) {
@@ -152,240 +56,49 @@ func TestCacheSettings(t *testing.T) {
 	}
 }
 
-// The preview counts the cache as room, and Start Sync frees what the sync needs from it.
-func TestCacheGivesWayToSync(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
-	p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
-	os.MkdirAll(filepath.Dir(p), 0o755)
-	if err := os.WriteFile(p, make([]byte, 20<<20), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	d.free = func(string) int64 { return 512e6 + 21<<20 - d.stream.cacheSize() } // at Space to Keep Free but for the cache
-	d.do("toggle", "album:al0")
-	if _, ok := find(d.preview(t), "Start Sync"); !ok {
-		t.Fatalf("no Start Sync: %q", titles(d.preview(t)))
-	}
-	d.do("start")
-	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
-	if exists(p) {
-		t.Fatal("the cache kept its song though the sync needed the room")
-	}
-}
-
-// Stepping Playback Cache through Off to another size never empties the cache: the size applies
-// only once the presses stop, as it then stands.
-func TestCacheSettingPassesOff(t *testing.T) {
-	d := newTestDaemon(t, &nav{}, "", true)
-	p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
-	os.MkdirAll(filepath.Dir(p), 0o755)
-	os.WriteFile(p, make([]byte, 1000), 0o644)
-	for i := 0; i < 3; i++ { // 2 GB -> 4 GB -> 8 GB -> Off
-		d.do("cache")
-	}
-	d.do("cache") // -> 512 MB
-	time.Sleep(trimDelay + time.Second)
-	if !exists(p) {
-		t.Fatal("passing Off emptied the cache")
-	}
-}
-
-// U32: a sync takes a song already in the playback cache at Sync Quality, whole, by a rename with
-// its lyrics, instead of downloading it again. An original cached at another size than the
-// server's (replaced on the server since) is downloaded.
-func TestSyncTakesFromCache(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "", true)
-	dir := filepath.Join(d.card, ".jellyfin", "cache")
-	os.MkdirAll(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "al0.0-original.flac"), []byte(strings.Repeat("c", 1000)), 0o644) // the server's 1000 bytes
-	os.WriteFile(filepath.Join(dir, "al0.0-original.lrc"), []byte("[00:01.00]cached"), 0o644)
-	os.WriteFile(filepath.Join(dir, "al0.1-original.flac"), []byte(strings.Repeat("c", 999)), 0o644) // an older file
-	d.do("toggle", "album:al0")
-	if _, ok := find(d.preview(t), "Start Sync"); !ok {
-		t.Fatalf("no Start Sync: %q", titles(d.preview(t)))
-	}
-	d.do("start")
-	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
-	m := d.manifest()
-	a, b := m.Songs["al0.0"], m.Songs["al0.1"]
-	if a == nil || b == nil {
-		t.Fatalf("manifest %+v", m.Songs)
-	}
-	if got, _ := os.ReadFile(a.Path); string(got) != strings.Repeat("c", 1000) || a.Size != 1000 {
-		t.Fatalf("al0.0 is %q (%d bytes recorded): not the cached copy", got[:min(len(got), 8)], a.Size)
-	}
-	if got, _ := os.ReadFile(library.LyricsPath(a.Path)); string(got) != "[00:01.00]cached" {
-		t.Fatalf("lyrics %q", got)
-	}
-	if got, _ := os.ReadFile(b.Path); string(got) != strings.Repeat("x", 1000) {
-		t.Fatalf("al0.1 is %q: the cached copy of another size was used", got[:min(len(got), 8)])
-	}
-	if exists(filepath.Join(dir, "al0.0-original.flac")) || !exists(filepath.Join(dir, "al0.1-original.flac")) {
-		t.Fatal("the cache should have given up al0.0 only")
-	}
-}
-
-// A trim (a song played, or a smaller Playback Cache) keeps the cached songs the sync under way is
-// to take, until it ends.
-func TestCacheTrimKeepsSyncs(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	now := time.Now()
-	want := putCache(t, e, "a", 100, now.Add(-2*time.Hour))
-	other := putCache(t, e, "b", 100, now.Add(-time.Hour))
-	running := true
-	e.s.syncing = func() bool { return running }
-	e.s.keepForSync(map[string]bool{want: true})
-	e.s.trim(100)
-	if !exists(want) || exists(other) {
-		t.Fatalf("a %v b %v", exists(want), exists(other))
-	}
-	running = false // the sync ended, whatever way
-	e.s.trim(0)
-	if exists(want) {
-		t.Fatal("kept after the sync")
-	}
-}
-
-// Start Sync short of room keeps in the cache the songs the sync takes from it (they need no
-// room), giving up the others first.
-func TestCacheKeepsWhatSyncTakes(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	now := time.Now()
-	want := putCache(t, e, "a", 100, now.Add(-2*time.Hour)) // the oldest, but the sync's
-	other := putCache(t, e, "b", 100, now.Add(-time.Hour))
-	w := plan.Want{Song: jellyfin.Song{ID: "a", Size: 100}, Quality: "original", Path: filepath.Join(e.root, "Jellyfin", "x", "a.flac"), Bytes: 100}
-	keep, n := e.s.cachedFor([]plan.Want{w})
-	if !keep[want] || n != 100 {
-		t.Fatalf("keep %v, %d bytes", keep, n)
-	}
-	free := func() int64 { return 300 - e.s.cacheSize() }
-	e.s.evictFor(250, free, keep)
-	if !exists(want) || exists(other) {
-		t.Fatalf("a %v b %v", exists(want), exists(other))
-	}
-}
-
-// Start Sync reads the cache folder once, and finds what a Stat per song found (forSync): a whole
-// file at the sync's quality, an original only at the server's size (audit 2026-11-16 #26).
-func TestCachedForMatchesStat(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	put := func(id, q, ext string, n int) {
-		p := e.cached(id, q, ext)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		os.WriteFile(p, []byte(strings.Repeat("x", n)), 0o644)
-	}
-	put("a", "original", "flac", 100)
-	put("b", "original", "flac", 100) // re-ripped on the server since: 200 bytes there
-	put("c", "opus-128", "opus", 50)
-	put("d", "opus-128", "opus", 0)  // empty
-	put("f", "opus-192", "opus", 50) // another quality
-	put("g", "original", "mp3", 100) // another format
-	want := func(id string, size int64, q, ext string) plan.Want {
-		return plan.Want{Song: jellyfin.Song{ID: id, Size: size}, Quality: q, Bytes: 1000,
-			Path: filepath.Join(e.root, "Jellyfin", "x", id+"."+ext)}
-	}
-	ws := []plan.Want{want("a", 100, "original", "flac"), want("b", 200, "original", "flac"),
-		want("c", 999, "opus-128", "opus"), want("d", 0, "opus-128", "opus"), want("e", 100, "original", "flac"),
-		want("f", 0, "opus-128", "opus"), want("g", 100, "original", "flac")}
-	keep, n := e.s.cachedFor(ws)
-	if len(keep) != 2 || !keep[e.cached("a", "original", "flac")] || !keep[e.cached("c", "opus-128", "opus")] || n != 2000 {
-		t.Fatalf("keep %v, %d bytes", keep, n)
-	}
-	for _, w := range ws {
-		if c, size := e.s.syncCopy(w, os.Stat); keep[c] != (size > 0) {
-			t.Errorf("%s: kept %v, Stat finds %d bytes", w.Song.ID, keep[c], size)
-		}
-	}
-}
-
-// An empty cache folder takes no song: Start Sync builds no cache path for any (round 2 speed 5).
-func TestCachedForEmptyFolder(t *testing.T) {
-	e := newEnv(t, fw.Caps{})
-	ws := make([]plan.Want, 1000)
-	for i := range ws {
-		ws[i] = plan.Want{Song: jellyfin.Song{ID: fmt.Sprint(i), Size: 100}, Quality: "original", Bytes: 100,
-			Path: filepath.Join(e.root, "Jellyfin", "x", fmt.Sprint(i)+".flac")}
-	}
-	var keep map[string]bool
-	var n int64
-	allocs := testing.AllocsPerRun(1, func() { keep, n = e.s.cachedFor(ws[:500], ws[500:]) })
-	if len(keep) != 0 || n != 0 || allocs > 50 {
-		t.Fatalf("keep %v, %d bytes, %v allocations", keep, n, allocs)
-	}
-}
-
-// A cancelled sync no longer holds its cached songs: a trim may delete them again.
-func TestCacheTrimAfterCancel(t *testing.T) {
-	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
-	d := newTestDaemon(t, n, "", true)
-	c := filepath.Join(d.card, ".jellyfin", "cache", "al0.1-original.flac")
-	os.MkdirAll(filepath.Dir(c), 0o755)
-	os.WriteFile(c, []byte(strings.Repeat("c", 1000)), 0o644)
-	d.do("toggle", "album:al0")
-	if _, ok := find(d.preview(t), "Start Sync"); !ok {
-		t.Fatalf("no Start Sync: %q", titles(d.preview(t)))
-	}
-	d.do("start") // al0.0 downloads first, and waits
-	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "running" })
-	d.stream.trim(0)
-	if !exists(c) {
-		t.Fatal("trimmed while the sync is to take it")
-	}
-	d.runner.Cancel()
-	d.stream.trim(0)
-	if exists(c) {
-		t.Fatal("kept after the sync was cancelled")
-	}
-	close(n.block)
-}
-
-// With Q2 Pod's "urls" the firmware streams songs itself and nothing fills the playback cache, so
-// Quality and Storage has no Playback Cache size; on any firmware, Clear Playback Cache shows only
-// while the cache holds songs (on "urls", ones older firmware left). Swipe on or off, the same.
+// Quality and Storage has no Playback Cache size; Clear Playback Cache shows only while the cache
+// holds songs an earlier version left. Swipe on or off, the same.
 func TestPlaybackCacheRows(t *testing.T) {
-	for _, c := range []struct {
-		caps string
-		size bool // the Playback Cache size row
-	}{{"sections", true}, {"urls sections", false}} {
-		d := newTestDaemon(t, &nav{}, c.caps, true)
-		p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
-		for _, swipe := range []string{"on", "off"} {
-			rows := func() (size, clear bool) {
-				r := d.do("storage")
-				_, size = find(r, "Playback Cache: ")
-				_, clear = find(r, "Clear Playback Cache")
-				return size, clear
-			}
-			if size, clear := rows(); size != c.size || clear {
-				t.Errorf("%s, swipe %s, empty cache: size row %v, clear row %v", c.caps, swipe, size, clear)
-			}
-			os.MkdirAll(filepath.Dir(p), 0o755)
-			os.WriteFile(p, make([]byte, 1000), 0o644)
-			if size, clear := rows(); size != c.size || !clear {
-				t.Errorf("%s, swipe %s, songs cached: size row %v, clear row %v", c.caps, swipe, size, clear)
-			}
-			os.Remove(p)
-			d.do("swipe")
+	d := newTestDaemon(t, &nav{}, "urls", true)
+	for _, swipe := range []string{"on", "off"} {
+		rows := func() (size, clear bool) {
+			r := d.do("storage")
+			_, size = find(r, "Playback Cache: ")
+			_, clear = find(r, "Clear Playback Cache")
+			return size, clear
 		}
+		if size, clear := rows(); size || clear {
+			t.Errorf("swipe %s, empty cache: size row %v, clear row %v", swipe, size, clear)
+		}
+		p := putCache(t, d, "s-original.flac", 1000)
+		if size, clear := rows(); size || !clear {
+			t.Errorf("swipe %s, songs cached: size row %v, clear row %v", swipe, size, clear)
+		}
+		os.Remove(p)
+		d.do("swipe")
 	}
 }
 
-// A played song stays in the cache only while the card keeps Space to Keep Free (512 MB by
-// default) with it there; with less, it is deleted, as with the cache off.
-func TestCacheKeepsSpaceToKeepFree(t *testing.T) {
-	for _, c := range []struct {
-		free int64
-		kept bool
-	}{{512e6, true}, {512e6 - 1, false}} {
-		d := newTestDaemon(t, &nav{}, "", true)
-		d.free = func(string) int64 { return c.free }
-		p := filepath.Join(d.card, ".jellyfin", "stream", "0000 - T0 [s0].flac")
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		os.WriteFile(p, make([]byte, 1000), 0o644)
-		k := cacheKey{"s0", "original", "flac"}
-		d.stream.fetched(p, k)
-		d.stream.retire(p)
-		if got := exists(d.stream.cachePath(k)); got != c.kept || exists(p) {
-			t.Errorf("free %d: cached %v, left in the stream folder %v", c.free, got, exists(p))
-		}
+// A sync no longer takes a song from the playback cache: it downloads the server's file, and the
+// cached copy stays for Clear Playback Cache.
+func TestSyncLeavesCache(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "urls", true)
+	p := putCache(t, d, "al0.0-original.flac", 1000) // the server's 1000 bytes, as 0.8.0 took them
+	os.WriteFile(p, []byte(strings.Repeat("c", 1000)), 0o644)
+	d.do("toggle", "album:al0")
+	if _, ok := find(d.preview(t), "Start Sync"); !ok {
+		t.Fatalf("no Start Sync: %q", titles(d.preview(t)))
+	}
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	a := d.manifest().Songs["al0.0"]
+	if a == nil {
+		t.Fatal("not synced")
+	}
+	if got, _ := os.ReadFile(a.Path); string(got) != strings.Repeat("x", 1000) {
+		t.Fatalf("al0.0 is %q: the cached copy was used", got[:min(len(got), 8)])
+	}
+	if !exists(p) {
+		t.Fatal("the sync took the cached copy")
 	}
 }

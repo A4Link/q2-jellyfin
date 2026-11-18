@@ -76,7 +76,7 @@ func (d *daemon) coverOf(row q2spot.Row) string {
 // it (/tmp is RAM): a playlist's 12 songs of one album cost one download, and the same song in
 // another list or place costs none (audit B2).
 func (d *daemon) withArt(cl *jellyfin.Client, r q2spot.Reply, until time.Time) q2spot.Reply {
-	if !d.caps.Art || cl == nil {
+	if cl == nil {
 		return r
 	}
 	dir := d.artDir()

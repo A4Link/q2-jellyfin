@@ -48,10 +48,8 @@ var errSignedOut = errors.New("signed out")
 type settings struct {
 	DefaultQuality string `json:"defaultQuality,omitempty"`
 	StreamQuality  string `json:"streamQuality,omitempty"`
-	PlaybackCache  string `json:"playbackCache,omitempty"` // cacheSizes; "" is defaultCache
-	KeepFree       string `json:"keepFree,omitempty"`      // keepFreeSizes; "" is defaultKeepFree
-	// Swipe is Swipe Between Sections (swipe.go): "" until the firmware first offers sections, then
-	// "on" (the default) or "off"; "on" turns "off" when the firmware no longer offers them.
+	KeepFree       string `json:"keepFree,omitempty"` // keepFreeSizes; "" is defaultKeepFree
+	// Swipe is Swipe Between Sections (swipe.go): "off", or "" or "on" (an earlier version's) for on.
 	Swipe string `json:"swipe,omitempty"`
 	// Sort is each list's sort ("albums", "artists", "playlists"; sort.go); none is Name, A to Z.
 	Sort map[string]listSort `json:"sort,omitempty"`
@@ -77,7 +75,7 @@ func (s settings) stream() string {
 	return quality.Normal(s.StreamQuality)
 }
 
-// stateKeys is the state file: version, and hold=1 while a sync, a stream or Quick Connect is under way.
+// stateKeys is the state file: version, and hold=1 while a sync or Quick Connect is under way.
 type stateKeys struct {
 	st   *q2.State
 	mu   sync.Mutex
@@ -126,15 +124,14 @@ type daemon struct {
 	server, user, host string
 	lastReq            time.Time
 	armed              armed             // Clear Playback Cache's or Sign Out's first press
-	sectionsShown      bool              // the last menu reply was sections: Settings shows a stream's failure
+	sectionsShown      bool              // the last menu reply was sections: Settings shows the main list's notices
 	shuffles           map[string]uint64 // each list's Random order (sort.go)
 	albumsAll          *albumsFetch      // every album, being fetched for Random (everyAlbum)
 	autoStart          bool              // Sync Favourites: start the sync once its preview is ready
 	searchIn           string            // what a typed search searches: the page with a search box asked for last (searchSections)
 	windowAt           map[string]int    // a paged section's window, from its last page asked for (sectionCursor)
-	trimTimer          *time.Timer
-	gen                int // bumped by every selection change
-	runGen             int // gen of the preview the last Start Sync ran: a later gen waits for Check Again
+	gen                int               // bumped by every selection change
+	runGen             int               // gen of the preview the last Start Sync ran: a later gen waits for Check Again
 	preview            *preview
 	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
 	lib                *libJob
@@ -149,8 +146,6 @@ type daemon struct {
 	libKnown           bool                        // libCount is set: a check has resolved the Entire Library
 	playSeq            int                         // the latest play request; an older one still waiting is dropped
 	playMu             sync.Mutex                  // one streamer.start at a time
-	playKey            string                      // the list ("kind:id") the latest Play started in (status.go)
-	polls              pollCache                   // song lists kept while a song buffers (status.go)
 	queue              queueCache                  // the play queue as last read (playqueue.go)
 	art                artState                    // list covers (art.go)
 	manMu              sync.Mutex                  // guards man..manSize (manifestErr). Lock order: d.mu, then manMu; never d.mu under manMu
@@ -192,22 +187,21 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.runner.OnDone = d.syncDone
 	d.runner.Free = func() int64 { return d.free(d.card) }
 	d.runner.Reserve = func() int64 { return keepFreeBytes(d.settings().KeepFree) }
-	d.stream = newStreamer(card, filepath.Join(tmp, "q2-jellyfin.play"), filepath.Join(tmp, "q2-jellyfin.playing"),
-		d.caps, src{d}, d.manifest, syncer.Net, time.Second)
+	d.stream = newStreamer(filepath.Join(tmp, "q2-jellyfin.play"), d.caps, src{d}, d.manifest)
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.reencode = func() bool { return d.settings().reencode() }
-	d.stream.cacheLimit = func() int64 { return cacheBytes(d.settings().PlaybackCache) }
-	d.stream.spare = func() int64 { return d.free(d.card) - keepFreeBytes(d.settings().KeepFree) }
 	d.stream.moving = d.runner.Moving
 	d.stream.started = d.streamStarted
 	d.stream.queued = d.nowQueued
 	d.stream.hearts = d.hearts
-	d.runner.FromCache = d.stream.forSync // a song played before needs no download (cache.go)
-	d.stream.syncing = func() bool { st := d.runner.Snapshot().State; return st == "running" || st == "paused" }
-	d.stream.clean()               // a stream an earlier run left (M26)
-	os.Remove(d.stream.urlsFile()) // and its URL queue, after a crash
-	d.state.setHold(false)         // the state file, with the version
+	os.Remove(d.stream.urlsFile()) // its URL queue, after a crash
+	// Songs an earlier version fetched to play on Q2 Pod before 1.7.3 (M26).
+	ents, _ := os.ReadDir(filepath.Join(card, ".jellyfin", "stream"))
+	for _, e := range ents {
+		library.Remove(card, filepath.Join(card, ".jellyfin", "stream", e.Name()))
+	}
+	d.state.setHold(false) // the state file, with the version
 	d.logCrash()
 	if b, err := os.ReadFile(d.libMore()); err == nil && len(b) > 0 {
 		d.libAgain = true // before libStart: the first tick may take the answer while it runs
@@ -348,13 +342,6 @@ func (s src) MediaURL(id, q string) string {
 	return ""
 }
 
-func (s src) PlayURL(id, q string) string {
-	if c := s.d.client(); c != nil {
-		return c.PlayURL(id, q)
-	}
-	return ""
-}
-
 func (s src) CoverURL(id string) string {
 	if c := s.d.client(); c != nil {
 		return c.CoverURL(id)
@@ -464,8 +451,8 @@ func (d *daemon) saveSettings(s settings) error {
 	return q2.WriteFile(filepath.Join(d.dir, "settings.json"), b)
 }
 
-// tick keeps the state file's hold=1 while files move (a sync, or a stream fetching) or a Quick
-// Connect code waits for approval, and takes the firmware's answer to a library request as soon as it comes.
+// tick keeps the state file's hold=1 while files move (a sync) or a Quick Connect code waits for
+// approval, and takes the firmware's answer to a library request as soon as it comes.
 // A run's end, however it ends (done, paused, stopped), counts as activity: its page stays as long
 // as after a press (I15, review G3 Minor 8).
 func (d *daemon) tick() {
@@ -476,19 +463,17 @@ func (d *daemon) tick() {
 	}
 	d.wasBusy = busy
 	d.mu.Unlock()
-	d.state.setHold(busy || d.stream.busy() || d.qcWaiting())
+	d.state.setHold(busy || d.qcWaiting())
 	d.takeFavs(time.Now()) // fav.go: before reportTick, which then sends them
 	d.nowTick(time.Now())  // now.go: a URL queue's songs, as Q2 Pod tells them
 	d.reportTick(time.Now())
-	if d.caps.Library {
-		d.mu.Lock()
-		d.libPoll()
-		d.mu.Unlock()
-	}
+	d.mu.Lock()
+	d.libPoll()
+	d.mu.Unlock()
 }
 
 // idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one, and
-// so does a request to the relay or data it reads), no sync or stream, and its URL queue not played
+// so does a request to the relay or data it reads), no sync, and its URL queue not played
 // for idleAfter (now.go). A library request awaiting its answer doesn't keep it (I15): the firmware
 // holds one while anything plays, and a running app keeps Smart Wi-Fi's radio on. The firmware
 // answers with the app gone too, and the next run takes that answer, or sends a request lost before
@@ -500,7 +485,7 @@ func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
 	last := d.lastReq
 	d.mu.Unlock()
-	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.stream.active() && !d.qcWaiting() &&
+	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.qcWaiting() &&
 		d.relayIdle(now) && !d.nowKeeps(now) // now.go: its URL queue playing, streamed through the relay
 }
 
@@ -513,11 +498,6 @@ func (d *daemon) relayIdle(now time.Time) bool {
 // close ends what the app runs before it exits; a sync paused here resumes at the next Sync.
 func (d *daemon) close(sock string) {
 	d.cancelQC()
-	d.mu.Lock()
-	if d.trimTimer != nil {
-		d.trimTimer.Stop()
-	}
-	d.mu.Unlock()
 	d.stream.stop()
 	d.runner.Pause()
 	if d.relay != nil {
@@ -528,7 +508,7 @@ func (d *daemon) close(sock string) {
 }
 
 // serve answers Q2SPOT/1 on sock, and exits 0 once idle. It ticks every second while something
-// is under way (a sync, a stream, Quick Connect, a library request waiting for its answer), else
+// is under way (a sync, Quick Connect, a library request waiting for its answer), else
 // every 5 s, so an idle app wakes the CPU a fifth as often (audit B12).
 func (d *daemon) serve(sock string) error {
 	go func() {
@@ -552,11 +532,11 @@ func (d *daemon) serve(sock string) error {
 // tickIdle is how often an app with nothing under way ticks.
 const tickIdle = 5 * time.Second
 
-// urgent is whether the tick should come every second: a sync, a stream, a Quick Connect code or a
+// urgent is whether the tick should come every second: a sync, a Quick Connect code or a
 // library request waiting for the firmware's answer.
 func (d *daemon) urgent() bool {
 	d.mu.Lock()
 	lib := d.libWaiting(time.Now())
 	d.mu.Unlock()
-	return lib || d.runner.Busy() || d.stream.busy() || d.qcWaiting()
+	return lib || d.runner.Busy() || d.qcWaiting()
 }

@@ -14,7 +14,6 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/quality"
 	"github.com/A4Link/q2-jellyfin/internal/selection"
-	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
 
 // The Q2's Jellyfin page over Q2SPOT/1 (q2-pod patch/addon.c draws it). A list row's URI is the op it
@@ -85,7 +84,7 @@ func pageOf(n int, cursor string, row func(int) q2spot.Row) q2spot.Reply {
 	return r
 }
 
-// windowRows is how many rows of a long list show at a time with the firmware's "window" cap: the
+// windowRows is how many rows of a long list show at a time (Q2 Pod's "window", 1.7.3): the
 // firmware asks for them a reply (at most q2spot.MaxRows) at a time and appends them, then a Next
 // page row asks for the next window in the list's place, and the window after the first starts with
 // a Previous page row. The firmware keeps no more than one window's replies.
@@ -96,7 +95,7 @@ const windowRows = 200
 // top (the section's search box, which Q2 Pod shows in its title bar only when it is the first row).
 // Rows that would no longer fit one reply go to the next. A cursor counts rows, as page()'s does.
 func (d *daemon) window(r q2spot.Reply, cursor string, top ...q2spot.Row) q2spot.Reply {
-	if !d.caps.Window || r.Status != "" && r.Status != "ok" {
+	if r.Status != "" && r.Status != "ok" {
 		return r
 	}
 	c, _ := strconv.Atoi(cursor)
@@ -148,9 +147,6 @@ func (d *daemon) window(r q2spot.Reply, cursor string, top ...q2spot.Row) q2spot
 // shortcut: held in memory, so an app restart while the page stays open (idle exit, a crash) forgets
 // it, and the section comes back at its first window with the saved row's index, as before this.
 func (d *daemon) sectionCursor(op, cursor string) string {
-	if !d.caps.Window {
-		return cursor
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if cursor == "" {
@@ -258,12 +254,7 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 		d.searchIn = in
 		d.mu.Unlock()
 	}
-	var r q2spot.Reply
-	if _, box := d.boxSearch(req.Op); songListOps[req.Op] && d.client() != nil && !box {
-		r = d.songList(req) // status.go: live while a song pressed in it buffers
-	} else {
-		r = d.reply(req)
-	}
+	r := d.reply(req)
 	if artOps[req.Op] && (r.Status == "" || r.Status == "ok") {
 		r = d.withArt(d.client(), r, start.Add(d.answerIn-time.Second)) // art.go: covers, before the reply
 	}
@@ -277,7 +268,7 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 
 // boxSearch reports whether op is text typed in a box that isn't a search's: a sign-in page's, the
 // Server page's, or none offered since the app started (in ""). It may be a secret, so it is
-// never a song list (kept for polls) nor a page that needs the server; in is the box.
+// never a page that needs the server; in is the box.
 func (d *daemon) boxSearch(op string) (in string, box bool) {
 	if op != "search" {
 		return "", false
@@ -303,7 +294,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.menu()
 	case "details":
 		return details(req.Arg(0))
-	case "settings", "storage", "defq", "streamq", "setdefq", "setstreamq", "cache", "clearcache", "keepfree", "swipe", "reportplays", "reencode":
+	case "settings", "storage", "defq", "streamq", "setdefq", "setstreamq", "clearcache", "keepfree", "swipe", "reportplays", "reencode":
 		return d.settingsOp(req.Op, req.Arg(0))
 	case "sort", "sortby", "setsort", "sortorder", "setorder": // settings on the card: no server needed
 		return d.sortOp(req.Op, req.Arg(0))
@@ -432,7 +423,7 @@ func (d *daemon) errRows(err error) q2spot.Reply {
 	host := d.hostName()
 	d.log.Printf("error: %v", err)
 	return q2spot.Reply{Rows: []q2spot.Row{info(jellyfin.Message(err, host)),
-		list("details", "Details", "", errDetails(err, "", time.Now(), ""))}}
+		list("details", "Details", "", errDetails(err, "", time.Now()))}}
 }
 
 // errToast is a failed action's reply: the firmware toasts its message.
@@ -454,13 +445,13 @@ func detailsCtx(op string, h, code int, at time.Time, song string) string {
 
 // errDetails is err's Details context: the op, HTTP status and code of the server's answer, or op
 // with none when there was no answer.
-func errDetails(err error, op string, at time.Time, song string) string {
+func errDetails(err error, op string, at time.Time) string {
 	h, code := 0, 0
 	var ae *jellyfin.APIError
 	if errors.As(err, &ae) {
 		op, h, code = ae.Op, ae.HTTP, ae.Code
 	}
-	return detailsCtx(op, h, code, at, song)
+	return detailsCtx(op, h, code, at, "")
 }
 
 // withErr adds err's text to a Details context, for a failure no op, HTTP status or code explains.
@@ -503,34 +494,15 @@ func (d *daemon) menu() q2spot.Reply {
 	rows := []q2spot.Row{list("latest", "Newly Added", "", ""), list("albums", "Albums", "", ""),
 		list("artists", "Artists", "", ""), list("playlists", "Playlists", "", ""),
 		list("settings", "Settings", d.syncSubtitle(cl), "")}
-	on := d.swipeOn() // swipe.go: the firmware offers sections and the setting is on
+	on := d.swipeOn() // swipe.go: Swipe Between Sections is on
 	d.mu.Lock()
 	d.sectionsShown = on
 	d.mu.Unlock()
-	if on { // Q2 Pod shows them as pages swiped between; a stream's failure shows in Settings
+	if on { // Q2 Pod shows them as pages swiped between; the notices below show in Settings
 		return q2spot.Reply{Message: "sections", Rows: rows}
 	}
 	// Last, so the rows above keep their places under the cursor (M33).
-	return q2spot.Reply{Message: "refresh", Rows: append(append(append(rows, d.streamErrRows()...), d.favRows()...), d.fileRows()...)}
-}
-
-// streamErrRows are a stream's failure and its Details, when one stopped or skipped a song. A stop
-// says why as the Sync page does (stopMessage); the server lost mid-song, a body cut short too, is
-// said as a sync says it (syncer.StopReason), never as the card's records.
-func (d *daemon) streamErrRows() []q2spot.Row {
-	e := d.stream.Err()
-	if e == nil {
-		return nil
-	}
-	msg := e.Error()
-	if !e.skipped { // a skip says why already
-		why := e.err
-		if r := syncer.StopReason(why); errors.Is(r, syncer.ErrOffline) {
-			why = r
-		}
-		msg += ": " + d.stopMessage(why)
-	}
-	return []q2spot.Row{info(msg), list("details", "Details", "", withErr(errDetails(e.err, "stream", e.at, e.id), e.err))}
+	return q2spot.Reply{Message: "refresh", Rows: append(append(rows, d.favRows()...), d.fileRows()...)}
 }
 
 func (d *daemon) syncSubtitle(cl *jellyfin.Client) string {
@@ -629,15 +601,8 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 			return q2spot.Fail(q2spot.Error, settingNotSaved)
 		}
 		return q2spot.Reply{Message: "Space to Keep Free: " + keepFreeName(s.KeepFree)}
-	case "cache":
-		s.PlaybackCache = nextCache(s.PlaybackCache)
-		if d.saveSettings(s) != nil {
-			return q2spot.Fail(q2spot.Error, settingNotSaved)
-		}
-		d.trimSoon() // a smaller cap applies once the presses stop, never to a size merely passed through
-		return q2spot.Reply{Message: "Playback Cache: " + cacheName(s.PlaybackCache)}
 	case "clearcache": // two presses in a row, as Q2 Pod's Clear All Downloads asks first
-		n := d.stream.cacheSize()
+		n := d.cacheSize()
 		again := d.pressedAgain("clearcache", n > 0) // only a cache with songs in it asks to be confirmed
 		switch {
 		case n == 0:
@@ -645,7 +610,7 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		case !again:
 			return q2spot.Reply{Message: "Press again to remove " + size(n) + " of cached songs"}
 		}
-		return q2spot.Reply{Message: "Removed " + size(d.stream.clearCache()) + " of cached songs"}
+		return q2spot.Reply{Message: "Removed " + size(d.clearCache()) + " of cached songs"}
 	case "swipe":
 		return d.toggleSwipe(s)
 	case "reportplays":
@@ -655,23 +620,17 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 			list("streamq", "Streaming Quality: "+quality.Name(s.stream()), "For songs streamed", ""),
 			reencodeRow(s),
 			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync pauses before the card has less"}}
-		if !d.caps.URLs { // Q2 Pod 1.7.3+ streams songs itself: nothing fills the cache
-			rows = append(rows, act("cache", "Playback Cache: "+cacheName(s.PlaybackCache), ""))
-		}
-		if n := d.stream.cacheSize(); n > 0 { // on "urls" too: songs older firmware left, which a sync takes
+		if n := d.cacheSize(); n > 0 { // songs an earlier version cached on older firmware (cache.go)
 			rows = append(rows, q2spot.Row{Kind: "action", URI: "clearcache", Title: "Clear Playback Cache", Subtitle: size(n) + " of played songs"})
 		}
 		return q2spot.Reply{Rows: rows}
-	}
-	if reconcileSwipe(&s, d.caps.Sections) {
-		d.saveSettings(s)
 	}
 	d.mu.Lock()
 	user, shown := d.user, d.sectionsShown
 	d.mu.Unlock()
 	var syncRows []q2spot.Row // the sync, first
-	if shown {                // no root to show a stream's failure: here, first
-		syncRows = append(append(d.fileRows(), d.streamErrRows()...), d.favRows()...)
+	if shown {                // no root to show the main list's notices: here, first
+		syncRows = append(d.fileRows(), d.favRows()...)
 	}
 	if cl := d.client(); cl != nil {
 		syncRows = append(syncRows, list("sync", "Sync", d.syncSubtitle(cl), ""))

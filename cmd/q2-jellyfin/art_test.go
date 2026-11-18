@@ -35,12 +35,6 @@ func TestListCovers(t *testing.T) {
 	if n.images.Load() != missed {
 		t.Fatal("a missing cover asked again")
 	}
-
-	plain := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
-	plain.do("albums")
-	if _, err := os.Stat(filepath.Join(plain.tmp, "q2-jellyfin.art")); err == nil {
-		t.Fatal("covers without the firmware's art")
-	}
 }
 
 // The key is FNV-1a 32 of URI, tab, context, from FNV_SEED: as patch/addon.c art_file hashes them

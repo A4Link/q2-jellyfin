@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -105,8 +106,13 @@ func TestSignInFile(t *testing.T) {
 	if json.Valid(b) || bytes.Contains(b, []byte("tok")) {
 		t.Fatalf("not encrypted: %q", b)
 	}
-	if _, ok := find(d.do("menu"), "Signed in as u (from Jellyfin sign-in.txt)"); !ok {
-		t.Fatalf("root %q", titles(d.do("menu")))
+	d.do("menu") // sections: the outcome is in Settings
+	if _, ok := find(d.do("settings"), "Signed in as u (from Jellyfin sign-in.txt)"); !ok {
+		t.Fatalf("settings %q", titles(d.do("settings")))
+	}
+	d.do("swipe") // off: it ends the main list
+	if rows := titles(d.do("menu")); slices.Index(rows, "Signed in as u (from Jellyfin sign-in.txt)") != len(rows)-1 {
+		t.Fatalf("menu %q", rows)
 	}
 	if d.loginServer() != srv {
 		t.Fatalf("server %q", d.loginServer())

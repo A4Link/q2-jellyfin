@@ -26,13 +26,8 @@ type libJob struct {
 	doneAt time.Time
 }
 
-// library asks the firmware (F3) to update the library and import the playlists, or says how.
+// library asks the firmware (F3) to update the library and import the playlists.
 func (d *daemon) library() q2spot.Reply {
-	if !d.caps.Library {
-		return q2spot.Reply{Rows: []q2spot.Row{info("1. Close Jellyfin: Streaming → Configuration → Stop Streaming Services"),
-			info("2. Library → Update Local Music"), info("Run after the sync has finished and Jellyfin is closed"),
-			info("3. Library → Playlists → Import playlist"), info("Import playlist only applies to synced playlists")}}
-	}
 	d.mu.Lock()
 	j := d.lib
 	if j == nil || j.done && !j.ok && time.Since(j.doneAt) > 30*time.Second {
@@ -48,11 +43,7 @@ func (d *daemon) library() q2spot.Reply {
 	d.mu.Unlock()
 	switch {
 	case !done:
-		rows := []q2spot.Row{info("Updating Library…")}
-		if d.stream.active() { // ponytail: only our own stream is known; the firmware also waits for local playback
-			rows = append(rows, info("Waiting for playback to pause…"))
-		}
-		return q2spot.Reply{Message: "refresh", Rows: rows}
+		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Updating Library…")}}
 	case ok:
 		return q2spot.Reply{Rows: []q2spot.Row{info("Library updated")}}
 	}
@@ -171,7 +162,7 @@ func (d *daemon) libStart() {
 	if !exists(d.libMore()) || d.lib != nil {
 		return
 	}
-	if seq, _ := fw.ReadRequest(d.libReq()); seq == 0 && d.caps.Library {
+	if seq, _ := fw.ReadRequest(d.libReq()); seq == 0 {
 		if _, err := d.sendLibrary(); err != nil {
 			d.log.Printf("library: %v", err)
 		}
@@ -286,13 +277,13 @@ func there(paths []string) []string {
 	return out
 }
 
-// syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware
+// syncDone is the runner's OnDone: a sync that changed anything asks the firmware
 // to scan and import, whether or not the Sync page is open. library.more is written first, before
 // the manifest read: an app stopped during that read sends the request at the next start (libStart).
 func (d *daemon) syncDone(p plan.Plan) {
 	d.mu.Lock()
 	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
-	send := d.caps.Library && p.Changes()
+	send := p.Changes()
 	if send {
 		if err := q2.WriteFile(d.libMore(), []byte("more")); err != nil {
 			d.log.Printf("library: %v", err)

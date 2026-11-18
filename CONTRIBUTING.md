@@ -42,7 +42,7 @@ The app is a Q2 Pod card app: the firmware draws every screen from the rows the 
 
 ## Changelog
 
-Every change a user can notice adds a bullet under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), in the right subsection (`### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Security`). Write it for someone using the app on a Q2: what they see or can now do, not function names. One bullet per change. If it needs a firmware capability (`playlist`, `progress`, `library`, `pages` in `/tmp/q2-addon.caps`), end the bullet with "Requires Q2 Pod 1.5.9 or later" (or the version that added the capability) and what the app does on older Q2 Pod.
+Every change a user can notice adds a bullet under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), in the right subsection (`### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Security`). Write it for someone using the app on a Q2: what they see or can now do, not function names. One bullet per change. The app needs Q2 Pod 1.7.3 or later (`urls` in `/tmp/q2-addon.caps`; older firmware gets only a page asking for an update), so a capability every 1.7.3 has (`playlist`, `progress`, `pages`, `library`, `sections`, `art`, `window`, `urls`) needs no fallback. If a change needs a later one (`sort`, `field`, `more`, `fav`, `now`…), end the bullet with "Requires Q2 Pod 1.8.1 or later" (or the version that added the capability) and what the app does on an older Q2 Pod.
 
 Changes users can't notice (tests, refactors, CI) need no bullet: label the pull request `no changelog`. CI checks this.
 

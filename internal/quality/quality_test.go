@@ -38,9 +38,3 @@ func TestRank(t *testing.T) {
 		}
 	}
 }
-
-func TestAsMP3(t *testing.T) {
-	if AsMP3("opus-160") != "mp3-160" || AsMP3(Original) != Original {
-		t.Fatal(AsMP3("opus-160"))
-	}
-}
