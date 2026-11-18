@@ -304,7 +304,7 @@ func isGone(gone []selection.Item, it selection.Item) bool {
 
 // changes reports whether p has anything to do: a song to move, or a playlist file to write or delete.
 func changes(p plan.Plan) bool {
-	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged > 0 || p.PlaylistsStale
+	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged+p.Leftover > 0 || p.PlaylistsStale
 }
 
 func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
@@ -338,6 +338,9 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 	}
 	if len(p.Rename) > 0 {
 		rows = append(rows, info("Rename "+plural(len(p.Rename), "song")))
+	}
+	if p.Leftover > 0 {
+		rows = append(rows, info("Delete "+plural(p.Leftover, "file")+" an earlier sync left"))
 	}
 	switch {
 	case p.PlaylistsChanged > 0:
@@ -546,8 +549,8 @@ func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
 }
 
 func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
-	// What the run did: songs fetched, renamed, removed; a run that moved none rewrote playlists
-	// (review G3, Minor 7).
+	// What the run did: songs fetched, renamed, removed, files left by an earlier sync deleted; a run
+	// that did none of these rewrote playlists (review G3, Minor 7).
 	var did []string
 	if s.Total > 0 {
 		did = append(did, plural(s.Done, "song"))
@@ -557,6 +560,9 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	}
 	if s.Removed > 0 {
 		did = append(did, plural(s.Removed, "song")+" removed")
+	}
+	if s.Deleted > 0 {
+		did = append(did, plural(s.Deleted, "file")+" deleted")
 	}
 	if len(did) == 0 {
 		did = []string{"Playlists updated"}

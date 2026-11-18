@@ -92,19 +92,23 @@ func checkOwned(root, path string, m *Manifest) error {
 
 // Remove is the only way the app deletes: it refuses anything not Owned, treats a missing file
 // as done, and prunes folders left empty under Jellyfin/ (never Jellyfin/ itself).
-func Remove(root, path string) error { return remove(root, path, nil) }
+func Remove(root, path string) error { return remove(root, path, nil, true) }
+
+// RemoveKeepLyrics is Remove leaving the song's .lrc, which its new file has now: a replaced song's
+// old file in a new format, Song.flac to Song.opus (sync).
+func RemoveKeepLyrics(root, path string) error { return remove(root, path, nil, false) }
 
 // Remove is the package Remove that also accepts the playlist files recorded in m.
-func (m *Manifest) Remove(root, path string) error { return remove(root, path, m) }
+func (m *Manifest) Remove(root, path string) error { return remove(root, path, m, true) }
 
-func remove(root, path string, m *Manifest) error {
+func remove(root, path string, m *Manifest, lyrics bool) error {
 	if err := checkOwned(root, path, m); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if lrc := LyricsPath(path); lrc != path && Playable(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	if lrc := LyricsPath(path); lyrics && lrc != path && Playable(strings.TrimPrefix(filepath.Ext(path), ".")) {
 		os.Remove(lrc) // a song's lyrics go with it
 	}
 	top := filepath.Join(resolve(root+"/."), "Jellyfin")
