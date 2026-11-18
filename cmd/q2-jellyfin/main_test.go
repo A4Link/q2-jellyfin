@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/A4Link/q2-jellyfin/internal/creds"
 )
 
 // oldPage is the update page as the firmware reads it off the socket.
@@ -54,16 +57,11 @@ func TestOldFirmwarePage(t *testing.T) {
 	}
 }
 
-// U45: main itself, run as the app with Q2 Pod 1.7.2's caps file, serves the update page and
-// writes nothing to the card. The test binary runs again as the app (Q2_GATE_CARD set).
-func TestOldFirmwareGate(t *testing.T) {
-	if card := os.Getenv("Q2_GATE_CARD"); card != "" {
-		flag.CommandLine = flag.NewFlagSet("q2-jellyfin", flag.ExitOnError)
-		os.Args = []string{"q2-jellyfin", "-card", card, "-dir", filepath.Join(card, ".jellyfin"), "-tmp", os.Getenv("Q2_GATE_TMP")}
-		main()
-		return
-	}
-	card, tmp := t.TempDir(), t.TempDir()
+// gateApp runs main as the app with Q2 Pod 1.7.2's caps file and returns once it has answered
+// "menu" with the update page. The test binary runs again as the app (Q2_GATE_CARD set), with
+// its key in tmp.
+func gateApp(t *testing.T, card, tmp string) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(tmp, "q2-addon.caps"), []byte("playlist progress pages library goto sleep game audio\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -72,11 +70,49 @@ func TestOldFirmwareGate(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { app.Process.Kill(); app.Wait() }()
+	t.Cleanup(func() { app.Process.Kill(); app.Wait() })
 	if got := askSock(t, filepath.Join(tmp, "q2-jellyfin.browse.sock"), "menu"); got != oldPage {
 		t.Fatalf("menu: %q", got)
 	}
+}
+
+// U45: main itself, run as the app with Q2 Pod 1.7.2's caps file, serves the update page and
+// writes nothing to the card.
+func TestOldFirmwareGate(t *testing.T) {
+	if card := os.Getenv("Q2_GATE_CARD"); card != "" {
+		creds.KeyPath = filepath.Join(os.Getenv("Q2_GATE_TMP"), "q2-jellyfin.key")
+		flag.CommandLine = flag.NewFlagSet("q2-jellyfin", flag.ExitOnError)
+		os.Args = []string{"q2-jellyfin", "-card", card, "-dir", filepath.Join(card, ".jellyfin"), "-tmp", os.Getenv("Q2_GATE_TMP")}
+		main()
+		return
+	}
+	card := t.TempDir()
+	gateApp(t, card, t.TempDir())
 	if e, err := os.ReadDir(card); err != nil || len(e) != 0 {
 		t.Fatalf("card %v %v", e, err)
+	}
+}
+
+// C3 before 1.7.3 too: the update page encrypts a sign-in an older version saved unencrypted, so
+// the token isn't left plain on the card until Q2 Pod is updated.
+func TestOldFirmwareGateEncrypts(t *testing.T) {
+	card, tmp := t.TempDir(), t.TempDir()
+	dir := filepath.Join(card, ".jellyfin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := `{"Server":"https://music.example","User":"alice","Token":"secret-token"}`
+	if err := os.WriteFile(filepath.Join(dir, "credentials"), []byte(plain), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gateApp(t, card, tmp)
+	if b, err := os.ReadFile(filepath.Join(dir, "credentials")); err != nil || strings.Contains(string(b), "secret-token") {
+		t.Fatalf("credentials still plain: %q %v", b, err)
+	}
+	old := creds.KeyPath
+	creds.KeyPath = filepath.Join(tmp, "q2-jellyfin.key")
+	defer func() { creds.KeyPath = old }()
+	if c, ok := creds.Load(dir); !ok || c.Token != "secret-token" {
+		t.Fatalf("load %+v %v", c, ok)
 	}
 }

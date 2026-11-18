@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/fw"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
@@ -34,8 +35,9 @@ func main() {
 	sock := filepath.Join(*tmp, "q2-jellyfin.browse.sock")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	if !fw.ReadCaps(filepath.Join(*tmp, "q2-addon.caps")).URLs { // before anything else: nothing else runs there
+	if !fw.ReadCaps(filepath.Join(*tmp, "q2-addon.caps")).URLs { // before anything else: only creds.Load runs there
 		go func() { <-sig; os.Remove(sock); os.Exit(0) }()
+		creds.Load(*dir) // C3 here too: a sign-in an older version saved plain is encrypted now
 		log.Fatal(serveOld(sock))
 	}
 	d := newDaemon(*dir, *card, *tmp)
