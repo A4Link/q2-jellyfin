@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -178,6 +179,8 @@ type daemon struct {
 	noWiFiAt           time.Time       // when a request first found no Wi-Fi; zero while there is (wifi)
 	lyricsTried        map[string]bool // songs the lyrics backfill asked the server for, in this run
 	rep                reporter        // plays reported to the server (report.go)
+	relay              *http.Server    // the firmware player's loopback relay (relay.go); nil when not listening
+	relayAt            atomic.Int64    // its last request or data read, since relayEpoch; 0 never: a song streaming keeps the app up (idle)
 
 	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
 }
@@ -220,7 +223,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.runner.FromCache = d.stream.forSync // a song played before needs no download (cache.go)
 	d.stream.syncing = func() bool { st := d.runner.Snapshot().State; return st == "running" || st == "paused" }
 	d.stream.clean()               // a stream an earlier run left (M26)
-	os.Remove(d.stream.urlsFile()) // and its URL queue, with the token, after a crash
+	os.Remove(d.stream.urlsFile()) // and its URL queue, after a crash
 	d.state.setHold(false)         // the state file, with the version
 	d.logCrash()
 	if b, err := os.ReadFile(d.libMore()); err == nil && len(b) > 0 {
@@ -369,20 +372,6 @@ func (s src) PlayURL(id, q string) string {
 	return ""
 }
 
-func (s src) PlayerURL(id, q string) string {
-	if c := s.d.client(); c != nil {
-		return c.PlayerURL(id, q)
-	}
-	return ""
-}
-
-func (s src) PlayerCoverURL(id string) string {
-	if c := s.d.client(); c != nil {
-		return c.PlayerCoverURL(id)
-	}
-	return ""
-}
-
 func (s src) CoverURL(id string) string {
 	if c := s.d.client(); c != nil {
 		return c.CoverURL(id)
@@ -514,20 +503,27 @@ func (d *daemon) tick() {
 	}
 }
 
-// idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one), no
-// sync or stream, and its URL queue not played for idleAfter (now.go). A library request awaiting
-// its answer doesn't keep it (I15): the firmware holds one while anything plays, and a running app
-// keeps Smart Wi-Fi's radio on. The firmware answers with the app gone too, and the next run takes
-// that answer, or sends a request lost before it ran again (libStart). A lost answer (the Q2 turned
-// off first: /tmp is RAM) leaves its adds unrecorded: the next request adds them again, and one the
-// firmware had added is taken for a playlist the user made ("exists"), so it comes a second time as
-// "<name> (Jellyfin)". A playlist the user made is never replaced.
+// idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one, and
+// so does a request to the relay or data it reads), no sync or stream, and its URL queue not played
+// for idleAfter (now.go). A library request awaiting its answer doesn't keep it (I15): the firmware
+// holds one while anything plays, and a running app keeps Smart Wi-Fi's radio on. The firmware
+// answers with the app gone too, and the next run takes that answer, or sends a request lost before
+// it ran again (libStart). A lost answer (the Q2 turned off first: /tmp is RAM) leaves its adds
+// unrecorded: the next request adds them again, and one the firmware had added is taken for a
+// playlist the user made ("exists"), so it comes a second time as "<name> (Jellyfin)". A playlist
+// the user made is never replaced.
 func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
 	last := d.lastReq
 	d.mu.Unlock()
 	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.stream.active() && !d.qcWaiting() &&
-		!d.nowKeeps(now) // now.go: its URL queue playing, to report each song
+		d.relayIdle(now) && !d.nowKeeps(now) // now.go: its URL queue playing, to report each song
+}
+
+// relayIdle is whether the relay moved nothing for idleAfter (relay.go).
+func (d *daemon) relayIdle(now time.Time) bool {
+	at := d.relayAt.Load()
+	return at == 0 || now.Sub(relayEpoch)-time.Duration(at) >= idleAfter
 }
 
 // libWait bounds how long a library request awaiting its answer has the running app tick every
@@ -551,6 +547,9 @@ func (d *daemon) close(sock string) {
 	d.mu.Unlock()
 	d.stream.stop()
 	d.runner.Pause()
+	if d.relay != nil {
+		d.relay.Close()
+	}
 	d.state.remove()
 	os.Remove(sock)
 }

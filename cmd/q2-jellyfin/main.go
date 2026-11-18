@@ -30,6 +30,9 @@ func main() {
 	log.Print("start ", version)
 	d := newDaemon(*dir, *card, *tmp)
 	d.log.Printf("start %s", version)
+	if d.caps.URLs {
+		d.startRelay(relayAddr) // at once, and before close can run (sig): the firmware's player streams through it
+	}
 	d.signInFromFile() // C4, before the first request; without Wi-Fi yet, the root takes it later
 	sock := filepath.Join(*tmp, "q2-jellyfin.browse.sock")
 	sig := make(chan os.Signal, 1)

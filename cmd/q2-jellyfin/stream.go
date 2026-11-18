@@ -147,8 +147,8 @@ func (s *streamer) active() bool {
 // firmware to play on is not busy, so the Q2 may sleep while a list is paused (I14).
 func (s *streamer) busy() bool { return s.active() && s.xfer.Load() }
 
-// stop ends the stream, on Sign Out and as the app exits. The URL queue goes too: every line
-// carries the token, and the firmware read the file when it started the queue. Its lyrics stop too.
+// stop ends the stream, on Sign Out and as the app exits. The URL queue file goes too: the firmware
+// read it when it started the queue. Its lyrics stop too.
 func (s *streamer) stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

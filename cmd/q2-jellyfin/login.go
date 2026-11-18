@@ -29,8 +29,9 @@ import (
 //     admin-level and belong to no user, so the rows say so and the key is the last choice. Off
 //     for now (apiKeySignIn).
 //
-// Everything is typed on the Q2, the server's address first: the app opens no port and serves no
-// page, so nothing crosses the Wi-Fi except HTTPS to the server. Typed text reaches the app as
+// Everything is typed on the Q2, the server's address first: the app serves no page, and its one
+// port (the player's relay, relay.go) is on the loopback only, so nothing crosses the Wi-Fi except
+// HTTPS to the server. Typed text reaches the app as
 // Q2SPOT/1 "search" requests (addon.c opens its T9 box for a row of kind "search" and sends what
 // was typed); login.pending says which field the next one fills. The signed-out root's only box is
 // the server's, so the root sets pending to it. Requests are not logged, so a typed password never

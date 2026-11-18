@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,9 +41,9 @@ import (
 // plays now, and the one playing starts. A song played whole while the app was closed is not
 // known: the firmware tells only the song playing, and Q2 Pod's log has no streamed song; so the
 // app stays up while its queue plays (nowKeeps), and that happens only if it is closed otherwise
-// (Stop Streaming Services, signed out, reporting off, or idleAfter paused or stopped). With
-// reporting off, or signed out, nothing is sent; a song playing when reporting comes on again is
-// reported at the next line. Signing out forgets the queue.
+// (Stop Streaming Services, signed out, or idleAfter paused or stopped). With reporting off, or
+// signed out, nothing is sent; a song playing when reporting comes on again is reported at the
+// next line. Signing out forgets the queue.
 
 const (
 	nowEvery  = 20 * time.Second // the least time between two Progress reports of a position
@@ -212,7 +213,9 @@ func (d *daemon) nowTick(now time.Time) {
 		calls = append(calls, nowCall{kind: "progress", id: st.q.Started, sec: cur.sec, paused: paused})
 		st.progAt, st.progSec, st.progPaused = now, cur.sec, paused
 	}
-	if cur.state == "playing" && cur.seq == st.q.Seq && on {
+	// Only a queue that streams keeps the app up (nowKeeps): one of only synced songs plays card
+	// files, with no relay, and its plays come from Q2 Pod's log.
+	if cur.state == "playing" && cur.seq == st.q.Seq && slices.ContainsFunc(st.q.IDs, func(id string) bool { return id != "" }) {
 		st.playedAt = now
 	}
 	st.q.Last = line
@@ -231,11 +234,12 @@ func (d *daemon) nowQueue(calls ...nowCall) {
 }
 
 // nowKeeps is whether the app stays up for its URL queue (idle): a line saying it plays was read
-// less than idleAfter ago, with reporting on and signed in, so every song of it is reported. While
-// it plays the line changes every 5 s; paused or stopped, nothing is written, so the app closes
-// idleAfter after the queue last played, as after a press.
+// less than idleAfter ago, signed in, and the queue streams a song, so each streamed song goes
+// through the relay (relay.go) and is reported, with reporting on. The cost is RAM: Smart Wi-Fi
+// keeps the radio on for any URL queue started from Jellyfin anyway (Q2 Pod's rule). While it plays the line changes every 5 s; paused or stopped, nothing is written,
+// so the app closes idleAfter after the queue last played, as after a press.
 func (d *daemon) nowKeeps(now time.Time) bool {
-	if !d.caps.Now || !d.reportsOn() || d.client() == nil {
+	if !d.caps.Now || d.client() == nil {
 		return false
 	}
 	d.rep.mu.Lock()
