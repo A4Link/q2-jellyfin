@@ -49,7 +49,7 @@ Everything can be done on the Q2 itself. The app serves no web page and opens on
 
 Sign-in with a Jellyfin API key is turned off for now: a Jellyfin API key is **admin-level** (it belongs to no user and opens every library on the server), so the Q2 doesn't offer it. A Q2 already signed in with one stays signed in.
 
-**Or from a computer:** put a file named `Jellyfin sign-in.txt` in the card's top folder, with the lines `server=music.example.com`, `user=alice` and `password=…`. The next time Jellyfin is open with Wi-Fi, it deletes the file, whether the sign-in works or not, then signs in with it (in place of the sign-in you have, once the new one works); the main page says how it went. Until then the password is on the card as plain text. Copy the file with the card in a computer, not with Wi-Fi Transfer: it sends the file unencrypted, and while Wi-Fi Transfer is on anyone on the Wi-Fi can read the card. Then open Jellyfin with Wi-Fi straight away, so the file is used and deleted.
+**Or from a computer:** put a file named `Jellyfin sign-in.txt` in the card's top folder, with the lines `server=music.example.com`, `user=alice` and `password=…`. The next time Jellyfin is open with Wi-Fi, it deletes the file, whether the sign-in works or not, then signs in with it (in place of the sign-in you have, once the new one works); the main page says how it went. Until then the password is on the card as plain text. On Q2 Pod before 1.7.3 the file is read and deleted only once Q2 Pod is updated, so update Q2 Pod first. Copy the file with the card in a computer, not with Wi-Fi Transfer: it sends the file unencrypted, and while Wi-Fi Transfer is on anyone on the Wi-Fi can read the card. Then open Jellyfin with Wi-Fi straight away, so the file is used and deleted.
 
 Things to know:
 
@@ -120,7 +120,7 @@ Only `Jellyfin/`, the playlist `.m3u` files it wrote and `.jellyfin/` (songs an 
 
 ## Q2 Pod 1.7.3 or later
 
-Jellyfin needs Q2 Pod 1.7.3 or later. On an older Q2 Pod it opens to one page that says *Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin.* and does nothing else: no sign-in, browsing, sync or streaming. Update Q2 Pod, then open Jellyfin again; what is on the card stays.
+Jellyfin needs Q2 Pod 1.7.3 or later. On an older Q2 Pod it opens to one page that says *Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin.* and does nothing else: no sign-in, browsing, sync or streaming. Update Q2 Pod, then open Jellyfin again; what is on the card stays, and a `Jellyfin sign-in.txt` is read then.
 
 After a sync the Q2 updates its library and imports the playlists itself. A playlist you made on the Q2 is never replaced: a server playlist with the same name arrives as "<name> (Jellyfin)". If the Q2 is switched off before Jellyfin has read the Q2's answer, Jellyfin asks again when next opened: the Q2 updates its library again (Back cancels it), and a playlist added in that sync can come a second time as "<name> (Jellyfin)".
 
