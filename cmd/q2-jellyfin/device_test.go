@@ -2757,6 +2757,9 @@ func TestSyncStoppedDetails(t *testing.T) {
 	if got := d.stopMessage(&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}); got != "The card is full" {
 		t.Errorf("ENOSPC: %q", got)
 	}
+	if got := d.stopMessage(&os.LinkError{Op: "rename", Old: "x.part", New: "x", Err: syscall.EIO}); got != "Couldn't write to the card. Check it in a computer" {
+		t.Errorf("rename EIO: %q", got)
+	}
 }
 
 // A stopped or paused sync lists the songs that failed before it, as a finished one does, and

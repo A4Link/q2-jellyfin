@@ -306,9 +306,9 @@ func gone(err error) bool {
 // was skipped. A song is tried once a backoff entry (in a playlist, once when it is gone). Then,
 // in a playlist, a song the server can't send (gone, a transcode that fails, an error for a body)
 // is dropped from the list and the queue file, and the firmware plays on past it. Losing the
-// server, a refusal for the account, a card that can't be written (StopReason: an errno is a
-// net.Error), a third song in a row, or a song that landed before (the firmware may have passed
-// its line, which must stay) ends the run at it, the queue waiting there.
+// server, a refusal for the account, a card that can't be written (StopReason), a third song in
+// a row, or a song that landed before (the firmware may have passed its line, which must stay)
+// ends the run at it, the queue waiting there.
 func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 	j, sg, s := &r.jobs[i], r.songs[i], r.s
 	j.fails++
