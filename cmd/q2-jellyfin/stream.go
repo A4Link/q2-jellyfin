@@ -67,6 +67,7 @@ type streamer struct {
 	stat   streamStatus // the song the player waits for, or plays (status.go)
 
 	cacheLimit func() int64    // optional: the playback cache's cap in bytes; 0 (or nil) keeps nothing (cache.go)
+	spare      func() int64    // optional: the card's free bytes over Space to Keep Free; under 0 keeps nothing
 	cacheMu    sync.Mutex      // one trim, eviction or clear at a time
 	syncKeep   map[string]bool // cached files the sync under way takes: trim keeps them (cacheMu)
 	syncing    func() bool     // optional: a sync runs or is paused, so syncKeep holds

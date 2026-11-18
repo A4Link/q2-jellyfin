@@ -749,12 +749,17 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 	case "reportplays":
 		return d.toggleReports(s)
 	case "storage": // Quality and Storage: what is synced, streamed and kept on the card
-		return q2spot.Reply{Rows: []q2spot.Row{list("defq", "Sync Quality: "+quality.Name(s.def()), "For every synced song", ""),
+		rows := []q2spot.Row{list("defq", "Sync Quality: "+quality.Name(s.def()), "For every synced song", ""),
 			list("streamq", "Streaming Quality: "+quality.Name(s.stream()), "For songs streamed", ""),
 			reencodeRow(s),
-			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync pauses before the card has less"},
-			act("cache", "Playback Cache: "+cacheName(s.PlaybackCache), ""),
-			{Kind: "action", URI: "clearcache", Title: "Clear Playback Cache", Subtitle: size(d.stream.cacheSize()) + " of played songs"}}}
+			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync pauses before the card has less"}}
+		if !d.caps.URLs { // Q2 Pod 1.7.3+ streams songs itself: nothing fills the cache
+			rows = append(rows, act("cache", "Playback Cache: "+cacheName(s.PlaybackCache), ""))
+		}
+		if n := d.stream.cacheSize(); n > 0 { // on "urls" too: songs older firmware left, which a sync takes
+			rows = append(rows, q2spot.Row{Kind: "action", URI: "clearcache", Title: "Clear Playback Cache", Subtitle: size(n) + " of played songs"})
+		}
+		return q2spot.Reply{Rows: rows}
 	}
 	if reconcileSwipe(&s, d.caps.Sections) {
 		d.saveSettings(s)
