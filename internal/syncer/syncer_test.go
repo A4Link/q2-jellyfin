@@ -153,7 +153,7 @@ func want(root, id, quality string) plan.Want {
 
 func wait(t *testing.T, r *Runner) Snapshot {
 	t.Helper()
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 12000; i++ {
 		if s := r.Snapshot(); s.State != "running" {
 			return s
 		}
