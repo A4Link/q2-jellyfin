@@ -296,7 +296,7 @@ func (r *streamRun) writeQueue() error {
 }
 
 // gone reports the server's own word that a song isn't there (Jellyfin 70, HTTP 410), which no
-// retry changes. A bare 404 is retried: a proxy or a deploy can answer one for a while.
+// retry changes.
 func gone(err error) bool {
 	var ae *jellyfin.APIError
 	return errors.As(err, &ae) && (ae.Code == 70 || ae.HTTP == 410)

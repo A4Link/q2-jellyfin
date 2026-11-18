@@ -1037,6 +1037,10 @@ func TestProgressRowKindByCaps(t *testing.T) {
 			t.Errorf("no %q in %q", w, titles(r))
 		}
 	}
+	snap.Failed = 3 // a failure shows while the sync runs, in the same row
+	if _, ok := find(d.syncRows(snap), "112 of 240 songs · 3 failed"); !ok {
+		t.Errorf("no failed count in %q", titles(d.syncRows(snap)))
+	}
 	d = newTestDaemon(t, &nav{}, "", true)
 	if row := afterOptions(d.syncRows(snap))[0]; row.Kind != "info" || row.Title != "[#####-----] 47 %" {
 		t.Fatalf("without progress: %+v", row)
@@ -2383,6 +2387,28 @@ func TestFailedSongsPages(t *testing.T) {
 	if r = d.do("failed", r.Cursor); len(r.Rows) != 11 {
 		t.Fatalf("second page %d rows", len(r.Rows))
 	}
+	if m := d.do("retry").Message; m != "Sync started again" {
+		t.Errorf("retry %q", m)
+	}
+}
+
+// Failed Songs lists the failures the runner keeps and says how many more failed.
+func TestFailedSongsCapped(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 503, mediaErr: 70}, "", true)
+	d.runner.Backoff = []time.Duration{time.Millisecond}
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	var rows []q2spot.Row
+	// Q2 Pod loads at most 10 replies before More… (ADDON_PAGES).
+	for r, n := d.do("failed"), 1; ; r, n = d.do("failed", r.Cursor), n+1 {
+		rows = append(rows, r.Rows...)
+		if r.Cursor == "" || n == 10 {
+			break
+		}
+	}
+	if len(rows) < 2 || rows[1].Title != "503 failed · the first 500 are listed" {
+		t.Fatalf("%d rows, second %q", len(rows), rows[min(1, len(rows)-1)].Title)
+	}
 }
 
 // A later page that fails while the firmware loads the list page by page is a failed reply, so the
@@ -2697,6 +2723,29 @@ func TestSyncStoppedDetails(t *testing.T) {
 	}
 	if got := d.stopMessage(&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}); got != "The card is full" {
 		t.Errorf("ENOSPC: %q", got)
+	}
+}
+
+// A stopped or paused sync lists the songs that failed before it, as a finished one does, and
+// Settings says a sync stopped.
+func TestStoppedListsFailedSongs(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
+	for _, r := range []q2spot.Reply{d.stoppedRows(syncer.Snapshot{State: "error", Failed: 2, Err: os.ErrPermission}),
+		d.syncRows(syncer.Snapshot{State: "paused", Total: 3, Failed: 2, Err: syncer.ErrCardFull})} {
+		if _, ok := find(r, "Failed Songs"); !ok {
+			t.Errorf("no Failed Songs: %q", titles(r))
+		}
+	}
+	if r := d.syncRows(syncer.Snapshot{State: "paused", Total: 3, Err: syncer.ErrCardFull}); strings.Contains(strings.Join(titles(r), "|"), "Failed Songs") {
+		t.Errorf("Failed Songs with none failed: %q", titles(r))
+	}
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	os.WriteFile(filepath.Join(d.card, ".jellyfin", "manifest.json"), []byte("{"), 0o644)
+	d.do("start")
+	eventually(t, "the sync to stop", func() bool { return d.runner.Snapshot().State == "error" })
+	if row, _ := find(d.do("settings"), "Sync"); row.Subtitle != "Sync stopped" {
+		t.Errorf("Sync subtitle %q", row.Subtitle)
 	}
 }
 

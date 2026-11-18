@@ -578,6 +578,8 @@ func (d *daemon) syncSubtitle(cl *jellyfin.Client) string {
 		return fmt.Sprintf("Syncing · %d %%", snap.Permille/10)
 	case "paused":
 		return fmt.Sprintf("Paused · %d %%", snap.Permille/10)
+	case "error":
+		return "Sync stopped"
 	}
 	// Connected comes from the app's latest real request, not a ping on a timer (audit B9): a list,
 	// a Play or a sync that reached the server says so, one that couldn't says why.

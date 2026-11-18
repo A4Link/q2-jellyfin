@@ -283,7 +283,7 @@ func TestRunFailureDoesNotStop(t *testing.T) {
 	f.status["x"] = 404
 	r.Start(plan.Plan{Add: []plan.Want{a, x, c}})
 	s := wait(t, r)
-	if hx, _ := f.seen("x"); s.State != "done" || s.Failed != 1 || s.Done != 2 || hx != 3 {
+	if hx, _ := f.seen("x"); s.State != "done" || s.Failed != 1 || s.Done != 2 || hx != 1 { // not found: no retry
 		t.Fatalf("%+v hits=%d", s, hx)
 	}
 	fl := s.Failures[0]
@@ -306,6 +306,75 @@ func TestRunFailureDoesNotStop(t *testing.T) {
 	sameFile(t, x.Path, "x")
 	if ha, _ := f.seen("a"); ha != 1 {
 		t.Fatal("finished song fetched again")
+	}
+}
+
+// albumWants is songs songs of album name, which the server answers with status (0: the song).
+func albumWants(f *fake, root, name string, songs, status int) []plan.Want {
+	var ws []plan.Want
+	for i := 0; i < songs; i++ {
+		w := want(root, fmt.Sprintf("%s%02d", name, i), "original")
+		w.Song.Album = name
+		w.Path = library.SongPath(root, w.Song, "original", false)
+		ws = append(ws, w)
+		f.status[w.Song.ID] = status
+	}
+	return ws
+}
+
+// A server that fails every song (its music drive unmounted, its transcoder broken) doesn't stop
+// the sync: after the first failure each song gets one try with no waits, and the playlists are
+// written at the end.
+func TestFailingSongsDoNotStop(t *testing.T) {
+	f, r, root := setup(t)
+	var ws []plan.Want
+	for i := 0; i < 6; i++ {
+		ws = append(ws, albumWants(f, root, fmt.Sprintf("b%d", i), 2, 500)...)
+	}
+	ok := albumWants(f, root, "ok", 1, 0)
+	r.Start(plan.Plan{Add: append(ws, ok...), Playlists: map[string][]string{"Mix": {ok[0].Path, ws[0].Path}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 12 || s.Done != 1 {
+		t.Fatalf("%s %v, %d failed, %d done", s.State, s.Err, s.Failed, s.Done)
+	}
+	hits := 0
+	for _, w := range ws {
+		h, _ := f.seen(w.Song.ID)
+		hits += h
+	}
+	if hits != len(r.Backoff)+11 {
+		t.Errorf("%d requests, want %d for the first song and 1 for each after", hits, len(r.Backoff)+11)
+	}
+	if _, err := os.Stat(library.PlaylistFile(root, "Mix")); err != nil {
+		t.Error("playlist not written:", err)
+	}
+}
+
+// A song after one that failed gets one request; a song that arrives gives the next its retries.
+func TestOneTryAfterFailure(t *testing.T) {
+	f, r, root := setup(t)
+	a, b, c, d := want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original"), want(root, "dddd", "original")
+	f.status["a"], f.status["bb"], f.status["dddd"] = 500, 500, 500
+	r.Start(plan.Plan{Add: []plan.Want{a, b, c, d}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 3 || s.Done != 1 {
+		t.Fatalf("%+v", s)
+	}
+	for id, n := range map[string]int{"a": 3, "bb": 1, "ccc": 1, "dddd": 3} {
+		if h, _ := f.seen(id); h != n {
+			t.Errorf("%s: %d requests, want %d", id, h, n)
+		}
+	}
+}
+
+// One long album the server can't send (its files unreadable) is that album's own: the sync goes
+// on to the albums after it.
+func TestFailingAlbumDoesNotStop(t *testing.T) {
+	f, r, root := setup(t)
+	ws := albumWants(f, root, "a", 1, 0)
+	ws = append(ws, albumWants(f, root, "bad", 25, 500)...)
+	ws = append(ws, albumWants(f, root, "c", 2, 0)...)
+	r.Start(plan.Plan{Add: ws})
+	if s := wait(t, r); s.State != "done" || s.Failed != 25 || s.Done != 3 {
+		t.Fatalf("%s %v, %d failed, %d done", s.State, s.Err, s.Failed, s.Done)
 	}
 }
 
@@ -343,6 +412,35 @@ func TestRunCardGone(t *testing.T) {
 	}
 	for _, w := range p.Add {
 		sameFile(t, w.Path, w.Song.ID)
+	}
+}
+
+// Retry Failed on a paused sync works as Resume: the paused page lists the failed songs with it.
+func TestRetryFailedWhenPaused(t *testing.T) {
+	f, r, root := setup(t)
+	a, x := want(root, "a", "original"), want(root, "x", "original")
+	f.status["x"] = 500
+	r.CardMounted = func() bool { return false }
+	r.Start(plan.Plan{Add: []plan.Want{a, x}})
+	if s := wait(t, r); s.State != "paused" {
+		t.Fatalf("%+v", s)
+	}
+	r.CardMounted = func() bool { return true }
+	r.RetryFailed()
+	if s := wait(t, r); s.State != "done" || s.Done != 1 || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// A run lists at most maxFailures song failures but counts them all; covers are listed beside them.
+func TestFailuresCapped(t *testing.T) {
+	_, r, _ := setup(t)
+	r.fail("al", "Alb", "cover", errors.New("x"))
+	for i := 0; i < maxFailures+2; i++ {
+		r.fail("s", "T", "download", errors.New("x"))
+	}
+	if s := r.Snapshot(); s.Failed != maxFailures+2 || len(s.Failures) != maxFailures+1 {
+		t.Fatalf("failed %d, listed %d", s.Failed, len(s.Failures))
 	}
 }
 
@@ -1137,6 +1235,27 @@ func TestOfflinePauses(t *testing.T) {
 	}
 	if _, err := os.Stat(z.Path); err != nil {
 		t.Error("removed while offline")
+	}
+}
+
+// The server going away right after a song failed still gets the retries that ride out a blip
+// before the sync pauses: the one try after the failure doesn't count toward the pause on its own.
+func TestOfflineAfterFailure(t *testing.T) {
+	f, r, root := setup(t)
+	ws := []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original"), want(root, "dddd", "original")}
+	f.status["a"] = 500
+	for _, id := range []string{"bb", "ccc", "dddd"} {
+		f.status[id] = 502 // a proxy in front of a server that is down
+	}
+	r.Start(plan.Plan{Add: ws})
+	if s := wait(t, r); s.State != "paused" || !errors.Is(s.Err, ErrOffline) {
+		t.Fatalf("%+v", s)
+	}
+	n := len(r.Backoff)
+	for id, want := range map[string]int{"a": n, "bb": 1 + n, "ccc": n, "dddd": 0} {
+		if h, _ := f.seen(id); h != want {
+			t.Errorf("%s: %d requests, want %d", id, h, want)
+		}
 	}
 }
 
