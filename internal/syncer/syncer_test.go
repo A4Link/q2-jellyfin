@@ -2169,7 +2169,8 @@ func TestImported(t *testing.T) {
 	for _, f := range []string{mix, rock, fav} {
 		put(t, f, "#EXTM3U\n")
 	}
-	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{}}).Save(root, root+"/.jellyfin/manifest.json")
+	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{},
+		PlaylistSums: map[string]string{"Fav": "x"}}).Save(root, root+"/.jellyfin/manifest.json")
 	again, clash, err := r.Imported([2][]string{nil, {mix, rock, fav}}, []string{rock, fav})
 	rockS := root + "/_explaylist_data/Rock (Jellyfin).m3u"
 	if err != nil || !reflect.DeepEqual(again, []string{rockS}) || !reflect.DeepEqual(clash, []string{fav}) {
@@ -2178,6 +2179,9 @@ func TestImported(t *testing.T) {
 	m := manifest(t, root)
 	if !m.Imported[mix] || m.Imported[rock] || m.Imported[fav] || m.Playlists["Rock"] != rockS {
 		t.Fatalf("%+v %+v", m.Imported, m.Playlists)
+	}
+	if _, ok := m.PlaylistSums["Fav"]; ok {
+		t.Fatal("clash kept its sum: the next preview finds nothing to do")
 	}
 	if _, err := os.Stat(rockS); err != nil {
 		t.Fatal(err)

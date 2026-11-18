@@ -159,6 +159,7 @@ type daemon struct {
 	libTaken           int64                       // the library request whose answer was taken last (libPoll)
 	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes
 	libRest            [2][]string                 // the import and add paths the request on file had no room for (I20)
+	libClash           []string                    // playlist files the followed-up answers skipped as clashes (libPoll)
 	resolved           map[string][]jellyfin.Song  // selection key -> its songs, as last fetched
 	artistAlbums       map[string][]jellyfin.Album // artist id -> its albums, as last fetched
 	lists              listCache                   // whole Artists and Playlists lists, between a list's pages

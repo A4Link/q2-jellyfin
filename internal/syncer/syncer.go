@@ -269,7 +269,8 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 // and skipped exists (R35). What it imported or added is now a Q2 playlist the app made, so later
 // requests replace it by name. A skipped add still under its playlist's own name met a playlist
 // the user made: it is renamed "<name> (Jellyfin).m3u" and returned in again, to add once more.
-// One skipped under that name too is a clash. Only an exists naming exactly an add of the request
+// One skipped under that name too is a clash; its sum is forgotten, so the next preview offers a
+// sync, whose request adds it again. Only an exists naming exactly an add of the request
 // counts; any other is logged and ignored, and then no add is recorded (one may have been
 // skipped: the guard fails closed). ErrBusy while a sync runs.
 func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []string, err error) {
@@ -287,8 +288,14 @@ func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []str
 		trusted = false
 	}
 	err = r.edit(func(m *library.Manifest) (bool, error) {
-		changed := false
+		changed, kept := false, map[string]bool{}
+		for _, f := range m.Playlists {
+			kept[f] = true
+		}
 		for _, f := range append(append([]string(nil), imports...), adds...) {
+			if !kept[f] {
+				continue // removed by a sync since the request: no longer the app's (R35)
+			}
 			if (!added[f] || trusted && !skipped[f]) && !m.Imported[f] {
 				m.Imported[f], changed = true, true
 			}
@@ -304,6 +311,8 @@ func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []str
 			case !skipped[f]:
 			case f != library.PlaylistFile(r.root, name):
 				clash = append(clash, f)
+				delete(m.PlaylistSums, name) // the next sync writes it again and adds it once the Q2's copy is gone
+				changed = true
 			default:
 				to := r.freePlaylistFile(m, name, true)
 				if err := m.MovePlaylist(r.root, name, to); err != nil {
@@ -945,6 +954,7 @@ func (j *job) playlists() error {
 				if m.Remove(j.root, f) == nil {
 					delete(m.Playlists, name)
 					delete(m.PlaylistSums, name)
+					delete(m.Imported, f) // the user may make their own of that name: added back, it goes as "add" (R35)
 				}
 			}
 		}

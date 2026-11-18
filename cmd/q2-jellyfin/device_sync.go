@@ -833,7 +833,7 @@ func (d *daemon) libState() (done, ok bool, msg string, at time.Time) {
 // libPoll takes the firmware's answer to the request on file, once (R35). The playlists it imported
 // become the app's own. One it skipped because the Q2 has a playlist of that name (the user's) is
 // renamed "<name> (Jellyfin).m3u" and added in a follow-up request; skipped again under that name,
-// it is an error. The request file says what was sent, so an answer that comes after a restart is
+// it is an error, shown once the follow-ups' answers come too. The request file says what was sent, so an answer that comes after a restart is
 // taken too (taking one twice changes nothing). Called every second (tick) and by the pages that
 // show it. d.mu is held.
 func (d *daemon) libPoll() {
@@ -848,15 +848,16 @@ func (d *daemon) libPoll() {
 	if ok {
 		again, clash, err := d.runner.Imported(sent, exists)
 		rest := d.libRest
+		d.libClash = append(d.libClash, clash...)
+		for _, f := range clash { // logged now: a follow-up's answer may come only after a restart
+			d.log.Printf("library: %s clashes with a Q2 playlist of that name", f)
+		}
 		switch {
 		case errors.Is(err, syncer.ErrBusy):
 			return // a sync holds the manifest: taken once it ends
 		case err != nil:
 			d.log.Printf("library: %v", err)
 			ok, msg = false, "Couldn't record the imported playlists"
-		case len(clash) > 0:
-			ok, msg = false, "Couldn't import "+strings.TrimSuffix(filepath.Base(clash[0]), ".m3u")+
-				": a playlist with that name is already on the Q2"
 		case !d.libAgain && len(again)+len(rest[0])+len(rest[1]) > 0: // libAgain's request names them all
 			d.libTaken = seq
 			_, err := d.writeLibrary(false, there(rest[0]), there(append(rest[1], again...)))
@@ -867,7 +868,17 @@ func (d *daemon) libPoll() {
 			ok, msg = false, "Couldn't ask for a library update"
 		}
 	}
-	d.libRest = [2][]string{}
+	if c := d.libClash; ok && len(c) > 0 {
+		name := strings.TrimSuffix(filepath.Base(c[0]), ".m3u")
+		ok, msg = false, "Couldn't import "+name+": the Q2 has a playlist with that name. Delete it in Library → Playlists, then Check Again"
+		if n := len(c) - 1; n > 0 {
+			msg = fmt.Sprintf("Couldn't import %s and %d more: the Q2 has playlists with those names. Delete them in Library → Playlists, then Check Again", name, n)
+		}
+	}
+	if !ok {
+		d.log.Printf("library: %s", msg)
+	}
+	d.libRest, d.libClash = [2][]string{}, nil
 	d.libTaken = seq
 	if j := d.lib; j != nil && j.seq == seq {
 		j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
