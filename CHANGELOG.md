@@ -31,6 +31,9 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - **A song whose Opus transcode the server stopped part-way is synced again**: when Jellyfin's encoder failed mid-song, or the connection was closed, the cut file was kept as the whole song and never fetched again until its quality or tags changed. A transcode is now kept only when it ends where an Ogg stream ends; otherwise the song fails, and the next sync brings it again. The Playback Cache, which a sync takes songs from, keeps no cut song either.
 - **A song that changed on the server while its download was paused is no longer saved as two versions joined:** when the server's file changed size (a retag or a re-rip) and the next request for it failed, the part already on the card was continued with the new version's rest, and the song played a glitch partway through. The sync now starts such a song again from the beginning. A song the server refuses no longer leaves a small `.part.key` file and its album folder on the card, and a transcoded song that fails part-way no longer leaves its partial file, which a sync never continues.
 - **A card that turns read-only or fails during a sync says so:** the sync stops with *The card is read-only. Check it in a computer* (or *Couldn't write to the card. Check it in a computer*), instead of pausing with *Can't reach* the server. A stream that can't write to the card says the same.
+### Security
+
+- **A server can no longer fill the card by sending more than a song's size:** a download of a song whose size is known now stops at twice that size and 8 MiB, also when the server's Content-Length says more, and the song fails. Before, a long Content-Length was taken as it was, so a hostile server could write past Space to Keep Free until the card was full. This covers songs streamed on Q2 Pod before 1.7.3 too.
 
 ## [0.8.0] - 2026-11-16
 
