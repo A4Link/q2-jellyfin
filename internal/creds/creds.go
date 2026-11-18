@@ -29,9 +29,9 @@ const (
 	label = "q2-jellyfin credentials v1"
 )
 
-// KeyPath is the key's file, in the Q2's internal storage (the firmware keeps its EQ presets in
-// /data), never on the card. Tests point it elsewhere.
-var KeyPath = "/data/q2-jellyfin.key"
+// KeyPath is the key's file, in the Q2's writable internal storage (/mnt/data, where stock keeps
+// its settings and EQ presets), never on the card. Tests point it elsewhere.
+var KeyPath = "/mnt/data/q2-jellyfin.key"
 
 // Logf receives why the sign-in can't be read or kept encrypted: reasons and paths, never a
 // secret. The app points it at the card's log, which outlives a reboot.
@@ -55,8 +55,8 @@ func logOnce(format string, a ...any) {
 }
 
 // Load reads the saved sign-in; false when there is none, it is incomplete, or it can't be
-// decrypted (another Q2's card, /data cleared): then the user signs in again, which writes over it.
-// A plain file is encrypted at once, so no new sign-in is needed after the update.
+// decrypted (another Q2's card, /mnt/data cleared): then the user signs in again, which writes over
+// it. A plain file is encrypted at once, so no new sign-in is needed after the update.
 func Load(dir string) (jellyfin.Creds, bool) {
 	p := filepath.Join(dir, name)
 	b, err := os.ReadFile(p)
@@ -79,21 +79,48 @@ func Load(dir string) (jellyfin.Creds, bool) {
 		return jellyfin.Creds{}, false
 	}
 	if plain {
-		if k, err := key(true); err != nil {
-			logOnce("credentials: no key at %s (%v): kept unencrypted", KeyPath, err)
-		} else {
-			q2.Wipe(p) // the encrypted file replaces it, and FAT would keep the plain token's clusters
-			if err := save(dir, c, k); err != nil {
-				logOnce("credentials: can't encrypt %s: %v", p, err)
-				save(dir, c, nil) // the sign-in kept plain, as it was
-			}
+		if err := encrypt(p, b); err != nil {
+			logOnce("credentials: %s kept unencrypted: %v", p, err)
 		}
 	}
 	return c, true
 }
 
-// Save writes the sign-in encrypted, with mode 0600. Without a key (/data can't be written) it is
-// written plain, as before C3, so signing in always works.
+// encrypt seals the plain file b in place: the sealed bytes are longer, so each plain byte is
+// overwritten where it is (FAT would keep a replaced file's clusters), and no new file or rename
+// is needed, so it works on a full card. On an error the file is left plain.
+func encrypt(p string, b []byte) error {
+	k, err := key(true)
+	if err != nil {
+		return fmt.Errorf("no key at %s: %w", KeyPath, err)
+	}
+	s, err := seal(k, b)
+	if err != nil {
+		return err
+	}
+	if len(s) <= len(b) {
+		return errors.New("sealed copy not longer than the plain one")
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	f.Chmod(0o600) // as writePrivate; FAT keeps no mode
+	if _, err = f.WriteAt(s, 0); err == nil {
+		err = f.Sync()
+	}
+	if err != nil { // put the plain bytes back, so the sign-in still reads
+		f.WriteAt(b, 0)
+		f.Truncate(int64(len(b)))
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// Save writes the sign-in encrypted, with mode 0600. Without a key (/mnt/data can't be written) it
+// is written plain, as before C3, so signing in always works.
 func Save(dir string, c jellyfin.Creds) error {
 	k, err := key(true)
 	if err != nil {
@@ -117,7 +144,7 @@ func save(dir string, c jellyfin.Creds, k []byte) error {
 }
 
 // Remove signs out; a missing file is fine. The file is overwritten with zeros first: FAT keeps a
-// deleted file's bytes, and the key to them stays in /data (audit 3 S13).
+// deleted file's bytes, and the key to them stays in /mnt/data (audit 3 S13).
 func Remove(dir string) error {
 	p := filepath.Join(dir, name)
 	q2.Wipe(p) // a missing file has nothing to wipe; a failed wipe still deletes
@@ -128,7 +155,8 @@ func Remove(dir string) error {
 }
 
 // key reads the 32-byte key, making one first when create is set and there is none it can use (a
-// damaged or unreadable one decrypts nothing anyway). A key lost to a power cut as it is made means only a new
+// damaged or unreadable one decrypts nothing anyway). It is synced once written, as q2.WriteFile
+// syncs only on the card: a key lost to a power cut after the sign-in is sealed with it means a new
 // sign-in.
 func key(create bool) ([]byte, error) {
 	keyMu.Lock()
@@ -149,6 +177,10 @@ func key(create bool) ([]byte, error) {
 	}
 	if err := writePrivate(KeyPath, k); err != nil {
 		return nil, err
+	}
+	if f, err := os.Open(KeyPath); err == nil {
+		f.Sync()
+		f.Close()
 	}
 	return k, nil
 }

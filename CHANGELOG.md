@@ -4,6 +4,10 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Fixed
+
+- **The sign-in is now encrypted on the Q2:** its key was to be kept in a folder the Q2 doesn't have, so the token in `.jellyfin/credentials` was stored on the card unencrypted. The key is now kept in the Q2's own storage, and the next start encrypts the sign-in already there, writing over the unencrypted copy; no new sign-in is needed on that Q2. If the Q2's own storage can't take the key (it is full or read-only), the sign-in stays unencrypted until it can, and `.jellyfin/log.txt` says so. In another Q2 the card's sign-in can't be read, so Jellyfin asks you to sign in again. If a card was lost, lent or copied before this version (a backup, or a move to a new card), revoke the Q2 under **Dashboard → Devices** and sign in again: the update encrypts the same token, and older unencrypted copies may remain in the card's free space or in those copies.
+
 ## [0.8.0] - 2026-11-16
 
 > **This app is 100% vibecoded.** It works, and every change was reviewed and tested, but the quality of its code cannot be assured. Use it at your own risk.

@@ -10,15 +10,24 @@ import (
 	"testing"
 
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/q2"
 )
 
-// useKey points KeyPath at a temp folder for the test, never the machine's /data.
+// useKey points KeyPath at a temp folder for the test, never the machine's /mnt/data.
 func useKey(t *testing.T) string {
 	t.Helper()
 	old := KeyPath
 	KeyPath = filepath.Join(t.TempDir(), "q2-jellyfin.key")
 	t.Cleanup(func() { KeyPath = old })
 	return KeyPath
+}
+
+// The key is kept where the Q2 can write, beside stock's settings: the Q2 has no /data, and
+// a key that can't be made leaves the sign-in plain on the card.
+func TestKeyPathInQ2Storage(t *testing.T) {
+	if filepath.Dir(KeyPath) != filepath.Dir(q2.ConfigPath) {
+		t.Fatalf("KeyPath %s not in %s", KeyPath, filepath.Dir(q2.ConfigPath))
+	}
 }
 
 func TestCredsMode0600(t *testing.T) {
@@ -99,7 +108,8 @@ func TestCredsEncrypted(t *testing.T) {
 	}
 }
 
-// A plain file from before C3 still signs in, and is encrypted at once.
+// A plain file from before C3 (or kept plain while no key could be made) still signs in, and is
+// encrypted at once.
 func TestCredsPlainMigrated(t *testing.T) {
 	useKey(t)
 	dir := t.TempDir()
@@ -115,6 +125,89 @@ func TestCredsPlainMigrated(t *testing.T) {
 	}
 	if got, ok := Load(dir); !ok || got != c {
 		t.Fatalf("load after migration %v %v", got, ok)
+	}
+}
+
+// Encrypting a plain file writes the sealed bytes over the plain ones, in the same file: a second
+// name for it (a hard link) sees the sealed copy, as the card's clusters would, and no other file
+// is made.
+func TestCredsPlainWipedWhenEncrypted(t *testing.T) {
+	useKey(t)
+	dir := t.TempDir()
+	c := jellyfin.Creds{Server: "https://music.example", User: "alice", Token: "tok-secret-123"}
+	b, _ := json.Marshal(c)
+	p, other := filepath.Join(dir, "credentials"), filepath.Join(dir, "other-name")
+	os.WriteFile(p, b, 0o644)
+	if err := os.Link(p, other); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	if got, ok := Load(dir); !ok || got != c {
+		t.Fatalf("load %v %v", got, ok)
+	}
+	sealed, _ := os.ReadFile(p)
+	if !bytes.HasPrefix(sealed, []byte(magic)) {
+		t.Fatalf("not encrypted: %q", sealed)
+	}
+	if b, _ := os.ReadFile(other); !bytes.Equal(b, sealed) || bytes.Contains(b, []byte("tok-secret-123")) {
+		t.Fatalf("plain bytes not overwritten: %q", b)
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 2 {
+		t.Fatalf("other files made: %v", es)
+	}
+}
+
+// A full card takes no new file, but the plain file is still encrypted where it is (a folder that
+// can't be written stands in for the full card).
+func TestCredsPlainEncryptedOnFullCard(t *testing.T) {
+	useKey(t)
+	dir := t.TempDir()
+	c := jellyfin.Creds{Server: "https://music.example", User: "alice", Token: "tok-secret-123"}
+	b, _ := json.Marshal(c)
+	p := filepath.Join(dir, "credentials")
+	os.WriteFile(p, b, 0o644)
+	os.Chmod(dir, 0o500)
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if f, err := os.Create(filepath.Join(dir, "probe")); err == nil {
+		f.Close()
+		t.Skip("the folder still takes new files here (root, or no permissions)")
+	}
+	if got, ok := Load(dir); !ok || got != c {
+		t.Fatalf("load %v %v", got, ok)
+	}
+	if b, _ := os.ReadFile(p); !bytes.HasPrefix(b, []byte(magic)) {
+		t.Fatalf("not encrypted: %q", b)
+	}
+	if got, ok := Load(dir); !ok || got != c {
+		t.Fatalf("load after migration %v %v", got, ok)
+	}
+}
+
+// When the file can't be written, the sign-in stays plain and readable, and the reason is logged.
+func TestCredsPlainKeptWhenUnwritable(t *testing.T) {
+	useKey(t)
+	var got []string
+	old := Logf
+	Logf = func(format string, a ...any) { got = append(got, fmt.Sprintf(format, a...)) }
+	t.Cleanup(func() { Logf = old })
+	dir := t.TempDir()
+	c := jellyfin.Creds{Server: "https://music.example", User: "alice", Token: "tok-secret-123"}
+	b, _ := json.Marshal(c)
+	p := filepath.Join(dir, "credentials")
+	os.WriteFile(p, b, 0o400)
+	if f, err := os.OpenFile(p, os.O_WRONLY, 0); err == nil {
+		f.Close()
+		t.Skip("a read-only file can still be written here (root)")
+	}
+	for i := 0; i < 2; i++ {
+		if l, ok := Load(dir); !ok || l != c {
+			t.Fatalf("load %v %v", l, ok)
+		}
+	}
+	if b2, _ := os.ReadFile(p); !bytes.Equal(b2, b) {
+		t.Fatalf("plain file changed: %q", b2)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], p+" kept unencrypted") || strings.Contains(got[0], "tok-secret-123") {
+		t.Fatalf("%q", got)
 	}
 }
 
@@ -179,7 +272,8 @@ func TestCredsUndecryptableLogged(t *testing.T) {
 	}
 }
 
-// Where no key can be kept (/data not writable), sign-in still works, stored plain as before C3.
+// Where no key can be kept (/mnt/data not writable), sign-in still works, stored plain as before
+// C3.
 func TestCredsNoKeyPlain(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(blocker, nil, 0o644)

@@ -13,7 +13,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 )
 
-// TestMain keeps the credentials' key (C3) in a temp folder: no test writes the machine's /data.
+// TestMain keeps the credentials' key (C3) in a temp folder: no test writes the machine's /mnt/data.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "q2-jellyfin-key")
 	if err != nil {
