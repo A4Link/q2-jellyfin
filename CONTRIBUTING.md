@@ -59,15 +59,15 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `ci`. The scope is the package
 
 ## Releasing
 
-Maintainers, from an up-to-date `master` with a clean tree:
+Maintainers, from an up-to-date `master` with a clean tree, on Linux (or WSL), since the script runs `go vet`, the Go tests and the launcher test on this machine first:
 
 ```sh
-contrib/release.sh 0.4 --dry-run   # checks, tests, and shows the notes and the diff
-contrib/release.sh 0.4             # commit "release: q2-v0.4" and tag q2-v0.4
-git push --atomic origin master q2-v0.4    # or run the script with --push
+contrib/release.sh 0.8.1 --dry-run   # checks, tests, and shows the notes and the diff
+contrib/release.sh 0.8.1             # commit "release: q2-v0.8.1" and tag q2-v0.8.1
+git push --atomic origin master q2-v0.8.1    # or run the script with --push
 ```
 
-The script moves the Unreleased entries into `## [0.4] - <today>`, updates the links at the bottom of CHANGELOG.md and sets `const version` in `cmd/q2-jellyfin/main.go`. The tag's workflow checks the version, builds, and publishes the release with that section as its notes and the ZIP as its only file. Q2 Pod's App Store installs the latest release's ZIP, so keep the `q2-vX.Y` tags and the single ZIP.
+The script moves the Unreleased entries into `## [0.8.1] - <today>`, updates the links at the bottom of CHANGELOG.md and sets `const version` in `cmd/q2-jellyfin/main.go`. The tag's workflow checks the version, builds, and publishes the release with that section as its notes and the ZIP as its only file. Q2 Pod's App Store installs the latest release's ZIP, so keep the `q2-vX.Y.Z` tags and the single ZIP.
 
 ## Licence
 
