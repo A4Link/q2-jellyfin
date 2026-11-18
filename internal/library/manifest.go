@@ -37,8 +37,9 @@ type Manifest struct {
 	PlaylistsStale bool `json:",omitempty"`
 	// Imported holds the playlist files the firmware confirmed importing (R35): the Q2 playlist of
 	// that name is the app's, so later requests replace it ("import"); any other file is sent as
-	// "add", which never touches a playlist the user made. A file stays here after it is removed,
-	// as its playlist stays on the Q2.
+	// "add", which never touches a playlist the user made. A file leaves here when the sync removes
+	// it: its playlist stays on the Q2, but the user may delete it and make their own of that name,
+	// so the playlist added back to Sync goes as "add" again.
 	Imported map[string]bool
 	// PlaylistSums holds, per playlist name, the PlaylistSum of the song paths last written for it:
 	// a playlist whose songs or order changed is written again though no song moves (I10).

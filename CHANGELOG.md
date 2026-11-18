@@ -57,6 +57,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **The playback cache keeps Space to Keep Free:** on Q2 Pod before 1.7.3, a played song is kept in the cache only if the card still has Space to Keep Free with it there; otherwise it is deleted, as with the cache off. A 2 to 8 GB cache could fill the card below that setting.
+- **A playlist added back to Sync never replaces one you made of that name:** taken out of Sync, a playlist is no longer the app's, so after you delete the Q2's copy and make your own of the same name, adding the server's back to Sync no longer deletes yours; it arrives as *<name> (Jellyfin)* instead. So does a playlist you add back while the Q2 still has its earlier copy: delete that copy in **Library → Playlists** first. If the Q2 already has that *(Jellyfin)* name too, the Sync page says *Couldn't import <name>: the Q2 has a playlist with that name. Delete it in Library → Playlists, then Check Again* (with several, it names the first and counts the rest), and log.txt says so too. Until it is deleted, each preview offers a sync that tries again; once it is deleted, that sync adds it.
 
 ## [0.8.0] - 2026-11-16
 
