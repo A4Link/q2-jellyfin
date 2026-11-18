@@ -1,11 +1,18 @@
 package library
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/quality"
@@ -230,6 +237,108 @@ func TestManifestRoundTrip(t *testing.T) {
 	m2, err := LoadManifest(p)
 	if err != nil || m2.Songs["1"].Meta != "h" || m2.Songs["1"].Items[0] != "album:a" {
 		t.Fatal(err, m2)
+	}
+}
+
+type writeSizes struct{ max int }
+
+func (w *writeSizes) Write(b []byte) (int, error) { w.max = max(w.max, len(b)); return len(b), nil }
+
+// Save streams the manifest a song at a time, never holding its whole JSON (about 16 MB at 50,000
+// songs), and LoadManifest reads back every field, with no songs too.
+func TestManifestSaveStreams(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/.jellyfin/manifest.json"
+	full := &Manifest{Songs: map[string]*Entry{}, Playlists: map[string]string{"A": dir + "/_explaylist_data/A.m3u"},
+		PlaylistsStale: true, Imported: map[string]bool{dir + "/_explaylist_data/A.m3u": true},
+		PlaylistSums: map[string]string{"A": "sum"}, SyncedAt: time.Date(2026, 11, 17, 8, 0, 0, 0, time.UTC),
+		Stale: []string{dir + "/Jellyfin/A/x/old.flac"}}
+	for i := 0; i < 2000; i++ {
+		id := fmt.Sprint("s<&>\"", i) // escaped as Encode escapes them
+		full.Songs[id] = &Entry{ID: id, Path: dir + "/Jellyfin/A/x/" + id + ".opus", Quality: "opus-128", Size: int64(i),
+			SrcSize: int64(i % 2), Items: []string{"album:a"}, Meta: "h"}
+	}
+	empty := &Manifest{Songs: map[string]*Entry{}, Playlists: map[string]string{}, Imported: map[string]bool{},
+		PlaylistSums: map[string]string{}}
+	for _, m := range []*Manifest{full, empty} {
+		if err := m.Save(dir, p); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := LoadManifest(p); err != nil || !reflect.DeepEqual(got, m) {
+			t.Fatalf("%v: read back differs", err)
+		}
+	}
+	w := &writeSizes{}
+	if err := full.write(w); err != nil || w.max > 64<<10 {
+		t.Errorf("%v: a write of %d bytes", err, w.max)
+	}
+}
+
+// LoadManifest decodes a song at a time, as Save writes; a file in another key order, or with no
+// songs, reads as before, and a cut file is still an error.
+func TestManifestLoadStreams(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/.jellyfin/manifest.json"
+	m := &Manifest{Songs: map[string]*Entry{}, Playlists: map[string]string{}, Imported: map[string]bool{},
+		PlaylistSums: map[string]string{}, Stale: []string{"old.flac"}}
+	for i := 0; i < 2000; i++ {
+		id := fmt.Sprint("s", i)
+		m.Songs[id] = &Entry{ID: id, Path: dir + "/Jellyfin/A/x/" + id + ".opus", Quality: "opus-128", Items: []string{"album:a"}}
+	}
+	if err := m.Save(dir, p); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadManifest(p); err != nil || !reflect.DeepEqual(got, m) {
+		t.Fatalf("%v: read back differs", err)
+	}
+	for s, songs := range map[string]int{`{"Stale":["x"],"Songs":{"a":{"ID":"a","Path":"p"}},"PlaylistsStale":true}`: 1,
+		`{"Songs":null,"Stale":["x"]}`: 0} {
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := LoadManifest(p); err != nil || got.Stale[0] != "x" || len(got.Songs) != songs {
+			t.Fatalf("%v: %s read as %+v", err, s, got)
+		}
+	}
+	for _, s := range []string{`{"Songs":{"a":`, `{"Songs":{}`, `{`, ``} { // the stop message reads them as cut
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var se *json.SyntaxError
+		if _, err := LoadManifest(p); !errors.Is(err, io.ErrUnexpectedEOF) && !errors.As(err, &se) {
+			t.Fatalf("%q: %v", s, err)
+		}
+	}
+}
+
+// Save encodes each song straight into its buffer: no copy of each song's JSON (18 MB of garbage
+// per save at 50,000 songs), and LoadManifest keeps one copy of each id, quality and item name.
+func TestManifestSaveLoadShareMemory(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/.jellyfin/manifest.json"
+	m := &Manifest{Songs: map[string]*Entry{}}
+	for i := 0; i < 1000; i++ {
+		id := fmt.Sprint("s", i)
+		m.Songs[id] = &Entry{ID: id, Path: dir + "/Jellyfin/A/x/" + id + ".opus", Quality: "opus-128", Items: []string{"album:a"}}
+	}
+	if n := testing.AllocsPerRun(5, func() { m.write(io.Discard) }); n > 1500 && !raceOn {
+		t.Errorf("%.0f allocations to write 1,000 songs", n)
+	}
+	if err := m.Save(dir, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadManifest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := got.Songs["s1"], got.Songs["s2"]
+	if unsafe.StringData(a.Quality) != unsafe.StringData(b.Quality) || unsafe.StringData(a.Items[0]) != unsafe.StringData(b.Items[0]) {
+		t.Error("each song keeps its own quality and item names")
+	}
+	for id, e := range got.Songs {
+		if unsafe.StringData(id) != unsafe.StringData(e.ID) {
+			t.Fatalf("%s: its id twice", id)
+		}
 	}
 }
 

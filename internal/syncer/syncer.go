@@ -81,6 +81,7 @@ type Snapshot struct {
 	ErrAt                 time.Time // when the run stopped with Err
 	Renamed, Removed      int       // songs this run renamed and removed
 	Held                  int       // songs taken out of Sync that this run left, as songs failed (I2)
+	Deleted               int       // files an earlier run left listed (Stale), deleted at this run's start
 	HeldRetry             bool      // Held came from a shared failure (a connection, the card): Retry Failed is the way out
 	Failures              []Failure
 }
@@ -121,6 +122,7 @@ type Runner struct {
 	renamedN, removedN    int
 	heldN                 int  // songs taken out of Sync that the removals left (I2)
 	heldRetry             bool // heldN came from a shared failure (j.hold)
+	deletedN              int
 	errAt                 time.Time
 	bytesDone, bytesTotal int64
 	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
@@ -188,6 +190,7 @@ func (r *Runner) launch() {
 	r.cancel, r.done = cancel, make(chan struct{})
 	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
 	r.doneN, r.failedN, r.total, r.renamedN, r.removedN, r.heldN = 0, 0, len(p.Add)+len(p.Replace), 0, 0, 0
+	r.deletedN = 0
 	r.heldRetry = false
 	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
 	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
@@ -386,7 +389,8 @@ func (r *Runner) RetryFailed() bool {
 
 // DropMissing forgets the songs of m, the card's manifest as the caller read it, whose files are
 // gone from the card (deleted by hand, or with the folder after the app was removed), so the next
-// plan fetches them again (I9). The card is read without the lock, which a reply may wait for;
+// plan fetches them again (I9). It also forgets the gone files of m.Stale, deleted by a run that
+// ended before it saved again. The card is read without the lock, which a reply may wait for;
 // nothing is dropped while the card is away, when every file would seem gone. ErrBusy while a sync
 // runs.
 func (r *Runner) DropMissing(m *library.Manifest) error {
@@ -399,7 +403,13 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 			gone[id] = e.Path
 		}
 	}
-	if len(gone) == 0 || !r.CardMounted() {
+	staleGone := map[string]bool{}
+	for _, f := range m.Stale {
+		if _, err := os.Lstat(f); errors.Is(err, os.ErrNotExist) {
+			staleGone[f] = true
+		}
+	}
+	if len(gone) == 0 && len(staleGone) == 0 || !r.CardMounted() {
 		return nil
 	}
 	return r.edit(func(m *library.Manifest) (bool, error) {
@@ -410,8 +420,12 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 				n++
 			}
 		}
-		r.logf("sync: %d songs gone from the card, planned again", n)
-		return n > 0, nil
+		if n > 0 {
+			r.logf("sync: %d songs gone from the card, planned again", n)
+		}
+		was := len(m.Stale)
+		m.Stale = slices.DeleteFunc(m.Stale, func(f string) bool { return staleGone[f] })
+		return n > 0 || len(m.Stale) < was, nil
 	})
 }
 
@@ -438,7 +452,7 @@ func (r *Runner) Snapshot() Snapshot {
 	done := r.bytesDone + min(r.cur, r.curMax)
 	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
 		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, ErrAt: r.errAt,
-		Renamed: r.renamedN, Removed: r.removedN, Held: r.heldN, HeldRetry: r.heldRetry, Failures: append([]Failure(nil), r.failures...)}
+		Renamed: r.renamedN, Removed: r.removedN, Held: r.heldN, HeldRetry: r.heldRetry, Deleted: r.deletedN, Failures: append([]Failure(nil), r.failures...)}
 	switch {
 	case s.State == "done":
 		s.Permille = 1000
@@ -519,6 +533,10 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		j.recorded[strings.ToLower(e.Path)]++
 	}
 	j.dropParts()
+	n := j.dropStale() // what a stop left of the last run's
+	j.mu.Lock()
+	j.deletedN = n
+	j.mu.Unlock()
 	defer func() { // a stop keeps what is done; a crash re-fetches at most the songs since the last save
 		if j.unsaved > 0 {
 			j.save()
@@ -528,6 +546,9 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		if err := phase(); err != nil {
 			return err
 		}
+	}
+	if err := j.check(j.ctx); err != nil { // a stop dropStale cut short, as in removals' last batch
+		return err
 	}
 	j.m.SyncedAt = j.Now() // "Last synced" (a stopped run is no sync to the end)
 	return j.save()
@@ -587,6 +608,19 @@ func (j *job) space(w plan.Want) error {
 	if left-w.Bytes >= reserve {
 		return nil
 	}
+	if len(j.m.Stale) > 0 { // replaced and removed songs' files, which go with a save: they would anyway
+		if err := j.save(); err != nil {
+			return err
+		}
+		if left = j.Free(); left-w.Bytes >= reserve {
+			return nil
+		}
+	}
+	// a replace that shrinks its song frees more than it takes once the next save drops the old
+	// file: the card goes under the reserve by at most this one song
+	if e := j.m.Songs[w.Song.ID]; e != nil && e.Size > w.Bytes && left >= w.Bytes {
+		return nil
+	}
 	held, shared := j.held() && !j.removed && j.toRemove() > 0, j.hold
 	if !j.held() && !j.removed && len(j.p.Remove) > 0 {
 		j.logf("sync: short of space: removing the songs taken out of Sync first")
@@ -624,17 +658,47 @@ func (j *job) save() error {
 		return j.cardErr(err)
 	}
 	j.unsaved, j.saved = 0, j.Now()
+	j.dropStale()
 	return nil
 }
 
-// renames moves songs whose path changed, in batches of renameBatch: a batch's targets are saved
-// (Entry.Moving) before its files move and its new paths after, so a crash or the card going
-// part-way leaves every moved file recorded (LoadManifest settles it) (M13).
-func (j *job) renames() error {
-	recorded := map[string]bool{} // every song's file, case-folded: a rename never replaces one
-	for _, e := range j.m.Songs {
-		recorded[strings.ToLower(e.Path)] = true
+// dropStale deletes the replaced and removed songs' files in m.Stale, recorded there by a save (I4),
+// until a stop, and returns how many it deleted. A file deleted or gone, or now a song's, leaves the
+// list; the rest stay for the next save. The shorter list goes with the next save; after a stop, or
+// an error that ends the run, none: DropMissing drops the gone ones before the next plan.
+func (j *job) dropStale() int {
+	var left []string
+	n := 0
+	for i, f := range j.m.Stale {
+		if j.check(j.ctx) != nil { // a stop gets 3 s, not a batch of deletes
+			left = append(left, j.m.Stale[i:]...)
+			break
+		}
+		if j.recorded[strings.ToLower(f)] > 0 {
+			continue
+		}
+		_, lerr := os.Lstat(f) // one already gone isn't counted again
+		if err := j.remove(f, false); err != nil {
+			j.logf("sync: remove %s: %v", f, err)
+			left = append(left, f)
+			continue
+		}
+		j.op("remove", f)
+		if lerr == nil {
+			n++
+		}
 	}
+	if len(left) < len(j.m.Stale) && j.ctx.Err() == nil {
+		j.unsaved++
+	}
+	j.m.Stale = left
+	return n
+}
+
+// renames moves songs whose path changed, in batches of renameBatch: a batch's targets are saved
+// (Entry.Moving) before its files move, and its new paths go with the next save, so a crash or the
+// card going part-way leaves every moved file recorded (LoadManifest settles it) (M13).
+func (j *job) renames() error {
 	for rest := j.p.Rename; len(rest) > 0; {
 		if err := j.check(j.ctx); err != nil {
 			return err
@@ -659,21 +723,19 @@ func (j *job) renames() error {
 			}
 			e := j.m.Songs[mv.ID]
 			e.Moving = ""
-			if err := j.rename(e.Path, mv.To, !recorded[strings.ToLower(mv.To)]); err != nil {
+			// a rename never replaces a song's file; j.recorded kept in step tells dropStale too (I4)
+			if err := j.rename(e.Path, mv.To, j.recorded[strings.ToLower(mv.To)] == 0); err != nil {
 				if !j.CardMounted() {
 					return q2.ErrNoCard
 				}
 				j.fail(mv.ID, filepath.Base(mv.To), "rename", err)
 				continue
 			}
-			delete(recorded, strings.ToLower(e.Path))
-			recorded[strings.ToLower(mv.To)] = true
+			j.recorded[strings.ToLower(e.Path)]--
+			j.recorded[strings.ToLower(mv.To)]++
 			e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
 			j.count(&j.renamedN)
 			j.unsaved++
-		}
-		if err := j.save(); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -687,95 +749,101 @@ func (j *job) downloads() error {
 	covers := map[string]bool{} // album folders whose cover was tried this run
 	streak := 0                 // songs failed in a row for the same reason as the whole sync would (I3)
 	once := false               // the song before failed for its own cause: one try for this one
-	for _, w := range append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...) {
-		id := w.Song.ID
-		if e := j.m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) &&
-			(w.Quality != "original" || e.SrcSize == w.Song.Size) { // a re-rip has the same path, quality and tags
-			j.finished(w)
-			continue
-		}
-		if err := j.check(j.ctx); err != nil {
-			return err
-		}
-		n, cached := j.fromCache(w)
-		var err error
-		if !cached {
-			if err := j.space(w); err != nil {
+	// replaces first: one that shrinks a song (FLAC to Opus) frees room the adds may need
+	for _, ws := range [][]plan.Want{j.p.Replace, j.p.Add} {
+		for _, w := range ws {
+			id := w.Song.ID
+			if e := j.m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) &&
+				(w.Quality != "original" || e.SrcSize == w.Song.Size) { // a re-rip has the same path, quality and tags
+				j.finished(w)
+				continue
+			}
+			if err := j.check(j.ctx); err != nil {
 				return err
 			}
-			j.mu.Lock()
-			j.current = w.Song.Title
-			if w.Song.Artist != "" {
-				j.current = w.Song.Artist + " – " + w.Song.Title
-			}
-			j.mu.Unlock()
-			if once {
-				n, err = j.fetch(j.ctx, w)
-			}
-			// A stop reason (Wi-Fi gone, the card) gets the retries that ride it out, as any song.
-			if !once || err != nil && j.ctx.Err() == nil && StopReason(err) != nil {
-				n, err = j.fetchTries(j.ctx, w)
-			}
-		}
-		if err != nil {
-			if j.ctx.Err() != nil {
-				return j.ctx.Err()
-			}
-			if !j.CardMounted() {
-				return q2.ErrNoCard
-			}
-			j.fail(id, w.Song.Title, "download", err)
-			j.failed++
-			switch stop := StopReason(err); {
-			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
-				return stop
-			case stop == nil:
-				streak, once = 0, true
-			default: // a connection or the card can come back: two songs in a row
-				once = false
-				j.hold = true
-				if streak++; streak >= 2 {
-					return stop
+			n, cached := j.fromCache(w)
+			var err error
+			if !cached {
+				if err := j.space(w); err != nil {
+					return err
+				}
+				j.mu.Lock()
+				j.current = w.Song.Title
+				if w.Song.Artist != "" {
+					j.current = w.Song.Artist + " – " + w.Song.Title
+				}
+				j.mu.Unlock()
+				if once {
+					n, err = j.fetch(j.ctx, w)
+				}
+				// A stop reason (Wi-Fi gone, the card) gets the retries that ride it out, as any song.
+				if !once || err != nil && j.ctx.Err() == nil && StopReason(err) != nil {
+					n, err = j.fetchTries(j.ctx, w)
 				}
 			}
-			continue
-		}
-		streak, once = 0, false
-		old := j.m.Songs[id]
-		e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
-			Meta: library.MetaKey(w.Song, w.Quality)}
-		if w.Quality == "original" {
-			e.SrcSize = w.Song.Size
-		}
-		j.m.Songs[id] = e
-		j.unsaved++
-		if old != nil {
-			j.recorded[strings.ToLower(old.Path)]--
-		}
-		j.recorded[strings.ToLower(e.Path)]++
-		switch {
-		case old != nil && !oneFile(old.Path, w.Path):
-			if err := j.save(); err != nil { // the new file recorded before the old one goes
-				return err
+			if err != nil {
+				if j.ctx.Err() != nil {
+					return j.ctx.Err()
+				}
+				if !j.CardMounted() {
+					return q2.ErrNoCard
+				}
+				j.fail(id, w.Song.Title, "download", err)
+				j.failed++
+				switch stop := StopReason(err); {
+				case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
+					return stop
+				case stop == nil:
+					streak, once = 0, true
+				default: // a connection or the card can come back: two songs in a row
+					once = false
+					j.hold = true
+					if streak++; streak >= 2 {
+						return stop
+					}
+				}
+				continue
 			}
-			if j.recorded[strings.ToLower(old.Path)] == 0 { // another song recorded in it keeps it (removals' rule)
-				j.remove(old.Path)
+			streak, once = 0, false
+			old := j.m.Songs[id]
+			e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
+				Meta: library.MetaKey(w.Song, w.Quality)}
+			if w.Quality == "original" {
+				e.SrcSize = w.Song.Size
 			}
-		case j.unsaved >= saveEvery || j.Now().Sub(j.saved) >= saveAfter:
-			if err := j.save(); err != nil {
-				return err
+			j.m.Songs[id] = e
+			j.unsaved++
+			if old != nil {
+				j.recorded[strings.ToLower(old.Path)]--
 			}
+			j.recorded[strings.ToLower(e.Path)]++
+			// A replaced song's old file goes after the next save, which records the new one, not after a
+			// save of its own: a Sync Quality change replaces every song, and each save writes the whole
+			// manifest (audit 2026-11-16 #6). Until then the manifest names the old file, still there (I4).
+			// A crash first leaves the new file unrecorded: the next sync replaces the song again, its
+			// download or cached copy renamed over that file (wanted at its old quality again, the song
+			// stays, and the file is left unrecorded). Another song recorded in the old file keeps it
+			// (removals' rule).
+			if old != nil && !oneFile(old.Path, w.Path) && j.recorded[strings.ToLower(old.Path)] == 0 {
+				library.Remove(j.root, library.LyricsPath(old.Path)) // its .lrc now: Song.flac's is Song.opus's too
+				j.m.Stale = append(j.m.Stale, old.Path)
+			}
+			if j.unsaved >= max(saveEvery, len(j.m.Songs)/saveShare) || j.Now().Sub(j.saved) >= saveAfter {
+				if err := j.save(); err != nil {
+					return err
+				}
+			}
+			if _, err := os.Stat(library.LyricsPath(w.Path)); !cached || err != nil { // a cached song brought its own
+				WriteLyrics(j.ctx, j.src, w.Song, w.Path, j.logf) // after the old file's .lrc went
+			}
+			if dir := filepath.Dir(w.Path); !covers[dir] {
+				covers[dir] = true
+				j.cover(j.ctx, w)
+			}
+			j.arrived++
+			j.finished(w)
+			j.op("download", w.Path)
 		}
-		if _, err := os.Stat(library.LyricsPath(w.Path)); !cached || err != nil { // a cached song brought its own
-			WriteLyrics(j.ctx, j.src, w.Song, w.Path, j.logf) // after the old file's removal, which takes its .lrc
-		}
-		if dir := filepath.Dir(w.Path); !covers[dir] {
-			covers[dir] = true
-			j.cover(j.ctx, w)
-		}
-		j.arrived++
-		j.finished(w)
-		j.op("download", w.Path)
 	}
 	return nil
 }
@@ -835,13 +903,14 @@ func (j *job) playlists() error {
 	// Every file is recorded, in one save, before any is written: the guard writes only recorded
 	// files, and a stop part-way leaves at worst a recorded file not written yet, never a written
 	// one a later sync takes for the user's own (and so writes a "(Jellyfin)" copy beside).
+	named := false
 	for _, name := range names {
 		if m.Playlists[name] == "" {
 			m.Playlists[name] = j.freePlaylistFile(m, name, false)
-			j.unsaved++
+			named = true
 		}
 	}
-	if j.unsaved > 0 {
+	if named {
 		if err := j.save(); err != nil {
 			return err
 		}
@@ -878,7 +947,8 @@ func (j *job) playlists() error {
 		}
 	}
 	m.PlaylistsStale = false
-	return j.save()
+	j.unsaved++ // saved by work's last save, or on a stop by its deferred one
+	return nil
 }
 
 // toRemove counts the songs of the plan's Remove still on the card: a Retry Failed or Resume runs
@@ -895,9 +965,10 @@ func (j *job) toRemove() int {
 
 // removals deletes the songs no longer selected, once: last, or earlier when the card is short of
 // space (space), and only while failed songs don't hold them (I2). Each batch leaves the manifest
-// before its files go (I4).
+// with its files listed in m.Stale, in one save, before they go: the save's dropStale deletes them,
+// and a stop or a pulled card part-way leaves the rest listed on the card for the next sync (I4).
 func (j *job) removals() error {
-	if j.removed {
+	if j.removed || len(j.p.Remove) == 0 {
 		return nil
 	}
 	if j.held() { // I2: what was asked for didn't come, so what it replaces stays; Retry Failed or the next Sync removes
@@ -907,67 +978,46 @@ func (j *job) removals() error {
 		return nil
 	}
 	j.removed = true
-	m := j.m
-	keep := map[string]bool{} // files other songs stay in (one file under two names, from older builds)
-	gone := map[string]bool{}
-	for _, e := range j.p.Remove {
-		gone[e.ID] = true
-	}
-	for id, e := range m.Songs {
-		if !gone[id] {
-			keep[strings.ToLower(e.Path)] = true
-		}
-	}
 	for rest := j.p.Remove; len(rest) > 0; {
 		if err := j.check(j.ctx); err != nil {
 			return err
 		}
 		batch := rest[:min(len(rest), removeBatch)]
 		rest = rest[len(batch):]
-		var es []*library.Entry
+		n := 0
 		for _, pe := range batch {
-			if e := m.Songs[pe.ID]; e != nil {
-				es = append(es, e)
-				delete(m.Songs, pe.ID)
-				j.recorded[strings.ToLower(e.Path)]--
+			e := j.m.Songs[pe.ID]
+			if e == nil {
+				continue // an earlier run removed it
 			}
+			n++
+			delete(j.m.Songs, pe.ID)
+			f := strings.ToLower(e.Path)
+			if j.recorded[f]--; j.recorded[f] > 0 {
+				continue // another song recorded in the file keeps it (one file under two names, from older builds)
+			}
+			library.Remove(j.root, library.LyricsPath(e.Path)) // now: dropStale keeps lyrics, and the folder must empty
+			j.m.Stale = append(j.m.Stale, e.Path)
 		}
-		// Dropped from the manifest before the files go: a stop or crash part-way leaves at worst a
-		// file the app forgot, never a song recorded as on the card that is not (I4).
+		if n == 0 {
+			continue
+		}
 		j.unsaved++
 		if err := j.save(); err != nil {
 			return err
 		}
-		for i, e := range es {
-			if err := j.check(j.ctx); err != nil { // a stop gets 3 s, not a batch of deletes
-				for _, e := range es[i:] { // still on the card: recorded again by work's save
-					m.Songs[e.ID] = e
-					j.recorded[strings.ToLower(e.Path)]++
-				}
-				j.unsaved++
-				return err
-			}
-			if keep[strings.ToLower(e.Path)] {
-				continue
-			}
-			if err := j.remove(e.Path); err != nil {
-				j.logf("sync: remove %s: %v", e.ID, err)
-				m.Songs[e.ID] = e // still there: the next sync tries again
-				j.recorded[strings.ToLower(e.Path)]++
-				j.unsaved++
-				continue
-			}
-			j.count(&j.removedN)
-			j.op("remove", e.Path)
-		}
+		j.mu.Lock()
+		j.removedN += n
+		j.mu.Unlock()
 	}
-	return j.save()
+	return nil
 }
 
 const (
-	saveEvery   = 20              // downloads recorded per manifest save (M18) ...
+	saveEvery   = 20              // downloads recorded per manifest save (M18), at least ...
+	saveShare   = 200             // ... 1 in this many of the songs recorded: each save writes them all ...
 	saveAfter   = 3 * time.Minute // ... or this long since the last (audit B7: fewer big card writes)
-	removeBatch = 1000            // removals per manifest save: a crash forgets at most this many files (I4)
+	removeBatch = 1000            // removals per manifest save, their files listed in Stale (I4)
 	renameBatch = 1000            // renames per manifest save: Entry.Moving makes any batch crash-safe
 )
 
@@ -1037,12 +1087,16 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase boo
 	return f
 }
 
-// remove deletes path through the guard and, when its album folder is left holding only
-// cover.jpg and a replaced plan's leftover .part and .part.key files, those too, so the guard
-// prunes the folder.
+// remove deletes path through the guard, with its .lrc when lyrics, and, when its album folder is
+// left holding only cover.jpg and a replaced plan's leftover .part and .part.key files, those too,
+// so the guard prunes the folder.
 // ponytail: a leftover of a song later in this run, paused earlier, is fetched again from the start.
-func (r *Runner) remove(path string) error {
-	if err := library.Remove(r.root, path); err != nil {
+func (r *Runner) remove(path string, lyrics bool) error {
+	rm := library.Remove
+	if !lyrics {
+		rm = library.RemoveKeepLyrics
+	}
+	if err := rm(r.root, path); err != nil {
 		return err
 	}
 	dir := filepath.Dir(path)
@@ -1115,7 +1169,7 @@ func (r *Runner) rename(from, to string, orphan bool) error {
 		os.Rename(lf, lt) // its lyrics, when it has any, move with it
 	}
 	r.carryCover(filepath.Dir(from), filepath.Dir(to))
-	return r.remove(from) // the file is gone already; this prunes the folders it left empty
+	return r.remove(from, true) // the file is gone already; this prunes the folders it left empty
 }
 
 // carryCover copies the album's cover.jpg into a song's new folder when that has none: the old

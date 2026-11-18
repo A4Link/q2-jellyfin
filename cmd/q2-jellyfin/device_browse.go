@@ -202,7 +202,8 @@ func (v view) song(s jellyfin.Song, listKey string, i int) q2spot.Row {
 }
 
 // syncNowRow is the shortcut to Sync, present while the card differs from the selection: a chosen
-// item not all on the Q2 or at another quality, or one taken out whose songs are still there (M35).
+// item not all on the Q2 or at another quality, one taken out whose songs are still there (M35), or
+// files an earlier sync left listed to delete (Stale).
 // Cheap: read from the selection, manifest and cached songs, never the network.
 func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 	v := d.view()
@@ -216,6 +217,9 @@ func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 		if !v.chosen(k) {
 			n++
 		}
+	}
+	if len(v.m.Stale) > 0 {
+		n++
 	}
 	if n == 0 {
 		return q2spot.Row{}, false
