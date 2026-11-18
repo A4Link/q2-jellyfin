@@ -19,7 +19,8 @@ import (
 // Storage → Playback Cache, Off or 512 MB to 8 GB, 2 GB by default) and the least recently played
 // go first. It is separate from Sync: synced songs are the library's and never evicted; cached
 // ones are temporary, live in a hidden folder the Q2's library doesn't list, and give way to a
-// sync that needs their room.
+// sync that needs their room. With Q2 Pod's "urls" (1.7.3) the firmware streams songs itself and
+// nothing fills the cache; songs cached before still serve a sync (forSync).
 //
 // Moving a song in or out is a rename on the card, so it costs no copy.
 
@@ -142,14 +143,15 @@ func (s *streamer) fetched(path string, k cacheKey) {
 	s.kept[path] = k
 }
 
-// retire is a played song leaving the stream folder: kept in the cache when it was fetched whole
-// and the cache is on, else deleted.
+// retire is a played song leaving the stream folder: kept in the cache when it was fetched whole,
+// the cache is on and the card keeps Space to Keep Free with it there, else deleted. Keeping it is
+// a rename: the card's free space stays as it is.
 func (s *streamer) retire(path string) {
 	s.keptMu.Lock()
 	k, ok := s.kept[path]
 	delete(s.kept, path)
 	s.keptMu.Unlock()
-	if ok && s.cacheCap() > 0 && exists(path) && os.MkdirAll(s.cacheDir(), 0o755) == nil {
+	if ok && s.cacheCap() > 0 && (s.spare == nil || s.spare() >= 0) && exists(path) && os.MkdirAll(s.cacheDir(), 0o755) == nil {
 		c := s.cachePath(k)
 		if os.Rename(path, c) == nil {
 			os.Rename(library.LyricsPath(path), library.LyricsPath(c)) // its lyrics stay with it

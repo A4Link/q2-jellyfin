@@ -320,3 +320,55 @@ func TestCacheTrimAfterCancel(t *testing.T) {
 	}
 	close(n.block)
 }
+
+// With Q2 Pod's "urls" the firmware streams songs itself and nothing fills the playback cache, so
+// Quality and Storage has no Playback Cache size; on any firmware, Clear Playback Cache shows only
+// while the cache holds songs (on "urls", ones older firmware left). Swipe on or off, the same.
+func TestPlaybackCacheRows(t *testing.T) {
+	for _, c := range []struct {
+		caps string
+		size bool // the Playback Cache size row
+	}{{"sections", true}, {"urls sections", false}} {
+		d := newTestDaemon(t, &nav{}, c.caps, true)
+		p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
+		for _, swipe := range []string{"on", "off"} {
+			rows := func() (size, clear bool) {
+				r := d.do("storage")
+				_, size = find(r, "Playback Cache: ")
+				_, clear = find(r, "Clear Playback Cache")
+				return size, clear
+			}
+			if size, clear := rows(); size != c.size || clear {
+				t.Errorf("%s, swipe %s, empty cache: size row %v, clear row %v", c.caps, swipe, size, clear)
+			}
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, make([]byte, 1000), 0o644)
+			if size, clear := rows(); size != c.size || !clear {
+				t.Errorf("%s, swipe %s, songs cached: size row %v, clear row %v", c.caps, swipe, size, clear)
+			}
+			os.Remove(p)
+			d.do("swipe")
+		}
+	}
+}
+
+// A played song stays in the cache only while the card keeps Space to Keep Free (512 MB by
+// default) with it there; with less, it is deleted, as with the cache off.
+func TestCacheKeepsSpaceToKeepFree(t *testing.T) {
+	for _, c := range []struct {
+		free int64
+		kept bool
+	}{{512e6, true}, {512e6 - 1, false}} {
+		d := newTestDaemon(t, &nav{}, "", true)
+		d.free = func(string) int64 { return c.free }
+		p := filepath.Join(d.card, ".jellyfin", "stream", "0000 - T0 [s0].flac")
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, make([]byte, 1000), 0o644)
+		k := cacheKey{"s0", "original", "flac"}
+		d.stream.fetched(p, k)
+		d.stream.retire(p)
+		if got := exists(d.stream.cachePath(k)); got != c.kept || exists(p) {
+			t.Errorf("free %d: cached %v, left in the stream folder %v", c.free, got, exists(p))
+		}
+	}
+}

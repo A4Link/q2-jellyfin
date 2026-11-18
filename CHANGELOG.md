@@ -50,6 +50,13 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Changed
 
 - **Play asks the server for fewer lyrics on Q2 Pod 1.7.3 and later:** a Play fetches the lyrics of the song started and the 19 after it, not of every song in the queue (up to 500, one after another). A song further on has its lyrics once a later Play reaches it. Past 100 songs' lyrics kept between Plays, only the oldest are dropped, not all of them, so a big queue no longer fetches them all again at every Play. The app keeps at most 64 KB of each song's lyrics, the most the Q2 shows.
+### Changed
+
+- **Quality and Storage no longer shows Playback Cache on Q2 Pod 1.7.3 and later:** the Q2 streams songs itself there and nothing is added to the cache. On any Q2 Pod, **Clear Playback Cache** shows only while the cache holds songs; on 1.7.3 and later that is songs cached under older firmware, which a sync still takes instead of downloading them again.
+
+### Fixed
+
+- **The playback cache keeps Space to Keep Free:** on Q2 Pod before 1.7.3, a played song is kept in the cache only if the card still has Space to Keep Free with it there; otherwise it is deleted, as with the cache off. A 2 to 8 GB cache could fill the card below that setting.
 
 ## [0.8.0] - 2026-11-16
 

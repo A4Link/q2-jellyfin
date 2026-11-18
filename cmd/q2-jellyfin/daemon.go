@@ -211,6 +211,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.reencode = func() bool { return d.settings().reencode() }
 	d.stream.cacheLimit = func() int64 { return cacheBytes(d.settings().PlaybackCache) }
+	d.stream.spare = func() int64 { return d.free(d.card) - keepFreeBytes(d.settings().KeepFree) }
 	d.stream.moving = d.runner.Moving
 	d.stream.started = d.streamStarted
 	d.stream.queued = d.nowQueued

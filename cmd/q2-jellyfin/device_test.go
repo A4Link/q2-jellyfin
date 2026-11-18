@@ -600,9 +600,12 @@ func TestRootSignedIn(t *testing.T) {
 }
 
 // Quality and Storage holds, in order, what was in Settings: the two qualities, then the card's
-// space and the playback cache.
+// space and the playback cache (Clear Playback Cache while it holds songs).
 func TestQualityAndStoragePage(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
+	p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, make([]byte, 1000), 0o644)
 	r := d.do("storage")
 	want := []string{"Sync Quality: Original", "Streaming Quality: Original", "Always Re-encode: Off",
 		"Space to Keep Free: 512 MB", "Playback Cache: 2 GB", "Clear Playback Cache"}
