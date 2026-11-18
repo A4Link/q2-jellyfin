@@ -72,8 +72,12 @@ func (d *daemon) syncSources() []q2spot.Row {
 			n++
 		}
 	}
+	pl := plural(n, "playlist") + " in Sync"
+	if sel.Has(selection.KindLibrary, "all") { // as the rows of Choose Playlists say
+		pl = "Included via Entire Library"
+	}
 	return []q2spot.Row{jobsRow, list("onq2", "On This Q2", d.onQ2Subtitle(sel, err), ""), fav,
-		list("syncpl", "Choose Playlists", plural(n, "playlist")+" in Sync", ""), d.libraryRow(sel)}
+		list("syncpl", "Choose Playlists", pl, ""), d.libraryRow(sel)}
 }
 
 // syncFavourites is Sync Favourites: Favourites joins Sync (at Sync Quality) if it isn't there,

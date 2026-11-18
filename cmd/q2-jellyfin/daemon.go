@@ -152,6 +152,7 @@ type daemon struct {
 	windowAt           map[string]int    // a paged section's window, from its last page asked for (sectionCursor)
 	trimTimer          *time.Timer
 	gen                int // bumped by every selection change
+	runGen             int // gen of the preview the last Start Sync ran: a later gen waits for Check Again
 	preview            *preview
 	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
 	lib                *libJob
