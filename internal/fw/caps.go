@@ -5,23 +5,14 @@ import (
 	"strings"
 )
 
-// Caps represents capabilities from the firmware.
+// Caps represents capabilities from the firmware. The app needs Q2 Pod 1.7.3 or later, so the
+// words every such firmware has (playlist, progress, library, sections, art, window) are not read:
+// the app counts on them.
 type Caps struct {
-	Playlist bool
-	Progress bool
-	Library  bool
-	// Sections: the first page may be a set of sections, shown one at a time and swiped between
-	// (q2-pod patch/addon.c sec_take).
-	Sections bool
-	// Art: a row's cover, a JPEG at /tmp/q2-<id>.art/<key>.jpg, draws the list as Tidal's
-	// (Q2 Pod 1.7.3, patch/addon.c art_rows).
-	Art bool
 	// URLs: .play may name a queue of stream URLs (Q2URLS/1), which the firmware plays through
-	// stock's Tidal player: it streams, waits for slow data and seeks itself (Q2 Pod 1.7.3).
+	// stock's Tidal player: it streams, waits for slow data and seeks itself (Q2 Pod 1.7.3). Without
+	// it the firmware is older than 1.7.3, and the app shows only a page asking for an update (main.go).
 	URLs bool
-	// Window: a row of kind "page" shows its list from the cursor in its context, in the list's
-	// place (Q2 Pod 1.7.3, patch/addon.c page_to), so a long list is shown a window at a time.
-	Window bool
 	// Sort: a list's row of kind "sort" right after its search row is a sort icon in the title bar,
 	// left of the search icon; elsewhere it is a list row (Q2 Pod, patch/addon.c take_find).
 	Sort bool
@@ -50,20 +41,8 @@ func ReadCaps(path string) Caps {
 	caps := Caps{}
 	for _, word := range words {
 		switch word {
-		case "playlist":
-			caps.Playlist = true
-		case "progress":
-			caps.Progress = true
-		case "library":
-			caps.Library = true
-		case "sections":
-			caps.Sections = true
-		case "art":
-			caps.Art = true
 		case "urls":
 			caps.URLs = true
-		case "window":
-			caps.Window = true
 		case "sort":
 			caps.Sort = true
 		case "field":

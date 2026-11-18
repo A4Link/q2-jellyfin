@@ -300,33 +300,19 @@ func TestReportsSignOut(t *testing.T) {
 	}
 }
 
-// The stream says when a song it fetched starts (from .playing); a synced song in its queue is
-// left to Q2 Pod's log. Of a URL queue it says only the song pressed, unless that one is synced.
+// Of a URL queue without "now" the stream says only the song pressed starts, unless that one is
+// synced: a synced song is left to Q2 Pod's log.
 func TestStreamStartedHook(t *testing.T) {
 	var mu sync.Mutex
 	var started []string
 	hook := func(sg jellyfin.Song) { mu.Lock(); started = append(started, sg.ID); mu.Unlock() }
 	took := func() []string { mu.Lock(); defer mu.Unlock(); s := started; started = nil; return s }
-	e := newEnv(t, fw.Caps{Playlist: true})
-	e.s.started = hook
-	ss := songs(3, "flac")
-	e.man.Songs["s1"] = &library.Entry{ID: "s1", Path: e.root + "/Jellyfin/s1.flac"}
-	os.MkdirAll(e.root+"/Jellyfin", 0o755)
-	os.WriteFile(e.root+"/Jellyfin/s1.flac", []byte("x"), 0o644)
-	e.s.start(ss, 0)
-	for _, p := range []string{e.stream(0, "flac"), e.root + "/Jellyfin/s1.flac", e.stream(2, "flac")} {
-		until(t, p, func() bool { return exists(p) })
-		os.WriteFile(e.playing, []byte(p), 0o644)
-		time.Sleep(50 * time.Millisecond)
-	}
-	e.s.stop()
-	if got := took(); !slices.Equal(got, []string{"s0", "s2"}) {
-		t.Fatalf("%q", got)
-	}
-
-	u := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	u := newEnv(t, fw.Caps{URLs: true})
 	u.s.src, u.s.started = urlSrc{u.src}, hook
-	u.s.manifest = func() *library.Manifest { return e.man }
+	ss := songs(3, "flac")
+	u.man.Songs["s1"] = &library.Entry{ID: "s1", Path: u.root + "/Jellyfin/s1.flac"}
+	os.MkdirAll(u.root+"/Jellyfin", 0o755)
+	os.WriteFile(u.root+"/Jellyfin/s1.flac", []byte("x"), 0o644)
 	u.s.start(ss, 1) // synced: Q2 Pod's log has it, if anything
 	u.s.start(ss, 2)
 	if got := took(); !slices.Equal(got, []string{"s2"}) {

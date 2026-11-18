@@ -26,7 +26,7 @@ func (urlSrc) PlayerCoverURL(id string) string { return playerCoverURL(id) }
 // With "urls", Play writes the Q2URLS/1 queue and names it in .play; nothing downloads; a song on
 // the card stays its card path; tabs in titles become spaces.
 func TestURLQueue(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = urlSrc{e.src}
 	ss := songs(3, "flac")
 	ss[1].Title, ss[1].CoverArt, ss[1].Duration = "Two\tWords", "al9", 61
@@ -53,12 +53,6 @@ func TestURLQueue(t *testing.T) {
 	if want := "http://127.0.0.1:2317/song/s1?q=original\tTwo Words\t\t\thttp://127.0.0.1:2317/cover/al9\t61"; lines[2] != want {
 		t.Errorf("song 1:\n%q\n%q", lines[2], want)
 	}
-	if len(e.src.urls) != 0 {
-		t.Errorf("downloaded %q", e.src.urls)
-	}
-	if e.s.active() {
-		t.Error("a fetch run for a URL queue")
-	}
 	_ = jellyfin.Song{}
 }
 
@@ -66,7 +60,7 @@ func TestURLQueue(t *testing.T) {
 // Always Re-encode transcodes both.
 func TestURLQueueKeepsLossy(t *testing.T) {
 	for _, re := range []bool{false, true} {
-		e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+		e := newEnv(t, fw.Caps{URLs: true})
 		e.s.src = urlSrc{e.src}
 		e.s.quality = func() string { return "opus-128" }
 		e.s.reencode = func() bool { return re }
@@ -99,8 +93,8 @@ func TestURLQueueHearts(t *testing.T) {
 		caps fw.Caps
 		want []string
 	}{
-		{fw.Caps{Playlist: true, URLs: true, Fav: true}, []string{"\t0\ts0\t1", "\t0\ts1\t0", "\t0\ts2\t1"}},
-		{fw.Caps{Playlist: true, URLs: true}, []string{"\t\t0", "\t\t0", "\t\t0"}},
+		{fw.Caps{URLs: true, Fav: true}, []string{"\t0\ts0\t1", "\t0\ts1\t0", "\t0\ts2\t1"}},
+		{fw.Caps{URLs: true}, []string{"\t\t0", "\t\t0", "\t\t0"}},
 	} {
 		e := newEnv(t, c.caps)
 		e.s.src = urlSrc{e.src}
@@ -132,7 +126,7 @@ func (lyricSrc) Lyrics(_ context.Context, id string) (string, error) { return "[
 // A URL queue's songs with server lyrics get <line>.lrc beside the queue for Q2 Pod's Now Playing:
 // the first song's before .play names the queue, the rest after; a new queue starts afresh.
 func TestURLQueueLyrics(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = lyricSrc{urlSrc{e.src}}
 	ss := songs(3, "flac")
 	ss[0].HasLyrics, ss[2].HasLyrics = true, true
@@ -155,7 +149,7 @@ func TestURLQueueLyrics(t *testing.T) {
 // Stopping the stream (Sign Out, the app's exit) removes the URL queue: each of its lines carries
 // the token, and the firmware has read it already.
 func TestURLQueueRemovedOnStop(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = urlSrc{e.src}
 	e.s.start(songs(2, "flac"), 0)
 	if _, err := os.Stat(e.s.urlsFile()); err != nil {
@@ -183,7 +177,7 @@ func (e *env) urlsFile(t *testing.T) []string {
 // A queue started partway into a long list keeps urlsBefore songs before the one started, and
 // start= is its line.
 func TestURLQueueStartsPartway(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = urlSrc{e.src}
 	e.s.start(songs(300, "flac"), 250)
 	lines := e.urlsFile(t)
@@ -208,7 +202,7 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 		{600, 150, 600, 0, 150},   // the ones after fill it: none before
 		{600, 590, 3000, 75, 515}, // ten after, then as many before as fit
 	} {
-		e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+		e := newEnv(t, fw.Caps{URLs: true})
 		e.s.src = lyricSrc{urlSrc{e.src}}
 		ss := songs(c.n, "flac")
 		for i := range ss {
@@ -242,7 +236,7 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 // A field over 1,000 bytes is cut on a character, so the started song's line always fits in
 // urlsMax: a 300 KB title from the server plays instead of crashing Play.
 func TestURLQueueLongFieldCut(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = lyricSrc{urlSrc{e.src}}
 	ss := songs(2, "flac")
 	ss[0].Title, ss[0].HasLyrics = strings.Repeat("€", 100_000), true
@@ -320,7 +314,7 @@ func neverWithin(t *testing.T, what string, d time.Duration, cond func() bool) {
 // A second Play of the same songs asks each song's lyrics once in all; past 100 songs' lyrics kept,
 // the next Play keeps 100; the prefetch stops after two unreachable errors.
 func TestURLQueueLyricsCapAndUnreachableStop(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	src := &gatedLyrics{urlSrc: urlSrc{e.src}}
 	e.s.src = src
 	dir := lyricsDirOf(e)
@@ -344,7 +338,7 @@ func TestURLQueueLyricsCapAndUnreachableStop(t *testing.T) {
 		t.Errorf("%d songs' lyrics kept, want %d and the list's 3", len(kept), lyricsKeep)
 	}
 
-	down := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	down := newEnv(t, fw.Caps{URLs: true})
 	unreachable := &gatedLyrics{urlSrc: urlSrc{down.src}, fail: fmt.Errorf("lyrics: %w", jellyfin.ErrUnreachable)}
 	down.s.src = unreachable
 	down.s.start(lyricSongs("u", 10), 0)
@@ -358,7 +352,7 @@ func TestURLQueueLyricsCapAndUnreachableStop(t *testing.T) {
 // (now.go). Without "now" the header has no field and the song pressed is reported.
 func TestURLQueueNow(t *testing.T) {
 	for _, now := range []bool{false, true} {
-		e := newEnv(t, fw.Caps{Playlist: true, URLs: true, Now: now})
+		e := newEnv(t, fw.Caps{URLs: true, Now: now})
 		e.s.src = urlSrc{e.src}
 		var seq string
 		var ids, started []string
@@ -385,7 +379,7 @@ func TestURLQueueNow(t *testing.T) {
 // A Play asks the server for the lyrics of 20 lines from the song started on, not of the whole
 // queue (up to 500 songs, one request after another).
 func TestURLQueueLyricsWindow(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	src := &gatedLyrics{urlSrc: urlSrc{e.src}}
 	e.s.src = src
 	dir := lyricsDirOf(e)
@@ -426,7 +420,7 @@ func TestKeptLyricsTrimOldestFirst(t *testing.T) {
 // The first song's lyrics come before .play names the queue, as Q2 Pod reads a song's .lrc once,
 // as it loads; a server slow to give them holds Play back lyricsWait at most.
 func TestURLQueueFirstLyricsBounded(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	e.s.src = &gatedLyrics{urlSrc: urlSrc{e.src}, gates: map[string]chan struct{}{"s0": make(chan struct{})}}
 	t0 := time.Now()
 	e.s.start(lyricSongs("s", 3), 0)

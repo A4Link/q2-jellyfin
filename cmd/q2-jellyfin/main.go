@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"syscall"
+	"time"
 
+	"github.com/A4Link/q2-jellyfin/internal/fw"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
+	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
 const version = "q2-v0.8.0"
@@ -28,15 +31,33 @@ func main() {
 	q2.SetupLog("q2-jellyfin")
 	q2.Card = *card
 	log.Print("start ", version)
-	d := newDaemon(*dir, *card, *tmp)
-	d.log.Printf("start %s", version)
-	if d.caps.URLs {
-		d.startRelay(relayAddr) // at once, and before close can run (sig): the firmware's player streams through it
-	}
-	d.signInFromFile() // C4, before the first request; without Wi-Fi yet, the root takes it later
 	sock := filepath.Join(*tmp, "q2-jellyfin.browse.sock")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	if !fw.ReadCaps(filepath.Join(*tmp, "q2-addon.caps")).URLs { // before anything else: nothing else runs there
+		go func() { <-sig; os.Remove(sock); os.Exit(0) }()
+		log.Fatal(serveOld(sock))
+	}
+	d := newDaemon(*dir, *card, *tmp)
+	d.log.Printf("start %s", version)
+	d.startRelay(relayAddr) // at once, and before close can run (sig): the firmware's player streams through it
+	d.signInFromFile()      // C4, before the first request; without Wi-Fi yet, the root takes it later
 	go func() { <-sig; d.close(sock); os.Exit(0) }()
 	log.Fatal(d.serve(sock))
 }
+
+// serveOld is the app on Q2 Pod before 1.7.3 (no "urls" in its caps): it streams only through Q2
+// Pod's own player, so there it signs in, browses, syncs and streams nothing. Every request gets
+// one page asking for an update, a plain info row, which any Q2 Pod with card apps draws. It exits
+// 0 once no request came for idleAfter.
+func serveOld(sock string) error {
+	page := q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: oldFirmware}}}
+	idle := time.AfterFunc(idleAfter, func() { os.Remove(sock); os.Exit(0) })
+	return q2spot.Serve(sock, func(q2spot.Request) q2spot.Reply {
+		idle.Reset(idleAfter)
+		return page
+	})
+}
+
+// oldFirmware is the update page's one row (U45).
+const oldFirmware = "Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin."

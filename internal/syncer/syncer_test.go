@@ -147,7 +147,6 @@ func setup(t *testing.T) (*fake, *Runner, string) {
 	r := New(root, c, nil)
 	r.Backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	r.CardMounted = func() bool { return true }
-	r.Net = NewNetSlot()
 	return f, r, root
 }
 
@@ -557,29 +556,6 @@ func TestCancelKeepsFinished(t *testing.T) {
 	}
 }
 
-func TestNetSlotPriority(t *testing.T) {
-	s := NewNetSlot()
-	ctx := context.Background()
-	s.Acquire(ctx, false)
-	got := make(chan string, 2)
-	go func() { s.Acquire(ctx, false); got <- "normal"; s.Release() }()
-	time.Sleep(20 * time.Millisecond)
-	go func() { s.Acquire(ctx, true); got <- "prio"; s.Release() }()
-	time.Sleep(20 * time.Millisecond)
-	cctx, cancel := context.WithCancel(ctx)
-	cancel()
-	if s.Acquire(cctx, false) == nil {
-		t.Fatal("acquired with a cancelled context while held")
-	}
-	s.Release()
-	if a, b := <-got, <-got; a != "prio" || b != "normal" {
-		t.Fatal(a, b)
-	}
-	if err := s.Acquire(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRunFullSizePartRecovers(t *testing.T) {
 	f, r, root := setup(t)
 	a, b := want(root, "a", "original"), want(root, "bb", "original")
@@ -601,40 +577,6 @@ func TestRunFullSizePartRecovers(t *testing.T) {
 		t.Fatalf("416 not recovered in one try: %q", rb)
 	}
 	noParts(t, root)
-}
-
-func TestStreamerPreemptsMidFile(t *testing.T) {
-	f, r, root := setup(t)
-	big := want(root, "big", "original")
-	f.slow["big"] = true
-	r.Start(plan.Plan{Add: []plan.Want{big}})
-	for i := 0; r.Snapshot().BytesDone == 0; i++ {
-		if i > 1000 {
-			t.Fatal("download never started")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := r.Net.Acquire(ctx, true); err != nil {
-		t.Fatal(err)
-	}
-	s := r.Snapshot()
-	if s.State != "running" || s.BytesDone >= s.BytesTotal {
-		t.Fatalf("streamer served only after the file: %+v", s)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if b := r.Snapshot().BytesDone; b != s.BytesDone {
-		t.Fatal("download kept going while the streamer held the slot", b, s.BytesDone)
-	}
-	r.Net.Release()
-	if s := wait(t, r); s.State != "done" {
-		t.Fatalf("%+v", s)
-	}
-	sameFile(t, big.Path, "big")
-	if _, rg := f.seen("big"); len(rg) != 1 {
-		t.Fatalf("download restarted: %q", rg)
-	}
 }
 
 func TestRestartResumes(t *testing.T) {
@@ -659,7 +601,7 @@ func TestRestartResumes(t *testing.T) {
 	}
 
 	rb := New(root, ra.src, nil)
-	rb.Backoff, rb.CardMounted, rb.Net = ra.Backoff, ra.CardMounted, NewNetSlot()
+	rb.Backoff, rb.CardMounted = ra.Backoff, ra.CardMounted
 	if err := rb.Start(p); err != nil {
 		t.Fatal(err)
 	}
@@ -1047,7 +989,7 @@ func TestCaseInsensitiveCard(t *testing.T) {
 	}
 	_, r0, _ := setup(t)
 	r := New(root, r0.src, nil)
-	r.Backoff, r.CardMounted, r.Net = r0.Backoff, r0.CardMounted, NewNetSlot()
+	r.Backoff, r.CardMounted = r0.Backoff, r0.CardMounted
 	mk := func(id, artist, q string) jellyfin.Song {
 		return jellyfin.Song{ID: id, Title: "T" + id, Album: "Alb", AlbumArtist: artist, Year: 2000, Track: 1, Suffix: "flac", Size: int64(len(data(id)))}
 	}
@@ -1318,7 +1260,7 @@ func TestOfflinePauses(t *testing.T) {
 	srv.Close()
 	root := t.TempDir()
 	r := New(root, c, nil)
-	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	r.Backoff, r.CardMounted = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }
 	var tries atomic.Int32
 	r.onOp = func(op, _ string) {
 		if op == "try" {
@@ -2010,7 +1952,6 @@ func TestCoverStreamed(t *testing.T) {
 			var read int64
 			body := func() (io.Reader, int64) { return &counted{io.LimitReader(zeros{}, maxCover+1), &read}, n }
 			r := New(root, crafted{body}, nil)
-			r.Net = NewNetSlot()
 			w := want(root, "a", "original")
 			w.Song.CoverArt = "c"
 			os.MkdirAll(filepath.Dir(w.Path), 0o755)
@@ -2090,7 +2031,7 @@ func (f *refusing) Get(context.Context, string, int64) (*http.Response, error) {
 func TestRefusedStopsAtOnce(t *testing.T) {
 	src, root := &refusing{}, t.TempDir()
 	r := New(root, src, nil)
-	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	r.Backoff, r.CardMounted = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }
 	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")}})
 	s := wait(t, r)
 	var ae *jellyfin.APIError
@@ -2366,7 +2307,7 @@ func TestBodyBounds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			r := New(root, crafted{body}, nil)
-			r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond}, func() bool { return true }, NewNetSlot()
+			r.Backoff, r.CardMounted = []time.Duration{time.Millisecond}, func() bool { return true }
 			w := want(root, "a", "original")
 			w.Bytes = 1000
 			r.Start(plan.Plan{Add: []plan.Want{w}})
@@ -2421,7 +2362,7 @@ func TestOggTranscodeEnds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			r := New(root, crafted{func() (io.Reader, int64) { return bytes.NewReader(c.b), c.n }}, nil)
-			r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond}, func() bool { return true }, NewNetSlot()
+			r.Backoff, r.CardMounted = []time.Duration{time.Millisecond}, func() bool { return true }
 			w := want(root, "a", c.q)
 			w.Bytes = cmp.Or(c.size, int64(len(c.b)))
 			r.Start(plan.Plan{Add: []plan.Want{w}})
@@ -2644,43 +2585,6 @@ func spaceLowHeld(t *testing.T, status map[string]int, retry bool) {
 	}
 	if _, err := os.Stat(gone.Path); err != nil {
 		t.Fatalf("removed though a song failed: %v", err)
-	}
-}
-
-// FromCache: a song it has needs no download, no room, and leaves no .part an earlier try left; a
-// song it hasn't is downloaded as before.
-func TestRunTakesFromCache(t *testing.T) {
-	f, r, root := setup(t)
-	a, b := want(root, "a", "original"), want(root, "bb", "original")
-	os.MkdirAll(filepath.Dir(a.Path), 0o755)
-	os.WriteFile(a.Path+".part", []byte("half"), 0o644)
-	os.WriteFile(a.Path+".part.key", []byte("original 1"), 0o644)
-	r.FromCache = func(w plan.Want) (int64, bool) {
-		if w.Song.ID != "a" {
-			return 0, false
-		}
-		return 6, os.WriteFile(w.Path, []byte("cached"), 0o644) == nil
-	}
-	r.Free, r.Reserve = func() int64 { return 1 << 20 }, func() int64 { return 1 << 20 } // no room for a download
-	r.Start(plan.Plan{Add: []plan.Want{a, b}})
-	s := wait(t, r)
-	if hits, _ := f.seen("a"); hits != 0 {
-		t.Fatalf("a downloaded %d times", hits)
-	}
-	if !errors.Is(s.Err, ErrSpaceLow) || s.Done != 1 {
-		t.Fatalf("%+v", s) // b, downloaded, stops at the reserve; a needed no room
-	}
-	if got, _ := os.ReadFile(a.Path); string(got) != "cached" {
-		t.Fatalf("%q", got)
-	}
-	if e := manifest(t, root).Songs["a"]; e == nil || e.Size != 6 {
-		t.Fatalf("%+v", e)
-	}
-	if _, err := os.Stat(a.Path + ".part"); !os.IsNotExist(err) {
-		t.Fatal(".part left")
-	}
-	if _, err := os.Stat(a.Path + ".part.key"); !os.IsNotExist(err) {
-		t.Fatal(".part.key left")
 	}
 }
 

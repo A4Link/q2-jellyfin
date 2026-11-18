@@ -7,31 +7,31 @@ import (
 )
 
 func TestCapsMissing(t *testing.T) {
-	// Missing file should give all false
+	// Missing file should give all false: older firmware than Q2 Pod 1.7.3
 	caps := ReadCaps("/nonexistent/path/to/caps")
-	if caps.Playlist || caps.Progress || caps.Library {
+	if caps != (Caps{}) {
 		t.Errorf("ReadCaps missing file: got %+v, want all false", caps)
 	}
 }
 
 func TestCapsWords(t *testing.T) {
-	// "playlist library\n" should give Playlist and Library, but not Progress
+	// "playlist urls sort\n" should give URLs and Sort, but not Field
 	tmpdir := t.TempDir()
 	capsfile := filepath.Join(tmpdir, "caps")
 
-	if err := os.WriteFile(capsfile, []byte("playlist library\n"), 0o644); err != nil {
+	if err := os.WriteFile(capsfile, []byte("playlist urls sort\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	caps := ReadCaps(capsfile)
-	if !caps.Playlist {
-		t.Errorf("Playlist: got false, want true")
+	if !caps.URLs {
+		t.Errorf("URLs: got false, want true")
 	}
-	if caps.Progress {
-		t.Errorf("Progress: got true, want false")
+	if !caps.Sort {
+		t.Errorf("Sort: got false, want true")
 	}
-	if !caps.Library {
-		t.Errorf("Library: got false, want true")
+	if caps.Field {
+		t.Errorf("Field: got true, want false")
 	}
 }
 
@@ -230,10 +230,11 @@ func TestLibraryDoneExists(t *testing.T) {
 	}
 }
 
-func TestReadCapsSections(t *testing.T) {
+// Q2 Pod 1.7.3's own caps file: urls, and nothing the app reads beside it.
+func TestReadCaps173(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "caps")
-	os.WriteFile(p, []byte("playlist progress pages library goto sleep game sections\n"), 0o644)
-	if c := ReadCaps(p); !c.Sections || !c.Playlist || !c.Library {
+	os.WriteFile(p, []byte("playlist progress pages library goto sleep game audio sections art window urls\n"), 0o644)
+	if c := ReadCaps(p); c != (Caps{URLs: true}) {
 		t.Fatalf("%+v", c)
 	}
 }

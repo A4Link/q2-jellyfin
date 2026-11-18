@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -615,7 +614,7 @@ func TestRootSignedIn(t *testing.T) {
 	}
 	// Settings: Sync, then Quality and Storage, then the device's own settings.
 	s := d.do("settings")
-	want = []string{"Sync", "Quality and Storage", "Swipe Between Sections: Unavailable", "Report Plays to Server: On", "Account", "Version "}
+	want = []string{"Sync", "Quality and Storage", "Swipe Between Sections: On", "Report Plays to Server: On", "Account", "Version "}
 	if got := titles(s); len(got) != len(want) {
 		t.Fatalf("settings %q", got)
 	}
@@ -639,7 +638,7 @@ func TestRootSignedIn(t *testing.T) {
 }
 
 // Quality and Storage holds, in order, what was in Settings: the two qualities, then the card's
-// space and the playback cache (Clear Playback Cache while it holds songs).
+// space, and Clear Playback Cache while the cache holds songs.
 func TestQualityAndStoragePage(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	p := filepath.Join(d.card, ".jellyfin", "cache", "s-original.flac")
@@ -647,11 +646,11 @@ func TestQualityAndStoragePage(t *testing.T) {
 	os.WriteFile(p, make([]byte, 1000), 0o644)
 	r := d.do("storage")
 	want := []string{"Sync Quality: Original", "Streaming Quality: Original", "Always Re-encode: Off",
-		"Space to Keep Free: 512 MB", "Playback Cache: 2 GB", "Clear Playback Cache"}
+		"Space to Keep Free: 512 MB", "Clear Playback Cache"}
 	if got := titles(r); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("%q, want %q", got, want)
 	}
-	for i, uri := range []string{"defq", "streamq", "reencode", "keepfree", "cache", "clearcache"} {
+	for i, uri := range []string{"defq", "streamq", "reencode", "keepfree", "clearcache"} {
 		if r.Rows[i].URI != uri {
 			t.Errorf("%s URI %q", r.Rows[i].Title, r.Rows[i].URI)
 		}
@@ -1100,9 +1099,9 @@ func TestSyncNotEnoughSpace(t *testing.T) {
 	}
 }
 
-func TestProgressRowKindByCaps(t *testing.T) {
+func TestProgressRow(t *testing.T) {
 	snap := syncer.Snapshot{State: "running", Permille: 470, Done: 112, Total: 240, ETA: 6 * time.Minute, Current: "Artist – Song"}
-	d := newTestDaemon(t, &nav{}, "progress", true)
+	d := newTestDaemon(t, &nav{}, "urls", true)
 	r := d.syncRows(snap)
 	if row := afterOptions(r)[0]; r.Message != "refresh" || row.Kind != "progress" || row.Position != "470" {
 		t.Fatalf("with progress: %q %+v", r.Message, row)
@@ -1115,10 +1114,6 @@ func TestProgressRowKindByCaps(t *testing.T) {
 	snap.Failed = 3 // a failure shows while the sync runs, in the same row
 	if _, ok := find(d.syncRows(snap), "112 of 240 songs · 3 failed"); !ok {
 		t.Errorf("no failed count in %q", titles(d.syncRows(snap)))
-	}
-	d = newTestDaemon(t, &nav{}, "", true)
-	if row := afterOptions(d.syncRows(snap))[0]; row.Kind != "info" || row.Title != "[#####-----] 47 %" {
-		t.Fatalf("without progress: %+v", row)
 	}
 }
 
@@ -1468,7 +1463,7 @@ func TestPreviewFailsFastWithoutRace(t *testing.T) {
 	}
 }
 
-// Ops that stop the sync or the stream answer at once even while a download and a stream fetch hang.
+// Ops that stop the sync or the stream answer at once even while a download hangs.
 func TestControlOpsReplyFast(t *testing.T) {
 	n := &nav{albums: 2, songsPer: 3, block: make(chan struct{})}
 	d := newTestDaemon(t, n, "", true)
@@ -1487,14 +1482,14 @@ func TestControlOpsReplyFast(t *testing.T) {
 	timed("start")
 	eventually(t, "the sync to run", d.runner.Busy)
 	timed("play", "album:al1 0")
-	eventually(t, "the stream to start", d.stream.active)
+	eventually(t, "the stream to start", func() bool { return exists(d.stream.urlsFile()) })
 	timed("play", "album:al1 1")
 	timed("pause")
 	timed("resume")
 	timed("cancel")
 	d.do("signout") // the first press only asks
 	timed("signout")
-	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
+	eventually(t, "the stream to stop", func() bool { return !exists(d.stream.urlsFile()) })
 }
 
 // A later page builds no view for a Sync Now row it never shows (round 2 speed 7).
@@ -1565,17 +1560,6 @@ func TestSyncNowRowKeepsPagingWhole(t *testing.T) {
 	}
 	if r = d.do("albums", r.Cursor); r.Rows[0].Title != "Album 047" { // none skipped
 		t.Errorf("second page starts %q", r.Rows[0].Title)
-	}
-}
-
-func TestLibraryHelpCopy(t *testing.T) {
-	d := newTestDaemon(t, &nav{}, "", true)
-	got := strings.Join(titles(d.do("library")), "|")
-	for _, w := range []string{"Stop Streaming Services", "Run after the sync has finished and Jellyfin is closed",
-		"Import playlist only applies to synced playlists"} {
-		if !strings.Contains(got, w) {
-			t.Errorf("missing %q in %q", w, got)
-		}
 	}
 }
 
@@ -1825,7 +1809,7 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let an unguarded stop run first, as in the race
 	d.playMu.Unlock()
 	time.Sleep(300 * time.Millisecond)
-	if d.stream.active() {
+	if exists(d.stream.urlsFile()) {
 		t.Fatal("stream started after sign-out")
 	}
 }
@@ -2543,65 +2527,11 @@ func TestAccountRows(t *testing.T) {
 	}
 }
 
-// A stream that gave up shows below the root's fixed rows, so the row under the cursor stays
-// what it was, with Details (M33).
-func TestRootStreamErrorLast(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, mediaErr: 70}, "", true)
-	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	d.do("play", "album:al0 0")
-	var r q2spot.Reply
-	const want = "Couldn't stream Song 0: Not found on the server"
-	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, want); return ok })
-	if r.Rows[0].Title != "Newly Added" {
-		t.Fatalf("first row %q", titles(r))
-	}
-	det := r.Rows[len(r.Rows)-1]
-	if r.Rows[len(r.Rows)-2].Title != want || det.Title != "Details" {
-		t.Fatalf("rows %q", titles(r))
-	}
-	got := strings.Join(titles(d.do(det.URI, det.Context)), "|")
-	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0", "Error: stream: http 404 code 70"} {
-		if !strings.Contains(got, w) {
-			t.Errorf("details %q lack %q", got, w)
-		}
-	}
-}
-
-// A stream's failure says why, as the Sync page does: the server lost mid-song (a body cut short
-// too) by its host, a full card in words, never Go's text; its Details carry the error (audit 10).
-func TestStreamErrorReason(t *testing.T) {
-	d := newTestDaemon(t, &nav{}, "", true)
-	d.do("menu") // signed in: the host is known
-	for _, c := range []struct {
-		err  error
-		want string
-	}{
-		{io.ErrUnexpectedEOF, "Can't reach " + d.hostName()},
-		{&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, "Can't reach " + d.hostName()},
-		{&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, "The card is full"},
-		{&jellyfin.APIError{Op: "stream", HTTP: 502, Msg: "Bad Gateway"}, "The server answered HTTP 502"},
-	} {
-		d.stream.setErr(&streamErr{title: "Song 0", id: "al0.0", at: time.Now(), err: c.err})
-		r := d.streamErrRows()
-		if len(r) != 2 || r[0].Title != "Couldn't stream Song 0: "+c.want {
-			t.Errorf("%v: %q", c.err, titles(q2spot.Reply{Rows: r}))
-			continue
-		}
-		if got := strings.Join(titles(details(r[1].Context)), "|"); !strings.Contains(got, "|Error: "+c.err.Error()) {
-			t.Errorf("%v: details %q", c.err, got)
-		}
-	}
-}
-
 // Each Details row names what failed: the server's answer when there was one, else its own name
-// ("" for a list, "stream" for a stream, "sync" for a sync), with its time and song.
+// ("" for a list, "sync" for a sync), with its time and song.
 func TestDetailsNames(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	t0 := time.Unix(1_000_000, 0)
-	streamCtx := func(err error) string {
-		d.stream.setErr(&streamErr{title: "Song 0", id: "al0.0", at: t0, err: err})
-		return d.streamErrRows()[1].Context
-	}
 	stoppedCtx := func(err error) string {
 		r := d.stoppedRows(syncer.Snapshot{State: "error", Err: err, ErrAt: t0})
 		return r.Rows[len(r.Rows)-1].Context
@@ -2617,8 +2547,6 @@ func TestDetailsNames(t *testing.T) {
 	}{
 		{listCtx(io.ErrUnexpectedEOF), "|0|0|now|"},
 		{listCtx(api), "download|500|0|now|"},
-		{streamCtx(io.ErrUnexpectedEOF), "stream|0|0|1000000|al0.0|"},
-		{streamCtx(api), "download|500|0|1000000|al0.0|"},
 		{stoppedCtx(os.ErrPermission), "sync|0|0|1000000||"},
 		{stoppedCtx(api), "download|500|0|1000000||"},
 		{stoppedCtx(nil), "sync|0|0|1000000|"},
@@ -2638,37 +2566,6 @@ func TestStreamFolderEmptiedAtStart(t *testing.T) {
 	newTestDaemonOn(t, card, &nav{}, "", true)
 	if _, err := os.Stat(old); err == nil {
 		t.Fatal("left on the card")
-	}
-}
-
-// In a playlist a song the server lacks (70, not found) is skipped: the root says so, with Details.
-func TestRootStreamSkipped(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, mediaErr: 70}, "playlist", true)
-	d.stream.gap = 0
-	d.do("play", "album:al0 0")
-	var r q2spot.Reply
-	eventually(t, "the skip", func() bool { r = d.do("menu"); _, ok := find(r, "Skipped Song 0: Not found on the server"); return ok })
-	det := r.Rows[len(r.Rows)-1]
-	if got := strings.Join(titles(d.do(det.URI, det.Context)), "|"); !strings.Contains(got, "Code: 70") {
-		t.Fatalf("details %q", got)
-	}
-}
-
-// A stream holds the Q2 awake only while it fetches: with the songs around the one playing on the
-// card, hold=1 goes, though the stream still runs (I14).
-func TestNoHoldWhileStreamWaits(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 6}, "playlist", true)
-	d.do("play", "album:al0 0")
-	eventually(t, "the window", func() bool {
-		return exists(filepath.Join(d.card, ".jellyfin", "stream", "0002 - Song 2 [al0.2].flac"))
-	})
-	eventually(t, "hold off", func() bool {
-		d.tick()
-		b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-jellyfin.state"))
-		return !strings.Contains(string(b), "hold=1")
-	})
-	if !d.stream.active() {
-		t.Fatal("the stream ended")
 	}
 }
 

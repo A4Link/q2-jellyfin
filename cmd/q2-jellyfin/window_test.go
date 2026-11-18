@@ -136,16 +136,6 @@ func TestSectionKeepsItsPage(t *testing.T) {
 	}
 }
 
-// Without the cap, lists page as before: no page rows.
-func TestNoWindowsWithoutTheCap(t *testing.T) {
-	d := newTestDaemon(t, &nav{artists: 449}, "sections art urls", true)
-	for _, r := range walkWindow(t, d, "artists", "") {
-		if r.Kind == "page" {
-			t.Fatalf("%+v", r)
-		}
-	}
-}
-
 // Albums page by the server: the windows cut it the same way.
 func TestAlbumsWindows(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 260, songsPer: 1}, "window", true)
@@ -162,7 +152,6 @@ func TestAlbumsWindows(t *testing.T) {
 // A reply that is full with the Previous page row moves its last row to the next reply.
 func TestWindowKeepsRepliesWithinLimits(t *testing.T) {
 	d := &daemon{}
-	d.caps.Window = true
 	var rows []q2spot.Row
 	for i := 0; i < q2spot.MaxRows; i++ {
 		rows = append(rows, info("r"+strconv.Itoa(200+i)))

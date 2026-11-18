@@ -185,9 +185,7 @@ func (d *daemon) planPreview(ctx context.Context, cl *jellyfin.Client) (plan.Pla
 	if derr := d.runner.DropMissing(man); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
 		d.log.Printf("sync: %v", derr)
 	}
-	// The playback cache gives way to a sync: its bytes count as free, and Start Sync evicts
-	// what the sync needs (cache.go).
-	pl := plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card)+d.stream.cacheSize())
+	pl := plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card))
 	// The items holding songs already on the card, recorded now: an up-to-date preview starts
 	// no sync, and status reads them after a restart (I12). A running sync records its own.
 	if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {

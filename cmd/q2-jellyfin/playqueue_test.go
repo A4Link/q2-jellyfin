@@ -71,12 +71,26 @@ func TestPlayQueuePage(t *testing.T) {
 }
 
 // A URL queue holds 100 songs before the one pressed and 400 from it on: the page lists them all
-// over as many replies as they take, from the one pressed, the earlier ones last.
+// over as many replies and windows as they take, from the one pressed, the earlier ones last.
 func TestPlayQueueLong(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 520}, "urls now", true)
 	d.do("play", "album:al0 150")
 	d.queueSeq(t)
-	rows := walkWindow(t, d, "npqueue", "")
+	var rows []q2spot.Row
+	for cursor := ""; ; {
+		next := ""
+		for _, r := range walkWindow(t, d, "npqueue", cursor) {
+			if r.Kind != "page" {
+				rows = append(rows, r)
+			} else if r.URI == "next" {
+				next = r.Context
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
 	if len(rows) != 471 || rows[370].Title != "Earlier songs" || rows[0].Subtitle != "Started here · Artist" {
 		t.Fatalf("%d rows", len(rows))
 	}
@@ -155,75 +169,57 @@ func TestPlayQueueStalePress(t *testing.T) {
 	}
 }
 
-// Without Wi-Fi, a synced song pressed in ⋯ plays from the card with the firmware's playlist
-// extension; one not synced, or any song without the extension (it fetches them all), still says
+// Without Wi-Fi, a synced song pressed in ⋯ plays from the card; one not synced still says
 // "Network Disconnected" (audit 9).
 func TestPlayQueueNoWiFi(t *testing.T) {
-	for _, caps := range []string{"playlist", ""} {
-		d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, caps, true)
-		d.do("toggle", "album:al0")
-		d.syncOK(t)
-		os.Remove(d.manifest().Songs["al0.1"].Path) // Song 1 is no longer on the card
-		d.do("play", "album:al0 0")
-		d.bg.Wait() // the start runs behind the reply
-		d.localIP = func() string { return "" }
-		d.wifiOff = func() bool { return true }
-		row, _ := find(d.do("npqueue"), "Song 0")
-		r := d.do(row.URI, row.Context)
-		if caps == "" {
-			if r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
-				t.Fatalf("no playlist: synced %+v", r)
-			}
-			continue
-		}
-		d.bg.Wait()
-		if r.Status != "" || d.do("npqueue").Rows[0].Context == row.Context { // a new queue: it played
-			t.Fatalf("synced %+v", r)
-		}
-		row, _ = find(d.do("npqueue"), "Song 1")
-		if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
-			t.Fatalf("not synced %+v", r)
-		}
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "urls", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	os.Remove(d.manifest().Songs["al0.1"].Path) // Song 1 is no longer on the card
+	d.do("play", "album:al0 0")
+	d.bg.Wait() // the start runs behind the reply
+	d.localIP = func() string { return "" }
+	d.wifiOff = func() bool { return true }
+	row, _ := find(d.do("npqueue"), "Song 0")
+	r := d.do(row.URI, row.Context)
+	d.bg.Wait()
+	if r.Status != "" || d.do("npqueue").Rows[0].Context == row.Context { // a new queue: it played
+		t.Fatalf("synced %+v", r)
+	}
+	row, _ = find(d.do("npqueue"), "Song 1")
+	if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
+		t.Fatalf("not synced %+v", r)
 	}
 }
 
-// Without Wi-Fi, a synced song pressed on the page open plays from the card with the firmware's
-// playlist extension, from the songs the page showed. One not synced, any song without the
-// extension, or a press once the page's songs are no longer kept (they would be fetched) still
-// says "Network Disconnected".
+// Without Wi-Fi, a synced song pressed on the page open plays from the card, from the songs the
+// page showed. One not synced, or a press once the page's songs are no longer kept (they would be
+// fetched) still says "Network Disconnected".
 func TestPlayNoWiFi(t *testing.T) {
-	for _, caps := range []string{"playlist", ""} {
-		d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, caps, true)
-		d.do("toggle", "album:al0")
-		d.syncOK(t)
-		os.Remove(d.manifest().Songs["al0.1"].Path) // Song 1 is no longer on the card
-		page := d.do("album", "album:al0")
-		d.localIP = func() string { return "" }
-		d.wifiOff = func() bool { return true }
-		row, _ := find(page, "Song 0")
-		r := d.do(row.URI, row.Context)
-		if caps == "" {
-			if r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
-				t.Fatalf("no playlist: synced %+v", r)
-			}
-			continue
-		}
-		if r.Status != "" {
-			t.Fatalf("synced %+v", r)
-		}
-		row, _ = find(page, "Song 1")
-		if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
-			t.Fatalf("not synced %+v", r)
-		}
-		d.lists.mu.Lock()
-		d.lists.at["item"] = d.lists.at["item"].Add(-listFor)
-		d.lists.mu.Unlock()
-		row, _ = find(page, "Song 0")
-		if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
-			t.Fatalf("page's songs gone %+v", r)
-		}
-		d.bg.Wait()
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "urls", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	os.Remove(d.manifest().Songs["al0.1"].Path) // Song 1 is no longer on the card
+	page := d.do("album", "album:al0")
+	d.localIP = func() string { return "" }
+	d.wifiOff = func() bool { return true }
+	row, _ := find(page, "Song 0")
+	r := d.do(row.URI, row.Context)
+	if r.Status != "" {
+		t.Fatalf("synced %+v", r)
 	}
+	row, _ = find(page, "Song 1")
+	if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
+		t.Fatalf("not synced %+v", r)
+	}
+	d.lists.mu.Lock()
+	d.lists.at["item"] = d.lists.at["item"].Add(-listFor)
+	d.lists.mu.Unlock()
+	row, _ = find(page, "Song 0")
+	if r := d.do(row.URI, row.Context); r.Status != q2spot.Offline || r.Message != "Network Disconnected" {
+		t.Fatalf("page's songs gone %+v", r)
+	}
+	d.bg.Wait()
 }
 
 // The queue is decoded again only when its file changes: a new Play's queue shows at once.
@@ -296,24 +292,5 @@ func TestPlayQueueSwipeParity(t *testing.T) {
 	}
 	if off := d.do("npqueue"); !reflect.DeepEqual(on, off) || len(on.Rows) != 4 {
 		t.Fatalf("swipe on %+v, off %+v", on, off)
-	}
-}
-
-// Streamed to a playlist (firmware without "urls"), the firmware's queue is the songs from the
-// one pressed on: those are the page, and a row pressed plays them from it.
-func TestPlayQueuePlaylist(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 4}, "playlist", true)
-	d.do("play", "album:al0 1")
-	seq := d.queueSeq(t)
-	r := d.do("npqueue")
-	if got := strings.Join(titles(r), "|"); got != "Song 1|Song 2|Song 3" || r.Rows[0].Subtitle != "Started here · Artist" {
-		t.Fatalf("rows %q %q", got, subtitles(r))
-	}
-	d.do(r.Rows[1].URI, r.Rows[1].Context)
-	if d.queueSeq(t) == seq {
-		t.Fatal("no new queue")
-	}
-	if got := strings.Join(titles(d.do("npqueue")), "|"); got != "Song 2|Song 3" {
-		t.Fatalf("after the press %q", got)
 	}
 }

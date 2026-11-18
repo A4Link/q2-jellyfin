@@ -175,16 +175,11 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 	pct := fmt.Sprintf("%d %%", s.Permille/10)
 	rows := d.syncSources()
-	if d.caps.Progress {
-		sub := ""
-		if s.State == "paused" {
-			sub = "Paused"
-		}
-		rows = append(rows, q2spot.Row{Kind: "progress", Title: pct, Subtitle: sub, Position: strconv.Itoa(s.Permille)})
-	} else {
-		n := min(max((s.Permille+50)/100, 0), 10)
-		rows = append(rows, info("["+strings.Repeat("#", n)+strings.Repeat("-", 10-n)+"] "+pct))
+	sub := ""
+	if s.State == "paused" {
+		sub = "Paused"
 	}
+	rows = append(rows, q2spot.Row{Kind: "progress", Title: pct, Subtitle: sub, Position: strconv.Itoa(s.Permille)})
 	count := fmt.Sprintf("%d of %s", s.Done, plural(s.Total, "song"))
 	if s.Failed > 0 {
 		count += fmt.Sprintf(" · %d failed", s.Failed)
@@ -512,7 +507,7 @@ func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
 	if s.Err != nil {
 		msg += " · " + d.stopMessage(s.Err)
 	}
-	det := errDetails(s.Err, "sync", s.ErrAt, "") // when it stopped (review G3, Minor 3)
+	det := errDetails(s.Err, "sync", s.ErrAt) // when it stopped (review G3, Minor 3)
 	if s.Err != nil {
 		det = withErr(det, s.Err)
 	}
@@ -558,7 +553,7 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	var done, ok bool
 	var msg string
 	var at time.Time
-	auto := d.caps.Library && d.lib != nil
+	auto := d.lib != nil
 	if auto {
 		done, ok, msg, at = d.libState()
 	}
@@ -645,19 +640,10 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		if !ready {
 			return q2spot.Reply{Message: "Open Sync again to check"}
 		}
-		// The removals count as freed, as in the plan's fit: a run short of space removes them first.
-		// Songs the sync takes from the playback cache stay in it until then, and need no room.
-		keep, cached := d.stream.cachedFor(p.plan.Add, p.plan.Replace)
-		if net := p.plan.NeedBytes - p.plan.RemoveBytes - cached; net > 0 {
-			need := net + plan.Margin + keepFreeBytes(d.settings().KeepFree)
-			d.stream.evictFor(need, func() int64 { return d.free(d.card) }, keep)
-		}
-		d.stream.keepForSync(keep)
 		d.mu.Lock()
 		d.lib = nil // before Start: the sync's own OnDone sets it
 		d.mu.Unlock()
 		if err := d.runner.Start(*p.plan); err != nil {
-			d.stream.keepForSync(nil)
 			d.log.Printf("sync: start: %v", err)
 			return q2spot.Fail(q2spot.Error, "Couldn't start the sync")
 		}

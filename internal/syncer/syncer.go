@@ -83,7 +83,6 @@ type Runner struct {
 	Backoff     []time.Duration
 	CardMounted func() bool
 	Now         func() time.Time
-	Net         *NetSlot
 	// OnDone is called, with no lock held, after each run that ends in state "done". It must not
 	// block. The runner is Busy until it returns.
 	OnDone func(plan.Plan)
@@ -92,10 +91,6 @@ type Runner struct {
 	// playlists for what it has, so the card never fills up (the Q2 needs room of its own).
 	Free    func() int64
 	Reserve func() int64
-	// FromCache, when set, moves a copy of w's song already on the card at w's quality and whole
-	// (the playback cache) to w.Path, and reports its size; false when there is none. Such a song
-	// needs no download, and no room: it is a rename on the same card.
-	FromCache func(w plan.Want) (int64, bool)
 
 	root string
 	src  MediaSource
@@ -124,7 +119,7 @@ type Runner struct {
 
 func New(root string, src MediaSource, log *applog.Log) *Runner {
 	return &Runner{Backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
-		CardMounted: q2.CardMounted, Now: time.Now, Net: Net, root: root, src: src, log: log, stat: Snapshot{State: "idle"}}
+		CardMounted: q2.CardMounted, Now: time.Now, root: root, src: src, log: log, stat: Snapshot{State: "idle"}}
 }
 
 func (r *Runner) manifestPath() string { return filepath.Join(r.root, ".jellyfin", "manifest.json") }
@@ -428,9 +423,9 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 }
 
 // Moving reports whether the plan a sync runs, or holds paused, renames, replaces or removes song
-// id: the streamer then fetches the song rather than queue a path that is about to go (M24). A
-// lookup in a set made once a launch: a synced list starting calls it for each of its songs, and a
-// Sync Quality change can replace every song on the card (audit 2026-11-16 #24).
+// id: the streamer then streams the song from the server rather than queue a path that is about
+// to go (M24). A lookup in a set made once a launch: a synced list starting calls it for each of
+// its songs, and a Sync Quality change can replace every song on the card (audit 2026-11-16 #24).
 func (r *Runner) Moving(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -134,7 +134,7 @@ func (c countLyrics) Lyrics(_ context.Context, id string) (string, error) {
 
 // B1: a second Play of the same songs fetches no lyrics again: they're kept by song between Plays.
 func TestLyricsKeptBetweenPlays(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	var n atomic.Int32
 	e.s.src = countLyrics{urlSrc: urlSrc{e.src}, n: &n}
 	ss := songs(5, "flac")
@@ -160,7 +160,7 @@ func TestLyricsKeptBetweenPlays(t *testing.T) {
 // B1: a song already on the card takes its line's lyrics from the .lrc beside it, with no request;
 // the others come from the server.
 func TestLyricsOfASyncedSongComeFromTheCard(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e := newEnv(t, fw.Caps{URLs: true})
 	var n atomic.Int32
 	e.s.src = countLyrics{urlSrc: urlSrc{e.src}, n: &n}
 	ss := songs(3, "flac")
