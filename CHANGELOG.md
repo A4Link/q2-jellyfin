@@ -34,6 +34,10 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Security
 
 - **A server can no longer fill the card by sending more than a song's size:** a download of a song whose size is known now stops at twice that size and 8 MiB, also when the server's Content-Length says more, and the song fails. Before, a long Content-Length was taken as it was, so a hostile server could write past Space to Keep Free until the card was full. This covers songs streamed on Q2 Pod before 1.7.3 too.
+### Security
+
+- **A hostile server can no longer use up the Q2's memory with one answer:** an answer whose lists hold more than 50,000 values in all is refused with *Answer too large for the Q2*, as one over 8 MB is: 8 MB of tiny values such as `0` or `null` took over 1 GB to read. A real page of 500 songs holds about 500 to 1,500. An answer's headers are capped at 64 KB (they were allowed 10 MB); bigger ones fail as a server that can't be reached does. Of an item's image tags only its cover's is read, so any others in an answer are skipped instead of kept in memory.
+- **A very long song title, artist or album no longer crashes the app at Play** under Q2 Pod's `urls`: each is cut to 1,000 bytes in the play queue, so the song pressed always fits in it. Before, a field over 256 KB from the server made every Play of that song exit the app, and with it a stream or sync under way.
 
 ## [0.8.0] - 2026-11-16
 

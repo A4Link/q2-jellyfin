@@ -44,7 +44,11 @@ const (
 	urlsMax    = 256 << 10 // the most of the file Q2 Pod reads (tidal.c AU_MAX); a line cut there is dropped
 )
 
+// urlField is s as one field, cut to 1,000 bytes: a song's line then always fits in urlsMax.
 func urlField(s string) string {
+	if len(s) > 1000 {
+		s = strings.ToValidUTF8(s[:1000], "")
+	}
 	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r == '\t' || r == '\n' || r == '\r' }), " ")
 }
 

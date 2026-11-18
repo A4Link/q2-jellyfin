@@ -203,8 +203,8 @@ func TestURLQueueStartsPartway(t *testing.T) {
 // then those before it as room allows, and the lyrics' <n> is each song's line.
 func TestURLQueueFitsFirmware(t *testing.T) {
 	for _, c := range []struct {
-		n, from, title int
-		start, lo      int // start= and the first song written
+		n, from, text int // text: bytes of title, artist and album together (a field is cut at 1,000)
+		start, lo     int // start= and the first song written
 	}{
 		{600, 150, 600, 0, 150},   // the ones after fill it: none before
 		{600, 590, 3000, 75, 515}, // ten after, then as many before as fit
@@ -213,7 +213,8 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 		e.s.src = lyricSrc{urlSrc{e.src}}
 		ss := songs(c.n, "flac")
 		for i := range ss {
-			ss[i].Title, ss[i].CoverArt, ss[i].HasLyrics = strings.Repeat("x", c.title), "c", true
+			f := strings.Repeat("x", c.text/3)
+			ss[i].Title, ss[i].Artist, ss[i].Album, ss[i].CoverArt, ss[i].HasLyrics = f, f, f, "c", true
 		}
 		e.s.start(ss, c.from)
 		lines := e.urlsFile(t)
@@ -235,6 +236,26 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 		if got := lrc(last); got != fmt.Sprint("[00:01.00]s", c.lo+last) {
 			t.Errorf("last line's lyrics %q", got)
 		}
+	}
+}
+
+// A field over 1,000 bytes is cut on a character, so the started song's line always fits in
+// urlsMax: a 300 KB title from the server plays instead of crashing Play.
+func TestURLQueueLongFieldCut(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e.s.src = lyricSrc{urlSrc{e.src}}
+	ss := songs(2, "flac")
+	ss[0].Title, ss[0].HasLyrics = strings.Repeat("€", 100_000), true
+	e.s.start(ss, 0)
+	if play, _ := os.ReadFile(e.play); !strings.HasSuffix(strings.TrimSpace(string(play)), "q2-jellyfin.urls") {
+		t.Fatalf(".play %q", play)
+	}
+	lines := e.urlsFile(t)
+	if len(lines) != 3 {
+		t.Fatalf("%d lines", len(lines))
+	}
+	if got := strings.Split(lines[1], "\t")[1]; got != strings.Repeat("€", 333) {
+		t.Errorf("title of %d bytes", len(got))
 	}
 }
 

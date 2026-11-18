@@ -46,27 +46,29 @@ const artistFields = "ItemCounts"
 
 // wireItem is Jellyfin's BaseItemDto, only the fields this app reads.
 type wireItem struct {
-	ID                   string            `json:"Id"`
-	Name                 string            `json:"Name"`
-	Type                 string            `json:"Type"`
-	CollectionType       string            `json:"CollectionType"` // a library view's ("music", "movies", …)
-	HasLyrics            bool              `json:"HasLyrics"`
-	DateCreated          string            `json:"DateCreated"`
-	MediaType            string            `json:"MediaType"`
-	Album                string            `json:"Album"`
-	AlbumID              string            `json:"AlbumId"`
-	AlbumArtist          string            `json:"AlbumArtist"`
-	Artists              []string          `json:"Artists"`
-	ProductionYear       int               `json:"ProductionYear"`
-	ParentIndexNumber    int               `json:"ParentIndexNumber"` // disc
-	IndexNumber          int               `json:"IndexNumber"`       // track
-	RunTimeTicks         int64             `json:"RunTimeTicks"`      // 100 ns units
-	ChildCount           int               `json:"ChildCount"`
-	AlbumCount           int               `json:"AlbumCount"`
-	Container            string            `json:"Container"`
-	Path                 string            `json:"Path"`
-	ImageTags            map[string]string `json:"ImageTags"`
-	AlbumPrimaryImageTag string            `json:"AlbumPrimaryImageTag"`
+	ID                string   `json:"Id"`
+	Name              string   `json:"Name"`
+	Type              string   `json:"Type"`
+	CollectionType    string   `json:"CollectionType"` // a library view's ("music", "movies", …)
+	HasLyrics         bool     `json:"HasLyrics"`
+	DateCreated       string   `json:"DateCreated"`
+	MediaType         string   `json:"MediaType"`
+	Album             string   `json:"Album"`
+	AlbumID           string   `json:"AlbumId"`
+	AlbumArtist       string   `json:"AlbumArtist"`
+	Artists           []string `json:"Artists"`
+	ProductionYear    int      `json:"ProductionYear"`
+	ParentIndexNumber int      `json:"ParentIndexNumber"` // disc
+	IndexNumber       int      `json:"IndexNumber"`       // track
+	RunTimeTicks      int64    `json:"RunTimeTicks"`      // 100 ns units
+	ChildCount        int      `json:"ChildCount"`
+	AlbumCount        int      `json:"AlbumCount"`
+	Container         string   `json:"Container"`
+	Path              string   `json:"Path"`
+	ImageTags         struct {
+		Primary string `json:"Primary"`
+	} `json:"ImageTags"` // a struct, not a map: a hostile answer's other keys are skipped, not kept
+	AlbumPrimaryImageTag string `json:"AlbumPrimaryImageTag"`
 	MediaSources         []struct {
 		Size         int64  `json:"Size"`
 		Bitrate      int    `json:"Bitrate"`
@@ -137,7 +139,7 @@ func (w wireItem) song() Song {
 	switch {
 	case w.AlbumPrimaryImageTag != "" && w.AlbumID != "":
 		s.CoverArt = w.AlbumID
-	case w.ImageTags["Primary"] != "":
+	case w.ImageTags.Primary != "":
 		s.CoverArt = w.ID
 	}
 	return s
@@ -146,7 +148,7 @@ func (w wireItem) song() Song {
 func (w wireItem) album() Album {
 	a := Album{ID: w.ID, Name: w.Name, Artist: cmp.Or(w.AlbumArtist, strings.Join(w.Artists, ", ")),
 		Year: w.ProductionYear, SongCount: w.ChildCount}
-	if w.ImageTags["Primary"] != "" {
+	if w.ImageTags.Primary != "" {
 		a.CoverArt = w.ID
 	}
 	return a

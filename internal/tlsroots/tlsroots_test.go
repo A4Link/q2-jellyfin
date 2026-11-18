@@ -309,3 +309,19 @@ func TestClockBeforeBundleUnset(t *testing.T) {
 		t.Fatal("a clock before the CA bundle is trusted")
 	}
 }
+
+// An answer's headers are capped at 64 KB (Go's default is 10 MB): a 100 KB header fails the request.
+func TestBigHeaderRefused(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Big", strings.Repeat("a", 100<<10))
+	}))
+	defer srv.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	for _, tr := range []*http.Transport{newTransport(roots, time.Second), dateTransport(roots, "127.0.0.1")} {
+		if resp, err := (&http.Client{Transport: tr}).Get(srv.URL); err == nil {
+			resp.Body.Close()
+			t.Fatal("a 100 KB header accepted")
+		}
+	}
+}
