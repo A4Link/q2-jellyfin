@@ -642,12 +642,14 @@ func (d *daemon) onQ2(cursor string) q2spot.Reply {
 	var rows []q2spot.Row
 	if len(v.sel.Items) == 0 {
 		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: "Nothing chosen yet",
-			Subtitle: "Hold Play/Pause on a playlist, album or artist"}}}
+			Subtitle: "Open a playlist, album or artist and press Add to Sync"}}}
 	}
 	for _, it := range v.sel.Items {
 		key := selection.Key(it.Kind, it.ID)
 		if it.Kind == selection.KindLibrary {
-			rows = append([]q2spot.Row{d.libraryRow(v.sel)}, rows...)
+			lib := d.libraryRow(v.sel) // inert here, as songs are; a hold still takes it out
+			lib.Kind, lib.URI, lib.Title = "info", "", "Entire Library"
+			rows = append([]q2spot.Row{lib}, rows...)
 			continue
 		}
 		var b int64
