@@ -27,5 +27,10 @@ func (m *Manifest) WriteM3U(root, path string, paths []string) error {
 	for _, p := range paths {
 		b.WriteString(p + "\n")
 	}
+	if m != nil { // a synced playlist whose text is unchanged isn't written again
+		if old, err := os.ReadFile(path); err == nil && string(old) == b.String() {
+			return nil
+		}
+	}
 	return q2.WriteFile(path, []byte(b.String()))
 }

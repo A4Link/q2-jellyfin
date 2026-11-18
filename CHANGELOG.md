@@ -44,6 +44,9 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Changed
 
 - **A sync's album covers use little memory, whatever their size:** cover.jpg is written to the card as it arrives, instead of read whole first, and copied the same way into an album's new folder when a tag change renames it. A server that can't resize images sends the original, which can be many megabytes. A cover over 16 MiB is still not saved, and one whose size the server gives as over 16 MiB is not fetched. A cover that fails is now only written to the log, not kept in a list no page shows. An album folder left with only its cover and a cover.jpg.tmp (from a power cut during a cover download) is now removed with its last song.
+### Changed
+
+- **A sync rewrites only the playlist files that changed:** a playlist whose song list is the same as the file on the card is no longer written again at the end of each sync, which saves time and card wear with many playlists in Sync.
 
 ## [0.8.0] - 2026-11-16
 
