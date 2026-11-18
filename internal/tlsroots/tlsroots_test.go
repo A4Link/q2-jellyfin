@@ -88,6 +88,28 @@ func TestClientVerifiesCert(t *testing.T) {
 	resp.Body.Close()
 }
 
+// A new connection resumes the TLS session instead of a full handshake (slow on MIPS).
+func TestClientResumesTLS(t *testing.T) {
+	var hits atomic.Int32
+	srv := dateServer(&hits, true)
+	defer srv.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	tr := newTransport(roots, time.Second)
+	cl := &http.Client{Transport: tr}
+	for i := range 2 {
+		resp, err := cl.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if i == 1 && !resp.TLS.DidResume {
+			t.Fatal("second connection did not resume the TLS session")
+		}
+		tr.CloseIdleConnections()
+	}
+}
+
 func TestNowFetchFailureFallsBack(t *testing.T) {
 	fakeClock(t)
 	SetDateURL("https://127.0.0.1:1/")
