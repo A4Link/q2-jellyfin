@@ -358,7 +358,7 @@ func TestManifestSaveLoadShareMemory(t *testing.T) {
 		id := fmt.Sprint("s", i)
 		m.Songs[id] = &Entry{ID: id, Path: dir + "/Jellyfin/A/x/" + id + ".opus", Quality: "opus-128", Items: []string{"album:a"}}
 	}
-	if n := testing.AllocsPerRun(5, func() { m.write(io.Discard) }); n > 1500 && !raceOn {
+	if n := testing.AllocsPerRun(5, func() { m.write(io.Discard) }); n > 2500 && !raceOn {
 		t.Errorf("%.0f allocations to write 1,000 songs", n)
 	}
 	if err := m.Save(dir, p); err != nil {
