@@ -1011,6 +1011,39 @@ func TestSyncPreviewLongCheck(t *testing.T) {
 	}
 }
 
+// Files an earlier sync left listed in the manifest (Stale) are a change: lists show Sync Now, the
+// preview offers Start Sync, and the run deletes them, with nothing else to do, and says so.
+func TestSyncPreviewLeftoverFiles(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true) // nothing selected
+	f := filepath.Join(d.card, "Jellyfin", "A", "x", "old.flac")
+	os.MkdirAll(filepath.Dir(f), 0o755)
+	os.WriteFile(f, []byte("old"), 0o644)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}, Stale: []string{f}}
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := d.syncNowRow(); !ok || row.Subtitle != "1 waiting" {
+		t.Errorf("Sync Now row %+v, %v", row, ok)
+	}
+	r := d.preview(t)
+	for _, w := range []string{"Delete 1 file an earlier sync left", "Start Sync"} {
+		if _, ok := find(r, w); !ok {
+			t.Fatalf("no %q row in %q", w, titles(r))
+		}
+	}
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	if _, err := os.Stat(f); !os.IsNotExist(err) || len(d.manifest().Stale) != 0 {
+		t.Errorf("left: %v, stale %q", err, d.manifest().Stale)
+	}
+	if _, ok := find(d.doneRows(d.runner.Snapshot()), "Sync complete · 1 file deleted · 0 failed"); !ok {
+		t.Errorf("done rows %q", titles(d.doneRows(d.runner.Snapshot())))
+	}
+	if _, ok := d.syncNowRow(); ok {
+		t.Error("Sync Now row with nothing left to do")
+	}
+}
+
 // Not all of it fits: the preview says so, and still offers Start Sync, which pauses at Space to
 // Keep Free (space_test.go has the run).
 func TestSyncNotEnoughSpace(t *testing.T) {

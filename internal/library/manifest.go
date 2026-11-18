@@ -1,6 +1,8 @@
 package library
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -45,14 +47,20 @@ type Manifest struct {
 	// so its time says nothing of a sync (audit 2026-11-10 #10). Zero before the first, or in an
 	// older build's file.
 	SyncedAt time.Time
+	// Stale holds replaced songs' old files and removed songs' files, no longer in Songs: the sync
+	// deletes them after the save that drops their songs, and a stop leaves the rest for the next sync (I4).
+	Stale []string `json:",omitempty"`
 }
 
 // LoadManifest reads path; a missing file is an empty manifest.
 func LoadManifest(path string) (*Manifest, error) {
-	m := &Manifest{}
-	b, err := os.ReadFile(path)
+	m := &Manifest{Songs: map[string]*Entry{}}
+	f, err := os.Open(path)
 	if err == nil {
-		err = json.Unmarshal(b, m)
+		if err = m.read(f); err == io.EOF { // a cut or empty file, as Unmarshal's error says it
+			err = io.ErrUnexpectedEOF
+		}
+		f.Close()
 	} else if errors.Is(err, os.ErrNotExist) {
 		err = nil
 	}
@@ -75,6 +83,77 @@ func LoadManifest(path string) (*Manifest, error) {
 		settleMoves(m)
 	}
 	return m, err
+}
+
+// read decodes r as write encodes it, a song at a time: the whole file beside its decoded copy
+// would hold a big manifest twice.
+func (m *Manifest) read(r io.Reader) error {
+	dec := json.NewDecoder(bufio.NewReaderSize(r, 64<<10))
+	if t, err := dec.Token(); err != nil {
+		return err
+	} else if t != json.Delim('{') {
+		return errors.New("manifest: not a JSON object")
+	}
+	rest := map[string]json.RawMessage{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if k, _ := t.(string); k != "Songs" {
+			var v json.RawMessage
+			if err := dec.Decode(&v); err != nil {
+				return err
+			}
+			rest[k] = v
+			continue
+		}
+		if t, err = dec.Token(); err != nil {
+			return err
+		} else if t == nil { // "Songs":null
+			continue
+		} else if t != json.Delim('{') {
+			return errors.New("manifest: Songs is not a JSON object")
+		}
+		names := map[string]string{} // one copy of each quality and item name, which many songs share
+		name := func(s string) string {
+			if n, ok := names[s]; ok {
+				return n
+			}
+			names[s] = s
+			return s
+		}
+		for dec.More() {
+			t, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			id, _ := t.(string)
+			e := &Entry{}
+			if err := dec.Decode(e); err != nil {
+				return err
+			}
+			if e.ID == id {
+				e.ID = id // the key's copy, not a second one
+			}
+			e.Quality = name(e.Quality)
+			for i, k := range e.Items {
+				e.Items[i] = name(k)
+			}
+			m.Songs[id] = e
+		}
+		if _, err := dec.Token(); err != nil { // the Songs object's }
+			return err
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the closing }: More is false at the end of a cut file too
+		return err
+	}
+	b, err := json.Marshal(rest) // the rest is small: decode it as before
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, m)
 }
 
 // settleMoves records each cut rename's song where its file is: at Moving when it moved (Path
@@ -132,5 +211,35 @@ func (m *Manifest) Save(root, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return q2.WriteWith(path, func(w io.Writer) error { return json.NewEncoder(w).Encode(m) })
+	return q2.WriteWith(path, func(w io.Writer) error { return m.write(w) })
+}
+
+// write streams m as JSON a song at a time: one encoding of a big manifest would hold it whole.
+func (m *Manifest) write(w io.Writer) error {
+	const head = `{"Songs":null,`
+	rest := *m
+	rest.Songs = nil
+	r, err := json.Marshal(&rest)
+	if err != nil {
+		return err
+	}
+	if !bytes.HasPrefix(r, []byte(head)) {
+		return errors.New("manifest: unexpected encoding")
+	}
+	b := bufio.NewWriterSize(w, 64<<10)
+	enc := json.NewEncoder(b) // straight into b: no copy of each song (each value ends in a newline)
+	b.WriteString(`{"Songs":{`)
+	sep := ""
+	for id, e := range m.Songs {
+		b.WriteString(sep)
+		enc.Encode(id) // a string always encodes
+		b.WriteByte(':')
+		if err := enc.Encode(e); err != nil { // the card's error, once: not after every song
+			return err
+		}
+		sep = ","
+	}
+	b.WriteString("},")
+	b.Write(r[len(head):])
+	return b.Flush()
 }

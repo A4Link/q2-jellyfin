@@ -38,6 +38,7 @@ type Plan struct {
 	Playlists            map[string][]string
 	PlaylistsStale       bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
 	PlaylistsChanged     int  // playlist files to write or delete though no song moves: new, changed, renamed or taken out (I10)
+	Leftover             int  // files a stopped sync left listed in m.Stale: a run deletes them first
 	NeedBytes, FreeBytes int64
 	ReplaceBytes         int64 // what the replaces add, or free when negative
 	RemoveBytes          int64 // what the removals free (a run short of space removes them first)
@@ -200,7 +201,7 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 	}
 
 	p.Playlists = map[string][]string{}
-	p.PlaylistsStale = m.PlaylistsStale
+	p.PlaylistsStale, p.Leftover = m.PlaylistsStale, len(m.Stale)
 	for _, it := range sel.Items {
 		if it.Kind != selection.KindPlaylist && it.Kind != selection.KindFavorites {
 			continue
