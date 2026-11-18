@@ -1,10 +1,9 @@
 // Package quality names what a song is synced or streamed as: the server's file as it is
 // ("original", the default: no transcoding), or an Opus transcode the Jellyfin server makes at one
-// of Bitrates. MP3 transcodes exist only as a fallback for Q2 Pod firmware without the playlist
-// extension, whose folder playback plays FLAC and MP3 alone; nobody chooses them.
+// of Bitrates.
 //
 // A quality is a string, kept in selection.json, settings.json and the manifest:
-// "original", "opus-<kbps>" or "mp3-<kbps>".
+// "original", "opus-<kbps>", or "mp3-<kbps>", which an earlier version kept for old firmware.
 package quality
 
 import (
@@ -28,7 +27,6 @@ func Choices() []string {
 }
 
 func Opus(kbps int) string { return "opus-" + strconv.Itoa(kbps) }
-func MP3(kbps int) string  { return "mp3-" + strconv.Itoa(kbps) }
 
 // Fallback is what an original the Q2 can't play (WavPack, Musepack, …) becomes.
 var Fallback = Opus(320)
@@ -95,12 +93,3 @@ func Rank(q string) int {
 
 // Better reports whether a ranks above b.
 func Better(a, b string) bool { return Rank(a) > Rank(b) }
-
-// AsMP3 is q for folder playback on firmware without the playlist extension: a transcode at the
-// same bitrate as MP3, Original unchanged.
-func AsMP3(q string) string {
-	if c, k := Parse(q); c != "" {
-		return MP3(k)
-	}
-	return Original
-}

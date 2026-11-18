@@ -25,8 +25,8 @@ import (
 )
 
 // LyricsSource is a MediaSource that also gives a song's lyrics as LRC text ("" for none): a
-// synced or streamed song then gets a .lrc beside it (library.LyricsPath), which Q2 Pod's player
-// shows on Now Playing.
+// synced song then gets a .lrc beside it (library.LyricsPath), which Q2 Pod's player shows on Now
+// Playing.
 type LyricsSource interface {
 	Lyrics(ctx context.Context, id string) (string, error)
 }
@@ -131,28 +131,6 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 			from = st.Size()
 		}
 	}
-	if err := r.Net.Acquire(ctx, false); err != nil {
-		return 0, err
-	}
-	held := true
-	defer func() {
-		if held {
-			r.Net.Release()
-		}
-	}()
-	// yield lets a priority waiter (the streamer) go first, then takes the slot back.
-	yield := func() error {
-		if !r.Net.PriorityWaiting() {
-			return nil
-		}
-		r.Net.Release()
-		held = false
-		if err := r.Net.Acquire(ctx, false); err != nil {
-			return err
-		}
-		held = true
-		return nil
-	}
 	u := r.src.MediaURL(w.Song.ID, w.Quality)
 	resp, err := r.src.Get(ctx, u, from)
 	var ae *jellyfin.APIError
@@ -193,7 +171,7 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.cur, r.curMax = from, w.Bytes
 	r.mu.Unlock()
 	limit := Limit(resp.ContentLength, w.Bytes)
-	n, err := r.copy(f, io.LimitReader(resp.Body, limit+1), from, yield)
+	n, err := r.copy(f, io.LimitReader(resp.Body, limit+1), from)
 	if err == nil {
 		err = SizeErr(n-from, resp.ContentLength, limit) // checked before the rename (I8)
 	}
@@ -292,24 +270,15 @@ func OggCut(path string) error {
 }
 
 // copy writes body to f, counting progress; n starts at from (the bytes already in the .part).
-// Every 256 KiB it calls yield, so a stream never waits for a whole file.
-func (r *Runner) copy(f *os.File, body io.Reader, n int64, yield func() error) (int64, error) {
+func (r *Runner) copy(f *os.File, body io.Reader, n int64) (int64, error) {
 	buf := make([]byte, 64<<10)
-	since := 0
 	for {
-		if since >= 256<<10 {
-			if err := yield(); err != nil {
-				return n, err
-			}
-			since = 0
-		}
 		k, rerr := body.Read(buf)
 		if k > 0 {
 			if _, err := f.Write(buf[:k]); err != nil {
 				return n, err
 			}
 			n += int64(k)
-			since += k
 			r.mu.Lock()
 			r.cur = n
 			r.meter.add(r.Now(), int64(k))
@@ -335,10 +304,6 @@ func (r *Runner) cover(ctx context.Context, w plan.Want) {
 		return
 	}
 	err := func() error {
-		if err := r.Net.Acquire(ctx, false); err != nil {
-			return err
-		}
-		defer r.Net.Release()
 		resp, err := r.src.Get(ctx, sized(r.src.CoverURL(w.Song.CoverArt)), 0)
 		if err != nil {
 			return err

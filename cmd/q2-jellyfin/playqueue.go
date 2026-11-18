@@ -16,16 +16,15 @@ import (
 
 // Now Playing's ⋯ (q2app's more=npqueue, Q2 Pod's card-app-more) is the play queue: the songs the
 // latest Play handed the firmware, the one playing marked; pressing one plays the
-// same queue from it, as a Play does. Each start keeps its queue in /tmp/q2-jellyfin.playq: a URL
-// queue's lines (up to 100 songs before the one pressed and 400 from it on), or in a folder or
-// playlist the songs from the one pressed on, as the firmware has them. It holds the songs as the
+// same queue from it, as a Play does. Each start keeps its queue in /tmp/q2-jellyfin.playq: the URL
+// queue's lines (up to 100 songs before the one pressed and 400 from it on). It holds the songs as the
 // server listed them, no URL and no token, so the page needs no server, and an app closed and
 // opened again still shows it; /tmp goes at power-off, and Sign Out removes it.
 //
 // The page opens at the song playing, the songs after it following, then an "Earlier songs" row
 // and the songs before it, all in the queue's order. The song playing is the one pressed, "Started
-// here", until Q2 Pod's .now (its "now") names a line of this queue, "Now Playing" (now.go); a
-// folder or playlist, and firmware without "now", get no .now line for it.
+// here", until Q2 Pod's .now (its "now") names a line of this queue, "Now Playing" (now.go);
+// firmware without "now" writes no .now.
 
 // playQueue is /tmp/q2-jellyfin.playq.
 type playQueue struct {
@@ -33,9 +32,6 @@ type playQueue struct {
 	Start int             `json:"start"` // the song pressed
 	Songs []jellyfin.Song `json:"songs"`
 }
-
-// queueMax is the most songs a folder or playlist's queue keeps: a URL queue's most.
-const queueMax = urlsBefore + urlsAfter
 
 func (s *streamer) queueFile() string {
 	return filepath.Join(filepath.Dir(s.playFile), "q2-jellyfin.playq")
@@ -124,8 +120,8 @@ func (d *daemon) queuePage(cursor string) q2spot.Reply {
 }
 
 // queuePlay is a row's press: the queue kept, played from that song. Without Wi-Fi only a synced
-// song plays, from the card, as the firmware's playlist extension allows (stream.go); a later song
-// not synced fails as it would were Wi-Fi lost mid-queue.
+// song plays, from the card (stream.go); a later song not synced fails as it would were Wi-Fi lost
+// mid-queue.
 func (d *daemon) queuePlay(arg string) q2spot.Reply {
 	q, ok := d.loadQueue()
 	seq, n, _ := strings.Cut(arg, " ")
@@ -138,6 +134,6 @@ func (d *daemon) queuePlay(arg string) q2spot.Reply {
 			return r
 		}
 	}
-	d.startSongs(q.Songs, i, "queue")
-	return d.playing(q.Songs[i].Title)
+	d.startSongs(q.Songs, i)
+	return q2spot.Reply{}
 }

@@ -4,9 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
 // Each section's search box searches that section: Albums finds albums and songs, Artists
@@ -134,7 +131,7 @@ func TestNewlyAddedPages(t *testing.T) {
 }
 
 // With Q2 Pod's "sections", the first page is the five sections, for it to show as pages a swipe
-// moves between; each is a list row whose URI fills it. Without, the same rows are the main list.
+// moves between; each is a list row whose URI fills it.
 func TestSectionsForFirmware(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "sections", true)
 	r := d.do("menu")
@@ -145,25 +142,5 @@ func TestSectionsForFirmware(t *testing.T) {
 		if row := r.Rows[i]; row.Kind != "list" || row.URI != op {
 			t.Errorf("%+v", row)
 		}
-	}
-	if r := newTestDaemon(t, &nav{}, "", true).do("menu"); r.Message != "refresh" {
-		t.Fatalf("without sections: %q", r.Message)
-	}
-}
-
-// With sections there is no main list to show a stream's failure: Settings shows it, first.
-func TestSectionsStreamErrorInSettings(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, mediaErr: 70}, "sections", true)
-	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	d.do("menu") // the firmware shows sections
-	d.do("play", "album:al0 0")
-	var r q2spot.Reply
-	const want = "Couldn't stream Song 0: Not found on the server" // as the main list says it without sections
-	eventually(t, "the stream error", func() bool { r = d.do("settings"); _, ok := find(r, want); return ok })
-	if r.Rows[0].Title != want || r.Rows[1].Title != "Details" || r.Rows[2].Title != "Sync" {
-		t.Fatalf("%q", titles(r))
-	}
-	if got := strings.Join(titles(d.do(r.Rows[1].URI, r.Rows[1].Context)), "|"); !strings.Contains(got, "Error: stream: http 404 code 70") {
-		t.Errorf("details %q", got)
 	}
 }

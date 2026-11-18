@@ -43,9 +43,13 @@ func TestFavouritesPage(t *testing.T) {
 	if len(got) != 4 || got[0] != "Add to Sync" || got[1] != "Play" || got[2] != "Song 0" || got[3] != "Song 1" {
 		t.Fatalf("page %q", got)
 	}
-	if m := d.do("play", favKey+" 1").Message; m != "Buffering Song 1…" {
-		t.Fatalf("play %q", m)
+	if r := d.do("play", favKey+" 1"); r.Message != "" || r.Status != "" {
+		t.Fatalf("play %+v", r)
 	}
+	eventually(t, "the queue from Song 1", func() bool {
+		b, _ := os.ReadFile(d.stream.urlsFile())
+		return strings.HasPrefix(string(b), "#Q2URLS/1\tstart=1") && strings.Contains(string(b), "\tSong 1\t")
+	})
 }
 
 func TestFavouritesEmpty(t *testing.T) {

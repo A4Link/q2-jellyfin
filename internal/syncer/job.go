@@ -58,7 +58,7 @@ type job struct {
 	unsaved int       // changes not on the card yet
 	saved   time.Time // when the manifest was last saved
 	failed  int       // songs whose download failed this run ...
-	arrived int       // ... and songs downloaded or taken from the cache
+	arrived int       // ... and songs downloaded
 	hold    bool      // a failure the whole sync shares: nothing is removed (I2)
 	removed bool      // the removals ran (space ran them early)
 	// recorded counts the songs recorded at each file (lower case): two at one, from older builds,
@@ -265,25 +265,23 @@ func (j *job) downloads() error {
 			if err := j.check(j.ctx); err != nil {
 				return err
 			}
-			n, cached := j.fromCache(w)
+			if err := j.space(w); err != nil {
+				return err
+			}
+			j.mu.Lock()
+			j.stat.Current = w.Song.Title
+			if w.Song.Artist != "" {
+				j.stat.Current = w.Song.Artist + " – " + w.Song.Title
+			}
+			j.mu.Unlock()
+			var n int64
 			var err error
-			if !cached {
-				if err := j.space(w); err != nil {
-					return err
-				}
-				j.mu.Lock()
-				j.stat.Current = w.Song.Title
-				if w.Song.Artist != "" {
-					j.stat.Current = w.Song.Artist + " – " + w.Song.Title
-				}
-				j.mu.Unlock()
-				if once {
-					n, err = j.fetch(j.ctx, w)
-				}
-				// A stop reason (Wi-Fi gone, the card) gets the retries that ride it out, as any song.
-				if !once || err != nil && j.ctx.Err() == nil && StopReason(err) != nil {
-					n, err = j.fetchTries(j.ctx, w)
-				}
+			if once {
+				n, err = j.fetch(j.ctx, w)
+			}
+			// A stop reason (Wi-Fi gone, the card) gets the retries that ride it out, as any song.
+			if !once || err != nil && j.ctx.Err() == nil && StopReason(err) != nil {
+				n, err = j.fetchTries(j.ctx, w)
 			}
 			if err != nil {
 				if j.ctx.Err() != nil {
@@ -325,7 +323,7 @@ func (j *job) downloads() error {
 			// save of its own: a Sync Quality change replaces every song, and each save writes the whole
 			// manifest (audit 2026-11-16 #6). Until then the manifest names the old file, still there (I4).
 			// A crash first leaves the new file unrecorded: the next sync replaces the song again, its
-			// download or cached copy renamed over that file (wanted at its old quality again, the song
+			// download renamed over that file (wanted at its old quality again, the song
 			// stays, and the file is left unrecorded). Another song recorded in the old file keeps it
 			// (removals' rule).
 			if old != nil && !oneFile(old.Path, w.Path) && j.recorded[strings.ToLower(old.Path)] == 0 {
@@ -337,9 +335,7 @@ func (j *job) downloads() error {
 					return err
 				}
 			}
-			if _, err := os.Stat(library.LyricsPath(w.Path)); !cached || err != nil { // a cached song brought its own
-				WriteLyrics(j.ctx, j.src, w.Song, w.Path, j.logf) // after the old file's .lrc went
-			}
+			WriteLyrics(j.ctx, j.src, w.Song, w.Path, j.logf) // after the old file's .lrc went
 			if dir := filepath.Dir(w.Path); !covers[dir] {
 				covers[dir] = true
 				j.cover(j.ctx, w)
@@ -350,21 +346,6 @@ func (j *job) downloads() error {
 		}
 	}
 	return nil
-}
-
-// fromCache takes w from the playback cache (FromCache) when it is there, dropping a .part an
-// earlier try left for it.
-func (r *Runner) fromCache(w plan.Want) (int64, bool) {
-	if r.FromCache == nil || owned(r.root, w.Path) != nil {
-		return 0, false
-	}
-	n, ok := r.FromCache(w)
-	if ok {
-		library.Remove(r.root, w.Path+".part")
-		library.Remove(r.root, w.Path+".part.key")
-		r.logf("sync: %s from the playback cache", w.Song.ID)
-	}
-	return n, ok
 }
 
 // keep records the items and MetaKeys of songs that needed no transfer (I12).

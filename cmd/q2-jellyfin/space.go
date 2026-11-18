@@ -9,7 +9,7 @@ import (
 
 // Space to Keep Free (Settings): a sync stops before a download would leave the card with less than
 // this, rather than filling it (syncer.Runner.Reserve). The Q2 needs room of its own: its library
-// database, playlists, the playback cache's moves, a firmware update.
+// database, playlists, a firmware update.
 
 var keepFreeSizes = []string{"256M", "512M", "1G", "2G"}
 

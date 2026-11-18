@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/A4Link/q2-jellyfin/internal/fw"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/selection"
 )
@@ -95,25 +94,6 @@ func TestStreamQualityPage(t *testing.T) {
 	opus, _ := find(r, "Opus 160 kbps")
 	if m := d.do(opus.URI, opus.Context).Message; m != "Streaming Quality: Opus 160 kbps" || d.settings().stream() != "opus-160" {
 		t.Fatalf("%q %q", m, d.settings().stream())
-	}
-}
-
-// Streaming at an Opus quality asks the server for that transcode and keeps it as .opus; without
-// the firmware's playlist extension (folder playback: FLAC and MP3 only) it is MP3 at the same rate.
-func TestStreamOpusTranscode(t *testing.T) {
-	e := newEnv(t, fw.Caps{Playlist: true})
-	e.s.quality = func() string { return "opus-160" }
-	e.s.start(songs(1, "flac"), 0)
-	until(t, "s0", func() bool { return exists(e.stream(0, "opus")) })
-	if u := e.src.got(); u[0] != "p:s0:opus-160" {
-		t.Fatal(u)
-	}
-	old := newEnv(t, fw.Caps{})
-	old.s.quality = func() string { return "opus-160" }
-	old.s.start(songs(1, "flac"), 0)
-	until(t, "s0 as mp3", func() bool { return exists(old.stream(0, "mp3")) })
-	if u := old.src.got(); u[0] != "p:s0:mp3-160" {
-		t.Fatal(u)
 	}
 }
 

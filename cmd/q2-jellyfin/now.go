@@ -265,7 +265,7 @@ func (d *daemon) nowSend() {
 		}
 		if c.kind == "start" {
 			d.rep.mu.Lock()
-			prev := d.rep.live // a song .playing told of (report.go) has stopped too
+			prev := d.rep.live // the song pressed, without .now (report.go), has stopped too
 			d.rep.live = nil
 			if prev != nil {
 				prev.stop.Stop()
