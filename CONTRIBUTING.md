@@ -52,7 +52,7 @@ Changes users can't notice (tests, refactors, CI) need no bullet: label the pull
 
 ```
 fix(library): cap playlist names at the 63 bytes the Q2 keeps
-feat(stream): skip a song the server can't send and play on
+fix(syncer): cap a download at twice its song's size
 ```
 
 Types: `feat`, `fix`, `docs`, `test`, `refactor`, `ci`. The scope is the package or area (`stream`, `library`, `syncer`, `jellyfin`, `login`, …) and can be left out. The body says why, and `Fixes #N` closes an issue.
