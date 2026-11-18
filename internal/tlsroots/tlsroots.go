@@ -198,7 +198,9 @@ func newTransport(roots *x509.CertPool, timeout time.Duration) *http.Transport {
 		DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
-		TLSClientConfig:       &tls.Config{RootCAs: roots, Time: Now, MinVersion: tls.VersionTLS12},
+		// The session cache lets a new connection resume instead of a full handshake.
+		TLSClientConfig: &tls.Config{RootCAs: roots, Time: Now, MinVersion: tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(0)},
 		// Covers run 6 at a time: keep enough idle connections to avoid a fresh TLS handshake per
 		// cover (slow on MIPS), but close them after a minute so idle Wi-Fi can sleep (audit B8).
 		MaxIdleConnsPerHost: 8,
