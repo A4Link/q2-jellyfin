@@ -193,10 +193,12 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 	for _, e := range m.Songs {
 		folders[strings.ToLower(filepath.Dir(e.Path))] = true
 	}
-	for _, w := range append(append([]Want(nil), p.Add...), p.Replace...) {
-		if d := strings.ToLower(filepath.Dir(w.Path)); w.Song.CoverArt != "" && !folders[d] {
-			folders[d] = true
-			p.NeedBytes += coverBytes
+	for _, ws := range [][]Want{p.Add, p.Replace} {
+		for _, w := range ws {
+			if d := strings.ToLower(filepath.Dir(w.Path)); w.Song.CoverArt != "" && !folders[d] {
+				folders[d] = true
+				p.NeedBytes += coverBytes
+			}
 		}
 	}
 

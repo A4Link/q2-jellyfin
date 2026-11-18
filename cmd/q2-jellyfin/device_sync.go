@@ -102,7 +102,9 @@ func (d *daemon) startPreview(cl *jellyfin.Client) (*preview, bool) {
 		return p, false
 	}
 	d.dropPreview()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	d.runner.Forget() // an ended run's plan; the new preview's Start Sync fetches its failed songs too
+	// No overall deadline: each request has its own limits, and dropPreview stops the check.
+	ctx, cancel := context.WithCancel(context.Background())
 	p = &preview{gen: d.gen, at: time.Now(), cancel: cancel}
 	d.preview = p
 	d.mu.Unlock()
@@ -164,6 +166,11 @@ func (d *daemon) downloadsHint(err error) []q2spot.Row {
 func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *preview) {
 	ctx, cancel := context.WithCancel(pctx)
 	defer cancel()
+	// The last Entire Library list goes first: a big one would be live beside the new one for the
+	// whole download, or kept after Entire Library is switched off. resolveLibrary sets it again.
+	d.mu.Lock()
+	delete(d.resolved, selection.Key(selection.KindLibrary, "all"))
+	d.mu.Unlock()
 	sel, err := d.selection()
 	resolved, names := map[string][]jellyfin.Song{}, map[string]string{}
 	var mu sync.Mutex
@@ -277,7 +284,9 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 		}
 	}
 	if err == nil { // after the preview shows: a request per song
-		d.backfillLyrics(ctx, resolved, pl)
+		bctx, bcancel := context.WithTimeout(ctx, 10*time.Minute)
+		d.backfillLyrics(bctx, resolved, pl)
+		bcancel()
 	}
 }
 
@@ -672,7 +681,7 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		}
 		// The removals count as freed, as in the plan's fit: a run short of space removes them first.
 		// Songs the sync takes from the playback cache stay in it until then, and need no room.
-		keep, cached := d.stream.cachedFor(append(append([]plan.Want(nil), p.plan.Add...), p.plan.Replace...))
+		keep, cached := d.stream.cachedFor(p.plan.Add, p.plan.Replace)
 		if net := p.plan.NeedBytes - p.plan.RemoveBytes - cached; net > 0 {
 			need := net + planMargin + keepFreeBytes(d.settings().KeepFree)
 			d.stream.evictFor(need, func() int64 { return d.free(d.card) }, keep)
@@ -777,20 +786,19 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 		return d.lib, nil
 	}
 	var imports, adds []string
-	if m, _ := library.LoadManifest(filepath.Join(d.card, ".jellyfin", "manifest.json")); m != nil {
-		for _, f := range m.Playlists {
-			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) || library.LongPlaylistFile(f) {
-				continue // an older version's name, longer than the Q2 keeps, waits for the sync that moves it
-			}
-			if m.Imported[f] {
-				imports = append(imports, f)
-			} else {
-				adds = append(adds, f)
-			}
+	m, _ := d.manifestErr()
+	for _, f := range m.Playlists {
+		if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) || library.LongPlaylistFile(f) {
+			continue // an older version's name, longer than the Q2 keeps, waits for the sync that moves it
 		}
-		sort.Strings(imports)
-		sort.Strings(adds)
+		if m.Imported[f] {
+			imports = append(imports, f)
+		} else {
+			adds = append(adds, f)
+		}
 	}
+	sort.Strings(imports)
+	sort.Strings(adds)
 	d.libAgain = false // this request names them all
 	return d.writeLibrary(true, imports, adds)
 }
@@ -853,6 +861,10 @@ func (d *daemon) saveLib(waiting bool) {
 // in the background, so the socket listens at once; a request this run already sent (d.lib) names
 // them all.
 func (d *daemon) libStart() {
+	if !exists(d.libMore()) {
+		return // no request left by an earlier run
+	}
+	d.manifestErr() // a resend's playlists: read here, not under d.mu in sendLibrary
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !exists(d.libMore()) || d.lib != nil {
@@ -889,8 +901,16 @@ func (d *daemon) libPoll() {
 	if !done {
 		return
 	}
+	if d.runner.Busy() {
+		return // a sync or its OnDone holds or reads the manifest: taken at the first tick after
+	}
 	if ok {
-		again, clash, err := d.runner.Imported(sent, exists)
+		var again, clash []string
+		var err error
+		// Imported loads the whole manifest: only when it can record something.
+		if len(exists) > 0 || d.newImports(sent) {
+			again, clash, err = d.runner.Imported(sent, exists)
+		}
 		rest := d.libRest
 		d.libClash = append(d.libClash, clash...)
 		for _, f := range clash { // logged now: a follow-up's answer may come only after a restart
@@ -898,7 +918,7 @@ func (d *daemon) libPoll() {
 		}
 		switch {
 		case errors.Is(err, syncer.ErrBusy):
-			return // a sync holds the manifest: taken once it ends
+			return // a sync or a preview holds the manifest: taken once it ends
 		case err != nil:
 			d.log.Printf("library: %v", err)
 			ok, msg = false, "Couldn't record the imported playlists"
@@ -936,6 +956,23 @@ func (d *daemon) libPoll() {
 	}
 }
 
+// newImports is whether sent names a file not yet recorded as imported, read from the copy pages
+// share (or a manifest that can't be read: Imported says why).
+func (d *daemon) newImports(sent [2][]string) bool {
+	m, err := d.manifestErr()
+	if err != nil {
+		return true
+	}
+	for _, files := range sent {
+		for _, f := range files {
+			if !m.Imported[f] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // there is paths but those gone since (a sync deleted the playlist): the firmware fails a whole
 // request over one it can't find.
 func there(paths []string) []string {
@@ -964,6 +1001,7 @@ func (d *daemon) syncDone(p plan.Plan) {
 	if !send {
 		return
 	}
+	d.manifestErr() // the run's last save is read here, not under d.mu in sendLibrary
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, err := d.sendLibrary(); err != nil {
@@ -1092,7 +1130,7 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 	res.songs = all
 	d.mu.Lock()
 	d.resolved[selection.Key(selection.KindLibrary, "all")] = res.songs
-	d.libCount = [2]int{len(albums), len(pls)}
+	d.libCount, d.libKnown = [2]int{len(albums), len(pls)}, true
 	d.mu.Unlock()
 	return res, nil
 }

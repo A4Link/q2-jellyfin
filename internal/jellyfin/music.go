@@ -2,6 +2,7 @@ package jellyfin
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"path"
 	"sort"
@@ -194,6 +195,9 @@ func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, 
 			lq.Set("startIndex", strconv.Itoa(start))
 			lq.Set("limit", strconv.Itoa(page))
 			r, err := c.items(ctx, lq)
+			if errors.Is(err, ErrUnreachable) && ctx.Err() == nil { // once more: a dropped page ends no check
+				r, err = c.items(ctx, lq)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -230,7 +234,7 @@ func (c *Client) allMusic(ctx context.Context, q url.Values, page int) ([]Song, 
 // Entire Library's songs in about one request per 500, not one per album.
 func (c *Client) AllSongs(ctx context.Context) ([]Song, error) {
 	return c.allMusic(ctx, url.Values{"includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {songOrder}}, 500)
+		"sortBy": {songOrder}, "enableUserData": {"false"}}, 500) // nothing reads a synced song's user data
 }
 
 // pagedMusic is one page (offset, size) of q across the music libraries, taken in library order:

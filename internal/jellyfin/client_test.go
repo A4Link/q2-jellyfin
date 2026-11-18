@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/A4Link/q2-jellyfin/internal/applog"
 )
@@ -243,6 +244,20 @@ func TestSuffixFromContainer(t *testing.T) {
 		if got := (wireItem{Container: in}).suffix(); got != want {
 			t.Errorf("%s: %s, want %s", in, got, want)
 		}
+	}
+}
+
+// A song's suffix is its own string: a slice of the server path would keep the whole path in memory
+// for every fetched song (round 2 speed 6).
+func TestSuffixOwnString(t *testing.T) {
+	var w wireItem
+	if err := json.Unmarshal([]byte(`{"Id":"s1","MediaSources":[{"Path":"/data/music/Artist/Album (2001)/01 - Title.flac"}]}`), &w); err != nil {
+		t.Fatal(err)
+	}
+	p, s := w.MediaSources[0].Path, w.suffix()
+	start, at := uintptr(unsafe.Pointer(unsafe.StringData(p))), uintptr(unsafe.Pointer(unsafe.StringData(s)))
+	if s != "flac" || at >= start && at < start+uintptr(len(p)) {
+		t.Fatalf("suffix %q shares the path's memory", s)
 	}
 }
 
@@ -585,6 +600,45 @@ func TestTiedSongsSwappedBetweenPages(t *testing.T) {
 	})
 	if _, err := signedIn(t, srv).AllSongs(context.Background()); !errors.Is(err, ErrChanged) {
 		t.Fatalf("%v", err)
+	}
+}
+
+// AllSongs asks for no user data: each song's would be downloaded at every Entire Library preview
+// and thrown away (round 5 speed 2).
+func TestAllSongsNoUserData(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			if v := r.URL.Query().Get("enableUserData"); v != "false" {
+				t.Errorf("enableUserData %q", v)
+			}
+			fmt.Fprint(w, `{"Items":[{"Id":"s1","Type":"Audio"}],"TotalRecordCount":1}`)
+		},
+	})
+	if _, err := signedIn(t, srv).AllSongs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A song page that fails once is asked again, not the end of the whole list (round 6 speed 1).
+func TestAllSongsAsksFailedPageAgain(t *testing.T) {
+	var failed atomic.Bool
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+			if start == 1000 && !failed.Swap(true) {
+				http.Error(w, "", http.StatusServiceUnavailable)
+				return
+			}
+			var items []string
+			for i := start; i < start+500 && i < 1200; i++ {
+				items = append(items, fmt.Sprintf(`{"Id":"s%d","Type":"Audio"}`, i))
+			}
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1200,"StartIndex":%d}`, strings.Join(items, ","), start)
+		},
+	})
+	ss, err := signedIn(t, srv).AllSongs(context.Background())
+	if err != nil || len(ss) != 1200 || !failed.Load() {
+		t.Fatalf("%d songs, %v", len(ss), err)
 	}
 }
 

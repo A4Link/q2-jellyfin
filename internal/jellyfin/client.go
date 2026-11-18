@@ -696,7 +696,12 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		q.Set("startIndex", strconv.Itoa(start))
 		q.Set("limit", strconv.Itoa(listPage))
 		var r itemPage
-		if err := c.call(ctx, "GET", p, q, nil, &r); err != nil {
+		err := c.call(ctx, "GET", p, q, nil, &r)
+		if errors.Is(err, ErrUnreachable) && ctx.Err() == nil { // once more: a dropped page ends no check
+			r = itemPage{}
+			err = c.call(ctx, "GET", p, q, nil, &r)
+		}
+		if err != nil {
 			var ae *APIError
 			if errors.As(err, &ae) && ae.Code == CodeGone { // a list's 404 is no item deleted: an HTTP error
 				e := *ae
