@@ -1042,3 +1042,55 @@ func TestLastIgnoresACoverTimeout(t *testing.T) {
 		t.Error("a cover's timeout was recorded as the connection's state")
 	}
 }
+
+// An answer within maxBody made of tiny array values (0, null) would decode to over 1 GB: it is
+// refused as too large. A real-shaped 500-song page, its commas in strings too, still loads.
+func TestTinyArrayValuesRefused(t *testing.T) {
+	var body string
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) },
+	})
+	c := signedIn(t, srv)
+	for _, v := range []string{"0,", "null,"} {
+		body = `{"Items":[` + strings.Repeat(v, (maxBody-40)/len(v)) + `0],"TotalRecordCount":1}`
+		_, err := c.Albums(context.Background(), 0, 500, "name", false)
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.Msg != "Answer too large for the Q2" {
+			t.Fatalf("%q: %v", v, err)
+		}
+	}
+	var items []string
+	for i := range 500 {
+		items = append(items, fmt.Sprintf(`{"Id":"al%d","Name":"A, \"B\" [%d,%d,%d]","Type":"MusicAlbum",`+
+			`"Artists":["X","Y","Z"],"ArtistItems":[{"Id":"x","Name":"X"},{"Id":"y","Name":"Y"}],"Genres":["Rock","Pop"]}`, i, i, i, i))
+	}
+	body = `{"Items":[` + strings.Join(items, ",") + `],"TotalRecordCount":500}`
+	if got, err := c.Albums(context.Background(), 0, 500, "name", false); err != nil || len(got) != 500 {
+		t.Fatalf("%d albums, %v", len(got), err)
+	}
+}
+
+// ImageTags keeps only Primary: a hostile answer's ImageTags of 100,000 keys is skipped, not
+// kept in a map, and the cover tag still comes through.
+func TestImageTagsOnlyPrimary(t *testing.T) {
+	keys := make([]string, 100_000)
+	for i := range keys {
+		keys[i] = fmt.Sprintf(`"%d":""`, i)
+	}
+	body := []byte(`{"Id":"al1","ImageTags":{` + strings.Join(keys, ",") + `,"Primary":"t"}}`)
+	var w wireItem
+	allocs := testing.AllocsPerRun(1, func() {
+		w = wireItem{}
+		if err := json.Unmarshal(body, &w); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if (allocs > 100 && !raceOn) || w.album().CoverArt != "al1" {
+		t.Fatalf("%v allocations, cover %q", allocs, w.album().CoverArt)
+	}
+	w = wireItem{}
+	json.Unmarshal([]byte(`{"Id":"s1","ImageTags":{"Primary":"t","Logo":"l"},"BackdropImageTags":[]}`), &w)
+	if w.song().CoverArt != "s1" {
+		t.Errorf("real-shaped answer: cover %q", w.song().CoverArt)
+	}
+}

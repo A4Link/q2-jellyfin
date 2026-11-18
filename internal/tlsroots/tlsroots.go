@@ -154,7 +154,8 @@ func fetchDate(u string) (time.Time, error) {
 // used: it is empty for an IP address, which would skip the name check.
 func dateTransport(roots *x509.CertPool, host string) *http.Transport {
 	return &http.Transport{
-		DisableKeepAlives: true,
+		DisableKeepAlives:      true,
+		MaxResponseHeaderBytes: 64 << 10, // a Date answer's are a few hundred bytes
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Go can only run its own checks at a fixed Time, so verify here instead; this is the
@@ -202,6 +203,8 @@ func newTransport(roots *x509.CertPool, timeout time.Duration) *http.Transport {
 		// cover (slow on MIPS), but close them after a minute so idle Wi-Fi can sleep (audit B8).
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     60 * time.Second,
+		// Jellyfin's headers are a few hundred bytes; Go's default allows 10 MB per answer.
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 	if roots == pool {
 		transports[timeout] = t
