@@ -18,6 +18,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - **Choose Playlists on the Sync page says *Included via Entire Library*** with Entire Library in Sync, as the playlists on its page do, instead of *0 playlists in Sync*.
 - **A Sync check that fails offers *Check Again*,** between the message and *Details*, as a stopped sync's page does. Before, the page had no row to try again.
 - **A Sync check that runs past 20 seconds says *A big library takes minutes*** under *Checking server…*.
+- **A server that fails every song no longer slows a sync:** after a song fails, the next one is tried once, without waiting, so a sync where every song fails (the server's music drive unmounted, its transcoder failing) gets through quickly instead of taking about 10 seconds a song with the Q2 kept out of standby. The sync still runs to its end: the songs that arrive are synced and the playlists written, and removals follow the usual rule. A song the server says isn't there is tried once, not three times. Failed songs are listed under *Failed Songs* on the Sync page also when a sync stops or pauses, and *Retry Failed* there resumes a paused sync and says *Sync started again*. While a sync runs, the song count says how many failed so far. *Failed Songs* lists the first 500 failed songs, and how many more failed. The Sync row in Settings says *Sync stopped* when a sync stopped.
 
 ## [0.8.0] - 2026-11-16
 

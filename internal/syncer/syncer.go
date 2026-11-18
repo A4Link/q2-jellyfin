@@ -369,15 +369,14 @@ func (r *Runner) Cancel() {
 	}
 }
 
-// RetryFailed runs the last plan again once it has ended with failures; finished songs are skipped.
-func (r *Runner) RetryFailed() {
+// RetryFailed runs the last plan again once it has ended with failures, or is paused (as Resume);
+// finished songs are skipped. It reports whether it started a run.
+func (r *Runner) RetryFailed() bool {
 	r.mu.Lock()
 	p := r.plan
-	ok := p != nil && (r.state == "error" || r.state == "done" && r.failedN > 0)
+	ok := p != nil && (r.state == "error" || r.state == "paused" || r.state == "done" && r.failedN > 0)
 	r.mu.Unlock()
-	if ok {
-		r.Start(*p)
-	}
+	return ok && r.Start(*p) == nil
 }
 
 // DropMissing forgets the songs of m, the card's manifest as the caller read it, whose files are
@@ -449,6 +448,10 @@ func (r *Runner) Snapshot() Snapshot {
 	return s
 }
 
+// maxFailures is how many song failures a run lists, what Q2 Pod pages through; covers are listed
+// beside them. A server that fails every song would otherwise keep one per song.
+const maxFailures = 500
+
 func (r *Runner) fail(id, title, op string, err error) {
 	f := Failure{SongID: id, Title: title, Op: op, At: r.Now(), Msg: applog.Redact(err.Error())}
 	var ae *jellyfin.APIError
@@ -458,10 +461,13 @@ func (r *Runner) fail(id, title, op string, err error) {
 	r.logf("sync: %s %s failed: %s", op, id, f.Msg)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.failures = append(r.failures, f)
 	if op != "cover" {
 		r.failedN++
+		if r.failedN > maxFailures { // counted, not listed
+			return
+		}
 	}
+	r.failures = append(r.failures, f)
 }
 
 func (r *Runner) finished(w plan.Want) {
@@ -659,10 +665,13 @@ func (j *job) renames() error {
 }
 
 // downloads fetches the adds and replaces, recording them in batches (M18). It ends the run on a
-// failure the whole sync shares (I3, R39).
+// failure the whole sync shares (I3, R39). A song after one that failed for its own cause gets one
+// try with no waits: a server whose music drive is gone, or whose transcoder fails, fails every
+// song, and fetchTries' waits on each kept the Q2 from standby for hours.
 func (j *job) downloads() error {
 	covers := map[string]bool{} // album folders whose cover was tried this run
 	streak := 0                 // songs failed in a row for the same reason as the whole sync would (I3)
+	once := false               // the song before failed for its own cause: one try for this one
 	for _, w := range append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...) {
 		id := w.Song.ID
 		if e := j.m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) &&
@@ -685,7 +694,13 @@ func (j *job) downloads() error {
 				j.current = w.Song.Artist + " – " + w.Song.Title
 			}
 			j.mu.Unlock()
-			n, err = j.fetchTries(j.ctx, w)
+			if once {
+				n, err = j.fetch(j.ctx, w)
+			}
+			// A stop reason (Wi-Fi gone, the card) gets the retries that ride it out, as any song.
+			if !once || err != nil && j.ctx.Err() == nil && StopReason(err) != nil {
+				n, err = j.fetchTries(j.ctx, w)
+			}
 		}
 		if err != nil {
 			if j.ctx.Err() != nil {
@@ -700,15 +715,16 @@ func (j *job) downloads() error {
 			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 				return stop
 			case stop == nil:
-				streak = 0
+				streak, once = 0, true
 			default: // a connection or the card can come back: two songs in a row
+				once = false
 				if streak++; streak >= 2 {
 					return stop
 				}
 			}
 			continue
 		}
-		streak = 0
+		streak, once = 0, false
 		old := j.m.Songs[id]
 		e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
 			Meta: library.MetaKey(w.Song, w.Quality)}
@@ -1072,7 +1088,7 @@ func (r *Runner) carryCover(from, to string) {
 }
 
 // fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but
-// the last.
+// the last. A song the server says isn't there (jellyfin.CodeGone) gets one try.
 func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 	var err error
 	for i, d := range r.Backoff {
@@ -1081,8 +1097,9 @@ func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 		if n, err = r.fetch(ctx, w); err == nil {
 			return n, nil
 		}
-		if ctx.Err() != nil || !r.CardMounted() || errors.Is(StopReason(err), ErrRefused) {
-			return 0, err // a refusal for the account is the same on every try
+		var ae *jellyfin.APIError
+		if ctx.Err() != nil || !r.CardMounted() || errors.Is(StopReason(err), ErrRefused) || errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
+			return 0, err // a refusal for the account, or a song not there, is the same on every try
 		}
 		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, err)
 		if i == len(r.Backoff)-1 {

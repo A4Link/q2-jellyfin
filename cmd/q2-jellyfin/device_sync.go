@@ -47,25 +47,7 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 	case snap.State == "done" && showDone:
 		return d.doneRows(snap)
 	case snap.State == "error" && showDone:
-		msg := "Sync stopped"
-		if snap.Err != nil {
-			msg += " · " + d.stopMessage(snap.Err)
-		}
-		op, h, code := "sync", 0, 0
-		var ae *jellyfin.APIError
-		if errors.As(snap.Err, &ae) {
-			op, h, code = ae.Op, ae.HTTP, ae.Code
-		}
-		det := detailsCtx(op, h, code, snap.ErrAt, "") // when it stopped (review G3, Minor 3)
-		if snap.Err != nil {
-			det = withErr(det, snap.Err)
-		}
-		rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(snap.Err)...)
-		d.mu.Lock()
-		check := d.checkRow()
-		d.mu.Unlock()
-		return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), check,
-			list("details", "Details", "", det))}
+		return d.stoppedRows(snap)
 	}
 	if _, err := d.selection(); err != nil {
 		return damagedSelection()
@@ -389,7 +371,11 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		n := min(max((s.Permille+50)/100, 0), 10)
 		rows = append(rows, info("["+strings.Repeat("#", n)+strings.Repeat("-", 10-n)+"] "+pct))
 	}
-	rows = append(rows, info(fmt.Sprintf("%d of %s", s.Done, plural(s.Total, "song"))))
+	count := fmt.Sprintf("%d of %s", s.Done, plural(s.Total, "song"))
+	if s.Failed > 0 {
+		count += fmt.Sprintf(" · %d failed", s.Failed)
+	}
+	rows = append(rows, info(count))
 	if s.ETA > 0 && s.State == "running" {
 		rows = append(rows, info(eta(s.ETA)))
 	}
@@ -406,6 +392,9 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 			rows = append(rows, info("The card is full"))
 		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
 			rows = append(append(rows, info(jellyfin.Message(s.Err, d.hostName()))), d.downloadsHint(s.Err)...) // with code 50 (R39) too
+		}
+		if s.Failed > 0 {
+			rows = append(rows, list("failed", "Failed Songs", "", ""))
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {
@@ -530,6 +519,32 @@ func eta(t time.Duration) string {
 	return fmt.Sprintf("About %d h %d min left", m/60, m%60)
 }
 
+// stoppedRows is a sync stopped by an error: why, the songs that failed before it, Retry and Details.
+func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
+	d.mu.Lock()
+	check := d.checkRow()
+	d.mu.Unlock()
+	msg := "Sync stopped"
+	if s.Err != nil {
+		msg += " · " + d.stopMessage(s.Err)
+	}
+	op, h, code := "sync", 0, 0
+	var ae *jellyfin.APIError
+	if errors.As(s.Err, &ae) {
+		op, h, code = ae.Op, ae.HTTP, ae.Code
+	}
+	det := detailsCtx(op, h, code, s.ErrAt, "") // when it stopped (review G3, Minor 3)
+	if s.Err != nil {
+		det = withErr(det, s.Err)
+	}
+	rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(s.Err)...)
+	if s.Failed > 0 {
+		rows = append(rows, list("failed", "Failed Songs", "", ""))
+	}
+	return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), check,
+		list("details", "Details", "", det))}
+}
+
 func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	// What the run did: songs fetched, renamed, removed; a run that moved none rewrote playlists
 	// (review G3, Minor 7).
@@ -587,13 +602,20 @@ func (d *daemon) checkRow() q2spot.Row {
 }
 
 func (d *daemon) failed(cursor string) q2spot.Reply {
-	rows := []q2spot.Row{act("retry", "Retry Failed", "")}
-	for _, f := range d.runner.Snapshot().Failures {
+	s := d.runner.Snapshot()
+	var songs []q2spot.Row
+	for _, f := range s.Failures {
 		if f.Op != "cover" {
-			rows = append(rows, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
+			songs = append(songs, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
 		}
 	}
-	return page(rows, cursor)
+	rows := []q2spot.Row{act("retry", "Retry Failed", "")}
+	// The runner lists only the first of many; the count goes near the top, within the pages
+	// the firmware loads before More….
+	if s.Failed > len(songs) {
+		rows = append(rows, info(fmt.Sprintf("%d failed · the first %d are listed", s.Failed, len(songs))))
+	}
+	return page(append(rows, songs...), cursor)
 }
 
 // removed lists what the previewed sync deletes.
@@ -666,10 +688,13 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 	case "cancel":
 		d.spawn(d.runner.Cancel)
 	case "retry":
-		d.runner.RetryFailed()
+		started := d.runner.RetryFailed()
 		d.mu.Lock()
 		d.showDone = true
 		d.mu.Unlock()
+		if started {
+			return q2spot.Reply{Message: "Sync started again"}
+		}
 	case "check":
 		d.mu.Lock()
 		d.showDone = false
