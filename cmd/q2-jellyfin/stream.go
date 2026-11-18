@@ -541,6 +541,13 @@ func (r *streamRun) fetch(sg jellyfin.Song, j job, i int) error {
 	if err == nil {
 		err = syncer.SizeErr(n, resp.ContentLength, limit)
 	}
+	if err == nil && resp.ContentLength < 0 && !quality.IsOriginal(j.quality) {
+		at := part
+		if released {
+			at = j.path
+		}
+		err = syncer.OggCut(at) // a sync takes the cached song as it is
+	}
 	if err == nil {
 		err = f.Sync()
 	}
