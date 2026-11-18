@@ -6,6 +6,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/library"
 	"github.com/A4Link/q2-jellyfin/internal/plan"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
+	"github.com/A4Link/q2-jellyfin/internal/quality"
 )
 
 var ErrBusy = errors.New("a sync is already running")
@@ -1298,6 +1300,13 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	if err == nil {
 		err = SizeErr(n-from, resp.ContentLength, limit) // checked before the rename (I8)
 	}
+	switch {
+	case err != nil || resp.ContentLength >= 0:
+	case !quality.IsOriginal(w.Quality):
+		err = OggCut(part) // a transcode has no length to fall short of
+	case w.Bytes > 0 && n != w.Bytes: // an original's length dropped on the way (a proxy's gzip)
+		err = fmt.Errorf("the server sent %d of %d bytes", n, w.Bytes)
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -1342,6 +1351,43 @@ func SizeErr(n, contentLength, limit int64) error {
 		return fmt.Errorf("the server sent more than the %d bytes expected", limit)
 	}
 	return nil
+}
+
+// OggCut refuses an Ogg file (an Opus transcode) at path that doesn't end with a whole
+// end-of-stream page: a server whose ffmpeg stops part-way, or that closes the connection, ends
+// its answer cleanly, short. A file that isn't Ogg is not checked. An Ogg page is at most 65307
+// bytes, so the last one starts within the last 64 KiB.
+func OggCut(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	head := make([]byte, 4)
+	if _, err := f.ReadAt(head, 0); err != nil || string(head) != "OggS" {
+		return nil
+	}
+	off := max(fi.Size()-64<<10, 0)
+	tail := make([]byte, fi.Size()-off)
+	if _, err := f.ReadAt(tail, off); err != nil {
+		return err
+	}
+	if p := tail[max(bytes.LastIndex(tail, []byte("OggS\x00")), 0):]; len(p) >= 27 && p[5]&4 != 0 {
+		n := 27 + int(p[26]) // the header, its segment table, then the segments it lists
+		if len(p) >= n {
+			for _, s := range p[27:n] {
+				n += int(s)
+			}
+		}
+		if n == len(p) {
+			return nil
+		}
+	}
+	return errors.New("the server stopped before the end of the song")
 }
 
 // copy writes body to f, counting progress; n starts at from (the bytes already in the .part).

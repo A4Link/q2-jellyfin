@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2124,6 +2125,59 @@ func TestBodyBounds(t *testing.T) {
 			}
 			if _, err := os.Stat(w.Path); err == nil {
 				t.Fatal("saved as the song")
+			}
+		})
+	}
+}
+
+// oggPages is an Ogg stream of 1000 pages (over the 64 KiB looked at), its last flagged
+// end-of-stream (header_type 4), as a server's whole transcode ends.
+func oggPages() []byte {
+	var b []byte
+	for i := range 1000 {
+		h := make([]byte, 28, 28+200)
+		copy(h, "OggS")
+		if i == 999 {
+			h[5] = 4
+		}
+		h[26], h[27] = 1, 200 // one segment of 200 bytes
+		b = append(b, append(h, bytes.Repeat([]byte{byte(i)}, 200)...)...)
+	}
+	return b
+}
+
+// An Ogg transcode sent without Content-Length is a song only when it ends with its whole
+// end-of-stream page: one its server stopped part-way also ends cleanly (finding 13c). An
+// original is not checked so, as its last page may lack the flag (a recording cut from a radio
+// stream); a proxy that gzips it drops its length, so it must come to its planned size.
+func TestOggTranscodeEnds(t *testing.T) {
+	whole := oggPages()
+	cut := whole[:len(whole)/2+100]
+	for name, c := range map[string]struct {
+		b     []byte
+		n     int64
+		q     string
+		size  int64 // the song's size as planned; 0: all of b
+		saved bool
+	}{
+		"whole":                      {whole, -1, "opus-128", 0, true},
+		"cut":                        {cut, -1, "opus-128", 0, false},
+		"cut in its last page":       {whole[:len(whole)-50], -1, "opus-128", 0, false},
+		"cut, Content-Length":        {cut, int64(len(cut)), "opus-128", 0, true},
+		"not Ogg, no length":         {data("a"), -1, "opus-128", 0, true},
+		"original, no EOS":           {cut, -1, "original", 0, true},
+		"original, no length, short": {cut, -1, "original", int64(len(whole)), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			r := New(root, crafted{func() (io.Reader, int64) { return bytes.NewReader(c.b), c.n }}, nil)
+			r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond}, func() bool { return true }, NewNetSlot()
+			w := want(root, "a", c.q)
+			w.Bytes = cmp.Or(c.size, int64(len(c.b)))
+			r.Start(plan.Plan{Add: []plan.Want{w}})
+			s := wait(t, r)
+			if _, err := os.Stat(w.Path); (err == nil) != c.saved || (s.Failed == 0) != c.saved {
+				t.Fatalf("saved %v, want %v: %+v", err == nil, c.saved, s)
 			}
 		})
 	}

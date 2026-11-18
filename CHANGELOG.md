@@ -28,6 +28,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Fixed
 
 - **A Sync Quality change that makes songs smaller gets past a nearly full card:** the sync replaces songs before it adds new ones, so the old, bigger files go first. It added first, and stopped at the first new song every time, though the change would have made room. A replace that makes its song smaller goes ahead when it fits, and can take the card under Space to Keep Free by that one song until the next record deletes its old file.
+- **A song whose Opus transcode the server stopped part-way is synced again**: when Jellyfin's encoder failed mid-song, or the connection was closed, the cut file was kept as the whole song and never fetched again until its quality or tags changed. A transcode is now kept only when it ends where an Ogg stream ends; otherwise the song fails, and the next sync brings it again. The Playback Cache, which a sync takes songs from, keeps no cut song either.
 
 ## [0.8.0] - 2026-11-16
 
