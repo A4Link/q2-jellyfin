@@ -133,7 +133,7 @@ func waitSync(t *testing.T, d *tdaemon, state string) syncer.Snapshot {
 // each the server's own file, and a Favourites playlist.
 func TestLiveSyncFavourites(t *testing.T) {
 	d, _ := liveDaemon(t, 0)
-	if m := d.do("syncfav").Message; m != "Added to Sync · 3 songs · starting" {
+	if m := d.do("syncfav").Message; m != "Added to Sync · 3 songs" {
 		t.Fatalf("%q", m)
 	}
 	waitSync(t, d, "done")

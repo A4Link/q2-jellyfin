@@ -442,6 +442,30 @@ func TestFoldersRetriedAfterTimeout(t *testing.T) {
 	}
 }
 
+// An account that sees no music library gets an error, not an empty list: a sync would read that
+// as every song gone. It isn't kept, so the library given back later is found (audit 2026-11-16 #3).
+func TestNoMusicLibrary(t *testing.T) {
+	var views atomic.Int32
+	f := &fake{h: map[string]http.HandlerFunc{"/Items": func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Items":[],"TotalRecordCount":0}`))
+	}}}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/UserViews" && views.Add(1) == 1 {
+			w.Write([]byte(`{"Items":[{"Id":"films","Name":"Movies","CollectionType":"movies"}]}`))
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := signedIn(t, srv)
+	if s, err := c.AllSongs(context.Background()); err == nil || Message(err, "h") != "No music library on the server for this account" {
+		t.Fatalf("%d songs, %v", len(s), err)
+	}
+	if _, err := c.AllSongs(context.Background()); err != nil || views.Load() != 2 {
+		t.Fatalf("%v, %d lookups", err, views.Load())
+	}
+}
+
 // A download the server refuses for the account says so, and counts as a refusal (ErrAuth).
 func TestDownloadsOff(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{

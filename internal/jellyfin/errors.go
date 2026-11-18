@@ -31,6 +31,9 @@ var (
 	ErrStalled = fmt.Errorf("server stopped sending: %w", ErrUnreachable)
 	// ErrChanged is a list whose total changed between pages: an item may have been skipped.
 	ErrChanged = errors.New("the library changed while it was read")
+	// ErrNoMusic is an account that sees no music library: an empty list would read as every
+	// song gone, and a sync would remove them all.
+	ErrNoMusic = errors.New("no music library for this account")
 )
 
 // CodeGone is APIError.Code for an item the server says isn't there (HTTP 404 from Jellyfin
@@ -113,6 +116,8 @@ func Message(err error, host string) string {
 		return "Not a Jellyfin server"
 	case errors.Is(err, ErrChanged):
 		return "The library changed while it was read. Try again"
+	case errors.Is(err, ErrNoMusic):
+		return "No music library on the server for this account"
 	case errors.As(err, &ae) && ae.Code == CodeGone:
 		return "Not found on the server"
 	case errors.As(err, &ae) && ae.HTTP != 0 && (ae.HTTP < 200 || ae.HTTP > 299) && errors.Is(err, ErrUnreachable):

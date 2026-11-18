@@ -98,7 +98,7 @@ func TestSyncJobsHoldRestarts(t *testing.T) {
 	d.preview(t)
 	d.do("start")
 	eventually(t, "the sync to run", func() bool { return d.runner.Snapshot().State == "running" })
-	if m := d.do("hold", favKey).Message; m != "Held · sync restarting" {
+	if m := d.do("hold", favKey).Message; m != "Held · checking the sync again" {
 		t.Fatalf("hold %q", m)
 	}
 	close(n.block)

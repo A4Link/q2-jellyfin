@@ -71,7 +71,7 @@ func TestSyncFavouritesOnePress(t *testing.T) {
 	if row := r.Rows[2]; row.Kind != "action" || row.URI != "syncfav" || row.Title != "Sync Favourites" {
 		t.Fatalf("Sync page %+v", r.Rows)
 	}
-	if m := d.do("syncfav").Message; m != "Added to Sync · 2 songs · starting" {
+	if m := d.do("syncfav").Message; m != "Added to Sync · 2 songs" {
 		t.Fatalf("%q", m)
 	}
 	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
@@ -82,12 +82,28 @@ func TestSyncFavouritesOnePress(t *testing.T) {
 	if len(m) != 2 {
 		t.Fatalf("synced %v", m)
 	}
-	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "In Sync · press to sync now" {
+	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "In Sync · press to check for new hearts" {
 		t.Fatalf("%+v", row)
 	}
-	if m := d.do("syncfav").Message; m != "Syncing Favourites · starting" { // in Sync already: just sync
+	if m := d.do("syncfav").Message; m != "Checking Favourites" { // in Sync already: just sync
 		t.Fatalf("again %q", m)
 	}
+}
+
+// Sync Favourites resumes Favourites held in Sync Jobs: held, it would add no new hearts.
+func TestSyncFavouritesResumesHeld(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, favs: 2}, "", true)
+	d.do("toggle", favKey)
+	if m := d.do("hold", favKey).Message; m != "Held" {
+		t.Fatalf("hold %q", m)
+	}
+	if m := d.do("syncfav").Message; m != "Checking Favourites" {
+		t.Fatalf("%q", m)
+	}
+	if it := d.selected(t); len(it) != 1 || it[0].Held {
+		t.Fatalf("%+v", it)
+	}
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" && d.runner.Snapshot().Total == 2 })
 }
 
 // Choose Playlists lists the playlists, each pressed in and out of Sync.

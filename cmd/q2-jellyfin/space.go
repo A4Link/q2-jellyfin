@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
@@ -61,9 +62,9 @@ func nextKeepFree(v string) string {
 // On This Q2 can reset it; the others say so when pressed.
 func (d *daemon) syncSources() []q2spot.Row {
 	sel, err := d.selection()
-	fav := q2spot.Row{Kind: "action", URI: "syncfav", Title: "Sync Favourites", Subtitle: "Add your favourites to Sync and start"}
+	fav := q2spot.Row{Kind: "action", URI: "syncfav", Title: "Sync Favourites", Subtitle: "Add your favourites to Sync"}
 	if sel.Has(selection.KindFavorites, "all") {
-		fav.Subtitle = "In Sync · press to sync now"
+		fav.Subtitle = "In Sync · press to check for new hearts"
 	}
 	n := 0
 	for _, it := range sel.Items {
@@ -76,18 +77,31 @@ func (d *daemon) syncSources() []q2spot.Row {
 }
 
 // syncFavourites is Sync Favourites: Favourites joins Sync (at Sync Quality) if it isn't there,
-// and the sync starts by itself once its preview is ready. As every sync, it downloads what is
-// missing for the whole selection and stops before the card falls under Space to Keep Free.
+// held in Sync Jobs it is resumed, and the sync starts by itself once its preview is ready, unless
+// it removes songs. As every sync, it downloads what is missing for the whole selection and stops
+// before the card falls under Space to Keep Free.
 func (d *daemon) syncFavourites(ctx context.Context, cl *jellyfin.Client) q2spot.Reply {
 	if st := d.runner.Snapshot().State; st == "running" || st == "paused" {
 		return q2spot.Reply{Message: "A sync is already under way"}
 	}
+	d.selMu.Lock()
 	sel, err := d.selection()
 	if err != nil {
+		d.selMu.Unlock()
 		return q2spot.Fail(q2spot.Error, selDamaged)
 	}
-	msg := "Syncing Favourites"
-	if !sel.Has(selection.KindFavorites, "all") { // Entire Library has its songs, not its playlist
+	i := slices.IndexFunc(sel.Items, func(it selection.Item) bool { return it.Kind == selection.KindFavorites && it.ID == "all" })
+	if i >= 0 && sel.Items[i].Held { // held, it would add no new hearts
+		sel.SetHeld(selection.KindFavorites, "all", false)
+		err = d.saveSelection(sel)
+	}
+	d.selMu.Unlock()
+	if err != nil {
+		return q2spot.Fail(q2spot.Error, "Couldn't save")
+	}
+	// No start is promised: a sync that removes songs waits for Start Sync.
+	msg := "Checking Favourites"
+	if i < 0 { // Entire Library has its songs, not its playlist
 		r := d.toggle(ctx, cl, favKey)
 		if r.Status != "" && r.Status != q2spot.OK {
 			return r
@@ -95,11 +109,11 @@ func (d *daemon) syncFavourites(ctx context.Context, cl *jellyfin.Client) q2spot
 		msg = r.Message // "Added to Sync · N songs"
 	}
 	d.mu.Lock()
-	d.autoStart = true
+	d.autoStart, d.showDone = true, false
 	d.dropPreview()
 	d.mu.Unlock()
 	d.startPreview(cl)
-	return q2spot.Reply{Message: msg + " · starting"}
+	return q2spot.Reply{Message: msg}
 }
 
 // syncPlaylists is Choose Playlists: every music playlist, each pressed to join or leave Sync.

@@ -41,7 +41,8 @@ type scopeCache struct {
 	scanned bool // roots is set; a scan that failed leaves it false, so the next call retries
 }
 
-// music is the user's music libraries, asked once per client: one request, before any list.
+// music is the user's music libraries, asked once per client: one request, before any list. None
+// is ErrNoMusic, not kept, so the next call asks again (a library shared with the account later).
 func (c *Client) music(ctx context.Context) (*musicScope, error) {
 	c.scope.mu.Lock()
 	defer c.scope.mu.Unlock()
@@ -58,6 +59,9 @@ func (c *Client) music(ctx context.Context) (*musicScope, error) {
 			continue
 		}
 		s.libs = append(s.libs, v.ID)
+	}
+	if len(s.libs) == 0 {
+		return nil, ErrNoMusic
 	}
 	c.scope.s = s
 	return s, nil
