@@ -958,6 +958,20 @@ func TestLyricsToLRC(t *testing.T) {
 	}
 }
 
+// Lyrics stop at the 64 KB Q2 Pod reads: a server's 8 MB of them would fill /tmp, which is RAM.
+func TestLyricsLimit(t *testing.T) {
+	line := strings.Repeat("x", 999)
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Audio/s1/Lyrics": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Lyrics":[` + strings.Repeat(`{"Text":"`+line+`"},`, 100) + `{"Text":"end"}]}`))
+		},
+	})
+	got, err := signedIn(t, srv).Lyrics(context.Background(), "s1")
+	if want := strings.Repeat(line+"\n", 64<<10/1000); err != nil || got != want {
+		t.Fatalf("%d bytes, want %d: %v", len(got), len(want), err)
+	}
+}
+
 // A refused sign-in (401) is recorded as not connected, any other answer as connected (B9).
 func TestLastRecordsRefusedSignIn(t *testing.T) {
 	code := http.StatusOK

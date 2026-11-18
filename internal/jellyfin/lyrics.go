@@ -30,16 +30,24 @@ func (c *Client) Lyrics(ctx context.Context, id string) (string, error) {
 	}
 	var b strings.Builder
 	for _, l := range r.Lyrics {
-		text := strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(l.Text, "\r", ""), "\n", " "), " ")
+		line := strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(l.Text, "\r", ""), "\n", " "), " ")
 		if l.Start != nil {
 			cs := *l.Start / 100_000 // centiseconds
-			fmt.Fprintf(&b, "[%02d:%02d.%02d]%s\n", cs/6000, cs/100%60, cs%100, text)
-		} else if text != "" {
-			b.WriteString(text + "\n")
+			line = fmt.Sprintf("[%02d:%02d.%02d]%s", cs/6000, cs/100%60, cs%100, line)
+		} else if line == "" {
+			continue
 		}
+		if b.Len()+len(line)+1 > lyricsMax {
+			break
+		}
+		b.WriteString(line + "\n")
 	}
 	return b.String(), nil
 }
+
+// lyricsMax is the most of a song's lyrics kept: Q2 Pod reads no more of a .lrc (lyrics.c
+// LYRIC_TAG_MAX), and they are kept in /tmp, which is RAM, and on the card.
+const lyricsMax = 64 << 10
 
 // latestPage is how many albums Newly Added lists.
 const latestPage = 50

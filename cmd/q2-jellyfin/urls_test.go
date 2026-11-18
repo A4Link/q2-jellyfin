@@ -200,7 +200,8 @@ func TestURLQueueStartsPartway(t *testing.T) {
 }
 
 // Lines too long for 500 of them in urlsMax: the song started and those after it are kept first,
-// then those before it as room allows, and the lyrics' <n> is each song's line.
+// then those before it as room allows, and the lyrics' <n> is each song's line (lyricsAhead of
+// them from the song started, back to the first line past the last).
 func TestURLQueueFitsFirmware(t *testing.T) {
 	for _, c := range []struct {
 		n, from, text int // text: bytes of title, artist and album together (a field is cut at 1,000)
@@ -232,9 +233,10 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 			t.Fatalf("started song's lyrics %q", got)
 		}
 		// line files only: each song's lyrics are also kept as id-<song>.lrc for the next Play
-		eventually(t, "every line's lyrics", func() bool { m, _ := filepath.Glob(dir + "/[0-9]*.lrc"); return len(m) == last+1 })
-		if got := lrc(last); got != fmt.Sprint("[00:01.00]s", c.lo+last) {
-			t.Errorf("last line's lyrics %q", got)
+		eventually(t, "the window's lyrics", func() bool { return lyricLines(dir) == lyricsAhead })
+		end := (c.start + lyricsAhead - 1) % (last + 1)
+		if got := lrc(end); got != fmt.Sprint("[00:01.00]s", c.lo+end) {
+			t.Errorf("window's last line's lyrics %q", got)
 		}
 	}
 }
@@ -318,7 +320,7 @@ func neverWithin(t *testing.T, what string, d time.Duration, cond func() bool) {
 }
 
 // A second Play of the same songs asks each song's lyrics once in all; past 100 songs' lyrics kept,
-// the next Play keeps no more than 100; the prefetch stops after two unreachable errors.
+// the next Play keeps 100; the prefetch stops after two unreachable errors.
 func TestURLQueueLyricsCapAndUnreachableStop(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
 	src := &gatedLyrics{urlSrc: urlSrc{e.src}}
@@ -333,12 +335,15 @@ func TestURLQueueLyricsCapAndUnreachableStop(t *testing.T) {
 		t.Errorf("asked %q over two Plays, want each of the five once", got)
 	}
 
-	e.s.start(lyricSongs("h", 150), 0)
-	eventually(t, "the 150 lines", func() bool { return lyricLines(dir) == 150 })
+	h := lyricSongs("h", 150)
+	for from := 0; from < len(h); from += lyricsAhead { // all 150 kept, a window a Play
+		e.s.start(h, from)
+		eventually(t, "the window's lines", func() bool { return lyricLines(dir) == lyricsAhead })
+	}
 	e.s.start(lyricSongs("x", 3), 0)
 	eventually(t, "the next list's lines", func() bool { return lyricLines(dir) == 3 })
-	if kept, _ := filepath.Glob(filepath.Join(dir, "id-*.lrc")); len(kept) > lyricsKeep {
-		t.Errorf("%d songs' lyrics kept, want at most %d", len(kept), lyricsKeep)
+	if kept, _ := filepath.Glob(filepath.Join(dir, "id-*.lrc")); len(kept) != lyricsKeep+3 {
+		t.Errorf("%d songs' lyrics kept, want %d and the list's 3", len(kept), lyricsKeep)
 	}
 
 	down := newEnv(t, fw.Caps{Playlist: true, URLs: true})
@@ -376,5 +381,61 @@ func TestURLQueueNow(t *testing.T) {
 		} else if header != "#Q2URLS/1\tstart=1" || seq != "" || !slices.Equal(started, []string{"s1"}) {
 			t.Errorf("no now: header %q, seq %q, started %q", header, seq, started)
 		}
+	}
+}
+
+// A Play asks the server for the lyrics of 20 lines from the song started on, not of the whole
+// queue (up to 500 songs, one request after another).
+func TestURLQueueLyricsWindow(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	src := &gatedLyrics{urlSrc: urlSrc{e.src}}
+	e.s.src = src
+	dir := lyricsDirOf(e)
+	e.s.start(lyricSongs("s", 60), 30)
+	eventually(t, "the window's lyrics", func() bool { return lyricLines(dir) == 20 })
+	neverWithin(t, "lyrics past the window", 300*time.Millisecond, func() bool { return lyricLines(dir) > 20 })
+	if got := src.askedNow(); len(got) != 20 || got[0] != "s30" || got[19] != "s49" {
+		t.Errorf("asked %q, want s30 to s49", got)
+	}
+}
+
+// Past lyricsKeep songs' lyrics kept, the next Play removes the oldest of them down to lyricsKeep,
+// not all of them: the rest aren't asked of the server again. The last queue's lines go.
+func TestKeptLyricsTrimOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < lyricsKeep+5; i++ {
+		p := keptLyrics(dir, fmt.Sprint("s", i))
+		os.WriteFile(p, []byte("x"), 0o644)
+		at := old.Add(time.Duration(i) * time.Second) // s0 the oldest
+		os.Chtimes(p, at, at)
+	}
+	os.WriteFile(filepath.Join(dir, "3.lrc"), []byte("x"), 0o644)
+	clearLyricLines(dir)
+	if kept, _ := filepath.Glob(filepath.Join(dir, "id-*.lrc")); len(kept) != lyricsKeep {
+		t.Fatalf("%d kept, want %d", len(kept), lyricsKeep)
+	}
+	for i := 0; i < 6; i++ {
+		if got := exists(keptLyrics(dir, fmt.Sprint("s", i))); got != (i == 5) {
+			t.Errorf("s%d kept %v", i, got)
+		}
+	}
+	if exists(filepath.Join(dir, "3.lrc")) {
+		t.Error("the last queue's line left")
+	}
+}
+
+// The first song's lyrics come before .play names the queue, as Q2 Pod reads a song's .lrc once,
+// as it loads; a server slow to give them holds Play back lyricsWait at most.
+func TestURLQueueFirstLyricsBounded(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true, URLs: true})
+	e.s.src = &gatedLyrics{urlSrc: urlSrc{e.src}, gates: map[string]chan struct{}{"s0": make(chan struct{})}}
+	t0 := time.Now()
+	e.s.start(lyricSongs("s", 3), 0)
+	if d := time.Since(t0); d > lyricsWait+time.Second {
+		t.Errorf("Play took %v", d)
+	}
+	if !exists(e.play) {
+		t.Error("no .play")
 	}
 }
