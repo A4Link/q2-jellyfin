@@ -1434,6 +1434,9 @@ func TestEntireLibraryRow(t *testing.T) {
 	if len(r.Rows) != 1 || r.Rows[0].Subtitle != "On · 3 albums · 2 playlists" {
 		t.Fatalf("on this q2 while on %q", titles(r))
 	}
+	if q := r.Rows[0]; q.Title != "Entire Library" || q.Kind != "info" || q.URI != "" || q.Position != "toggle" || q.Context != "library:all" {
+		t.Fatalf("on this q2 row %+v", q)
+	}
 	if r := d.do("toggle", "library:all"); r.Message != "Removed from Sync" {
 		t.Fatalf("toast %q", r.Message)
 	}
@@ -1481,7 +1484,7 @@ func TestEmptyStates(t *testing.T) {
 		{"albums", "", "No albums", ""},
 		{"artists", "", "No artists", ""},
 		{"search", "x", "No results", ""},
-		{"onq2", "", "Nothing chosen yet", "Hold Play/Pause on a playlist, album or artist"},
+		{"onq2", "", "Nothing chosen yet", "Open a playlist, album or artist and press Add to Sync"},
 	} {
 		r := d.do(c.op, c.arg)
 		row, ok := find(r, c.title)

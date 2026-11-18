@@ -82,7 +82,7 @@ Two exceptions are automatic: an original the Q2 can't play (WavPack, Musepack, 
 - **On This Q2**: everything chosen, with its status and its size on the card.
 - **Sync Favourites**: one press adds your favourites (the songs you've hearted in Jellyfin) to Sync and starts the sync. Once they're in Sync, the same press syncs again, picking up new hearts, and resumes Favourites if they are held in **Sync Jobs**. A sync that would take songs off the Q2 doesn't start by itself: the preview shows what goes, and waits for **Start Sync**.
 - **Choose Playlists**: your playlists, each marked **In Sync** or not; press one to add it or take it out. Each comes to the Q2 as a playlist, in the server's order, duplicates included.
-- **Sync Entire Library**: press to sync every album and playlist (On, with the counts once checked), or press again to stop.
+- **Sync Entire Library**: press to sync every album and playlist (On, with the counts once checked), or press again to take it out of Sync (Cancel stops a sync under way).
 
 Everything synced is at **Sync Quality** (Original, or the Opus rate you chose).
 
