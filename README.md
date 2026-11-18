@@ -80,13 +80,13 @@ Two exceptions are automatic: an original the Q2 can't play (WavPack, Musepack, 
 
 - **Sync Jobs**: what is in Sync and not yet on the Q2; press one to hold it or resume it.
 - **On This Q2**: everything chosen, with its status and its size on the card.
-- **Sync Favourites**: one press adds your favourites (the songs you've hearted in Jellyfin) to Sync and starts the sync. Once they're in Sync, the same press syncs again, picking up new hearts.
+- **Sync Favourites**: one press adds your favourites (the songs you've hearted in Jellyfin) to Sync and starts the sync. Once they're in Sync, the same press syncs again, picking up new hearts, and resumes Favourites if they are held in **Sync Jobs**. A sync that would take songs off the Q2 doesn't start by itself: the preview shows what goes, and waits for **Start Sync**.
 - **Choose Playlists**: your playlists, each marked **In Sync** or not; press one to add it or take it out. Each comes to the Q2 as a playlist, in the server's order, duplicates included.
 - **Sync Entire Library**: press to sync every album and playlist (On, with the counts once checked), or press again to stop.
 
 Everything synced is at **Sync Quality** (Original, or the Opus rate you chose).
 
-Below them, Sync shows a preview, and nothing happens until you press **Start Sync**. Then it shows progress with **Pause**, **Resume** and **Cancel**. If Wi-Fi drops, the sync pauses until you press **Resume**; if the Q2 restarts or Jellyfin closes, press **Start Sync** again. Either way it picks up where it was: songs already on the Q2 aren't downloaded again. Songs that fail are listed under **Failed Songs**, with **Retry Failed**.
+Below them, Sync shows a preview, and nothing happens until you press **Start Sync**. Then it shows progress with **Pause**, **Resume** and **Cancel**. If Wi-Fi drops, the sync pauses until you press **Resume**; if the Q2 restarts or Jellyfin closes, press **Start Sync** again. Either way it picks up where it was: songs already on the Q2 aren't downloaded again. Songs that fail are listed under **Failed Songs**, with **Retry Failed**. When the sync would remove more than half the synced songs, the preview says *Removes most of the synced songs*; if the server no longer shows your account a music library, it says *No music library on the server for this account* and removes nothing.
 
 **Playing:** press a song to play it and the rest of the list after it. From Q2 Pod 1.7.3, Q2 Pod's own player streams the songs: Now Playing opens at once, with the player's spinner while a song arrives. A song the server can't send stops playback there, with no message on screen; `.jellyfin/log.txt` says why.
 

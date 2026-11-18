@@ -39,6 +39,7 @@ type nav struct {
 	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
+	noMusic          bool          // the account has no music library: /UserViews lists only films
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
 	mediaErr         int           // download and stream answer 404 (or 401 for 40)
@@ -285,6 +286,8 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok(map[string]any{"Id": "u1", "Name": "u"})
 	case p == "/Users/AuthenticateByName":
 		ok(map[string]any{"AccessToken": "tok", "User": map[string]any{"Id": "u1", "Name": "u"}})
+	case p == "/UserViews" && n.noMusic:
+		ok(map[string]any{"Items": []any{map[string]any{"Id": "films", "Name": "Movies", "CollectionType": "movies"}}})
 	case p == "/UserViews": // one music library, "music", holding /music (jellyfin/music.go)
 		ok(map[string]any{"Items": []any{map[string]any{"Id": "music", "Name": "Music", "CollectionType": "music"}}})
 	case p == "/Items" && q.Get("parentId") == "music" && q.Get("includeItemTypes") == "":
@@ -1457,9 +1460,94 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
 		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
 	} {
-		if r := previewRows(p, 512<<20); !strings.Contains(strings.Join(titles(r), "|"), want) {
+		if r := previewRows(p, 512<<20, 10); !strings.Contains(strings.Join(titles(r), "|"), want) {
 			t.Errorf("want %q: %q", want, titles(r))
 		}
+	}
+}
+
+// A sync that takes out more than half the songs on the card says so above Start Sync: an item the
+// server lost, or a press too many on Remove from Sync, shouldn't empty the card unnoticed (audit
+// 2026-11-16 #3).
+func TestPreviewWarnsMostRemoved(t *testing.T) {
+	const warn = "Removes most of the synced songs"
+	for _, c := range []struct{ remove, onCard int }{{3, 4}, {2, 4}, {4, 4}, {1, 10}} {
+		p := &plan.Plan{Fits: true}
+		for range c.remove {
+			p.Remove = append(p.Remove, &library.Entry{Size: 1000})
+		}
+		got := strings.Contains(strings.Join(titles(previewRows(p, 512<<20, c.onCard)), "|"), warn)
+		if want := c.remove*2 > c.onCard; got != want {
+			t.Errorf("%d of %d removed: warning %v", c.remove, c.onCard, got)
+		}
+	}
+}
+
+// putOnCard records songs (id -> item key) in the card's manifest, each with a file, as a sync
+// leaves them.
+func putOnCard(t *testing.T, d *tdaemon, songs map[string]string) {
+	t.Helper()
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for id, key := range songs {
+		p := filepath.Join(d.card, "Jellyfin", id+".flac")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, make([]byte, 1000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		m.Songs[id] = &library.Entry{ID: id, Path: p, Size: 1000, Items: []string{key}, Quality: "original"}
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An account that sees no music library (the server's access to it taken away) fails the preview:
+// read as an empty library, every song on the card would be removed, and by a Hold or Sync
+// Favourites without a press (audit 2026-11-16 #3).
+func TestNoMusicLibraryFailsPreview(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, noMusic: true}, "", true)
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindLibrary, ID: "all", Name: "Entire Library", Quality: "original"})
+	if err := sel.Save(filepath.Join(d.dir, "selection.json")); err != nil {
+		t.Fatal(err)
+	}
+	putOnCard(t, d, map[string]string{"al0.0": "library:all", "al0.1": "library:all", "al0.2": "library:all"})
+	d.mu.Lock()
+	d.autoStart = true // as Sync Favourites or a Hold leaves it
+	d.mu.Unlock()
+	if r := d.preview(t); !strings.Contains(strings.Join(titles(r), "|"), "No music library on the server for this account") {
+		t.Fatalf("%q", titles(r))
+	}
+	d.bg.Wait()
+	if st := d.runner.Snapshot().State; st != "idle" {
+		t.Fatalf("sync %s", st)
+	}
+	if n := len(d.manifest().Songs); n != 3 {
+		t.Fatalf("%d songs left on the card", n)
+	}
+}
+
+// Sync Favourites (and a Hold, Resume or quality change, through the same autoStart) starts only a
+// sync that removes nothing: one that would take songs off the card waits for Start Sync (audit
+// 2026-11-16 #3).
+func TestAutoStartWaitsOnRemovals(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 3, favs: 2}, "", true)
+	putOnCard(t, d, map[string]string{"al1.0": "album:al1"}) // on the card, no longer in Sync
+	if m := d.do("syncfav").Message; m != "Added to Sync · 2 songs" {
+		t.Fatalf("%q", m)
+	}
+	r := d.preview(t)
+	d.bg.Wait()
+	if st := d.runner.Snapshot().State; st != "idle" {
+		t.Fatalf("sync %s with no Start", st)
+	}
+	if _, ok := find(r, "Start Sync"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+	if _, err := os.Stat(filepath.Join(d.card, "Jellyfin", "al1.0.flac")); err != nil {
+		t.Fatal(err)
 	}
 }
 

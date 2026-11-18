@@ -168,7 +168,7 @@ func TestSyncQualityChangeRestartsSync(t *testing.T) {
 	d.preview(t)
 	d.do("start")
 	eventually(t, "the sync to run", func() bool { return d.runner.Snapshot().State == "running" })
-	if m := d.do("setdefq", "opus-128").Message; m != "Sync Quality: Opus 128 kbps · sync restarting" {
+	if m := d.do("setdefq", "opus-128").Message; m != "Sync Quality: Opus 128 kbps · checking the sync again" {
 		t.Fatalf("toast %q", m)
 	}
 	close(n.block)
@@ -269,7 +269,7 @@ func TestReencodeRestartsOnlyUnderOpus(t *testing.T) {
 	d.do("setdefq", "opus-128")
 	d.bg.Wait()
 	eventually(t, "the sync to run again", func() bool { return d.runner.Snapshot().State == "running" })
-	if m := d.do("reencode").Message; m != "Always Re-encode: Off · sync restarting" {
+	if m := d.do("reencode").Message; m != "Always Re-encode: Off · checking the sync again" {
 		t.Fatalf("toast under Opus %q", m)
 	}
 }

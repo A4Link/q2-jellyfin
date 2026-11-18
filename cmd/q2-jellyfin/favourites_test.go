@@ -98,13 +98,13 @@ func TestSongIncludedViaFavourites(t *testing.T) {
 func TestFavouritesUnderLibrary(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, favs: 2}, "", true)
 	d.do("toggle", "library:all")
-	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "Add your favourites to Sync and start" {
+	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "Add your favourites to Sync" {
 		t.Fatalf("Sync page %+v", row)
 	}
 	if row, _ := find(d.do("favorites", favKey), "Add to Sync"); row.Kind != "action" {
 		t.Fatalf("page %q", titles(d.do("favorites", favKey)))
 	}
-	if m := d.do("syncfav").Message; m != "Added to Sync · 2 songs · starting" {
+	if m := d.do("syncfav").Message; m != "Added to Sync · 2 songs" {
 		t.Fatalf("%q", m)
 	}
 	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
@@ -114,7 +114,7 @@ func TestFavouritesUnderLibrary(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(d.card, "_explaylist_data", "Favourites.m3u")); strings.Count(string(b), "Song ") != 2 {
 		t.Fatalf("m3u %q", b)
 	}
-	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "In Sync · press to sync now" {
+	if row, _ := find(d.do("sync"), "Sync Favourites"); row.Subtitle != "In Sync · press to check for new hearts" {
 		t.Fatalf("after %+v", row)
 	}
 	if m := d.do("toggle", favKey).Message; m != "Removed from Sync" {

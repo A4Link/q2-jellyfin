@@ -66,7 +66,8 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 	if _, err := d.selection(); err != nil {
 		return damagedSelection()
 	}
-	if _, err := d.manifestErr(); err != nil {
+	man, err := d.manifestErr()
+	if err != nil {
 		d.log.Printf("sync: manifest: %v", err)
 		return q2spot.Reply{Rows: append(d.syncSources(), info("Couldn't read the sync records on the card"))}
 	}
@@ -89,7 +90,7 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		r.Rows = append(d.syncSources(), r.Rows...)
 		return r
 	}
-	r := previewRows(pl, keepFreeBytes(d.settings().KeepFree))
+	r := previewRows(pl, keepFreeBytes(d.settings().KeepFree), len(man.Songs))
 	r.Rows = append(d.syncSources(), r.Rows...)
 	return r
 }
@@ -248,7 +249,9 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 		d.startPreview(cl)
 		return
 	}
-	if auto && err == nil && changes(pl) { // Sync Favourites: start without a second press
+	// Sync Favourites: start without a second press, but never to take songs off the card: that
+	// waits for Start Sync, with the preview to show what goes (audit 2026-11-16 #3).
+	if auto && err == nil && changes(pl) && len(pl.Remove) == 0 {
 		if r := d.syncAction("start"); r.Message != "" {
 			d.log.Printf("sync favourites: %s", r.Message)
 		}
@@ -263,7 +266,7 @@ func changes(p plan.Plan) bool {
 	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged > 0 || p.PlaylistsStale
 }
 
-func previewRows(p *plan.Plan, reserve int64) q2spot.Reply {
+func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 	if !changes(*p) {
 		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
 	}
@@ -281,6 +284,9 @@ func previewRows(p *plan.Plan, reserve int64) q2spot.Reply {
 			b += e.Size
 		}
 		rows = append(rows, list("removed", "−"+plural(len(p.Remove), "song")+" · "+size(b), "", ""))
+		if len(p.Remove)*2 > onCard { // a library the server lost, or a Remove from Sync too many
+			rows = append(rows, info("Removes most of the synced songs"))
+		}
 	}
 	if len(p.Replace) > 0 {
 		delta := "+" + size(p.ReplaceBytes)
@@ -413,8 +419,9 @@ func (d *daemon) hold(cl *jellyfin.Client, key string) q2spot.Reply {
 }
 
 // restartSync stops a sync that runs or is paused and plans it again, so it follows a change to
-// what it syncs or at what quality. A running one starts again by itself; a paused one waits for
-// Start Sync on the Sync page. It returns what to add to the reply: "" with no sync under way.
+// what it syncs or at what quality. A running one starts again by itself unless it removes songs;
+// a paused one waits for Start Sync on the Sync page. It returns what to add to the reply: "" with
+// no sync under way.
 func (d *daemon) restartSync(cl *jellyfin.Client) string {
 	st := d.runner.Snapshot().State
 	if cl == nil || st != "running" && st != "paused" {
@@ -435,7 +442,7 @@ func (d *daemon) restartSync(cl *jellyfin.Client) string {
 	if st == "paused" {
 		return " · press Start Sync to continue"
 	}
-	return " · sync restarting"
+	return " · checking the sync again"
 }
 
 func eta(t time.Duration) string {
