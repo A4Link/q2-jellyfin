@@ -1220,9 +1220,6 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		return 0, err
 	}
 	part := w.Path + ".part"
-	if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
-		return 0, err
-	}
 	// The .part's key names the version it holds (quality, server size): another version's bytes
 	// are never continued into a spliced song (M14). A .part with no key is an older build's.
 	key, stamp := part+".key", fmt.Sprintf("%s %d", w.Quality, w.Bytes)
@@ -1235,11 +1232,6 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	if st, err := os.Stat(part); err == nil && w.Quality == "original" && (w.Bytes <= 0 || st.Size() < w.Bytes) {
 		if b, err := os.ReadFile(key); errors.Is(err, os.ErrNotExist) || err == nil && string(b) == stamp {
 			from = st.Size()
-		}
-	}
-	if from == 0 {
-		if err := q2.WriteFile(key, []byte(stamp)); err != nil {
-			return 0, err
 		}
 	}
 	if err := r.Net.Acquire(ctx, false); err != nil {
@@ -1268,9 +1260,7 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	resp, err := r.src.Get(ctx, u, from)
 	var ae *jellyfin.APIError
 	if from > 0 && errors.As(err, &ae) && ae.HTTP == http.StatusRequestedRangeNotSatisfiable {
-		library.Remove(r.root, part)
 		from = 0
-		q2.WriteFile(key, []byte(stamp))
 		resp, err = r.src.Get(ctx, u, 0)
 	}
 	if err != nil {
@@ -1286,7 +1276,17 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		flag = os.O_WRONLY | os.O_APPEND
 	} else if from > 0 {
 		from = 0 // 200: the server ignored Range, start over
-		q2.WriteFile(key, []byte(stamp))
+	}
+	// The folder and key are made only once the server answered, so a song it refuses leaves
+	// nothing. The old .part goes first: a new key never names another version's bytes (M14).
+	if from == 0 {
+		library.Remove(r.root, part)
+		if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
+			return 0, err
+		}
+		if err := q2.WriteFile(key, []byte(stamp)); err != nil {
+			return 0, err
+		}
 	}
 	f, err := os.OpenFile(part, flag, 0o644)
 	if err != nil {
@@ -1317,6 +1317,10 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		err = os.Rename(part, w.Path)
 	}
 	if err != nil {
+		if w.Quality != "original" { // a transcode is never resumed: its bytes are junk
+			library.Remove(r.root, part)
+			library.Remove(r.root, key)
+		}
 		return 0, err
 	}
 	library.Remove(r.root, key)
