@@ -157,7 +157,7 @@ type daemon struct {
 	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
 	lib                *libJob
 	libTaken           int64                       // the library request whose answer was taken last (libPoll)
-	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes
+	libAgain           bool                        // a request was wanted while one awaited its answer, here or in an earlier run (libMore): sent once that comes
 	libRest            [2][]string                 // the import and add paths the request on file had no room for (I20)
 	libClash           []string                    // playlist files the followed-up answers skipped as clashes (libPoll)
 	resolved           map[string][]jellyfin.Song  // selection key -> its songs, as last fetched
@@ -223,6 +223,10 @@ func newDaemon(dir, card, tmp string) *daemon {
 	os.Remove(d.stream.urlsFile()) // and its URL queue, with the token, after a crash
 	d.state.setHold(false)         // the state file, with the version
 	d.logCrash()
+	if b, err := os.ReadFile(d.libMore()); err == nil && len(b) > 0 {
+		d.libAgain = true // before libStart: the first tick may take the answer while it runs
+	}
+	d.spawn(d.libStart) // a resend reads the manifest: the socket listens at once
 	return d
 }
 
@@ -511,19 +515,24 @@ func (d *daemon) tick() {
 }
 
 // idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one), no
-// sync or stream, no library request awaiting its answer (I15) for less than libWait, and its URL
-// queue not played for idleAfter (now.go).
+// sync or stream, and its URL queue not played for idleAfter (now.go). A library request awaiting
+// its answer doesn't keep it (I15): the firmware holds one while anything plays, and a running app
+// keeps Smart Wi-Fi's radio on. The firmware answers with the app gone too, and the next run takes
+// that answer, or sends a request lost before it ran again (libStart). A lost answer (the Q2 turned
+// off first: /tmp is RAM) leaves its adds unrecorded: the next request adds them again, and one the
+// firmware had added is taken for a playlist the user made ("exists"), so it comes a second time as
+// "<name> (Jellyfin)". A playlist the user made is never replaced.
 func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
-	last, lib := d.lastReq, d.libWaiting(now)
+	last := d.lastReq
 	d.mu.Unlock()
-	return now.Sub(last) >= idleAfter && !lib && !d.runner.Busy() && !d.stream.active() && !d.qcWaiting() &&
+	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.stream.active() && !d.qcWaiting() &&
 		!d.nowKeeps(now) // now.go: its URL queue playing, to report each song
 }
 
-// libWait bounds how long a library request awaiting its answer keeps the app up, so its follow-ups
-// go at once (libPoll). The firmware may hold one for ever (playback under a lit screen, a page it
-// won't leave); it answers with the app gone too, and the next run takes that answer.
+// libWait bounds how long a library request awaiting its answer has the running app tick every
+// second, so its follow-ups go at once (libPoll). The firmware may hold one for ever (playback under
+// a lit screen, a page it won't leave).
 const libWait = 2 * time.Hour
 
 // libWaiting is whether the followed library request awaits its answer, sent less than libWait

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -503,7 +504,12 @@ func newTestDaemon(t *testing.T, n *nav, caps string, signedIn bool) *tdaemon {
 // newTestDaemonOn starts the daemon on an existing card folder.
 func newTestDaemonOn(t *testing.T, card string, n *nav, caps string, signedIn bool) *tdaemon {
 	t.Helper()
-	tmp := t.TempDir()
+	return newTestDaemonIn(t, card, t.TempDir(), n, caps, signedIn)
+}
+
+// newTestDaemonIn starts the daemon on an existing card folder and /tmp.
+func newTestDaemonIn(t *testing.T, card, tmp string, n *nav, caps string, signedIn bool) *tdaemon {
+	t.Helper()
 	if caps != "" {
 		os.WriteFile(filepath.Join(tmp, "q2-addon.caps"), []byte(caps+"\n"), 0o644)
 	}
@@ -2355,8 +2361,7 @@ func TestNoHoldWhileStreamWaits(t *testing.T) {
 	}
 }
 
-// The end of a sync counts as activity, and the app stays up while its library request awaits
-// the firmware's answer, so the follow-ups go at once (I15).
+// The end of a sync counts as activity: an unattended sync's summary stays idleAfter (I15).
 func TestStaysUpAfterSync(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
 	d := newTestDaemon(t, n, "library", true)
@@ -2372,35 +2377,317 @@ func TestStaysUpAfterSync(t *testing.T) {
 	if d.idle(time.Now()) {
 		t.Fatal("exits the moment the sync ends")
 	}
-	seq := d.libReqSeq(t)
-	if d.idle(time.Now().Add(2 * idleAfter)) {
-		t.Fatal("exits before the library request is answered")
-	}
-	d.answer(seq + " ok")
-	d.tick()
-	if !d.idle(time.Now().Add(2 * idleAfter)) {
-		t.Fatal("never idles once answered")
+	if d.idle(time.Now().Add(idleAfter - time.Minute)) {
+		t.Fatal("exits before idleAfter")
 	}
 }
 
-// A library request the firmware never answers keeps the app up for libWait only.
+// After a sync the app exits idleAfter on, its library request answered or not: the firmware
+// holds one while anything plays, and a running app keeps Smart Wi-Fi's radio on. The firmware
+// answers with the app gone, and the next start takes the answer (I15).
+func TestExitsBeforeLibraryAnswer(t *testing.T) {
+	d := syncAlbum(t)
+	d.libReqSeq(t)
+	if !d.idle(time.Now().Add(idleAfter)) {
+		t.Fatal("an unanswered library request keeps the app running")
+	}
+}
+
+// While the app runs, a library request awaiting its answer has it tick every second, so its
+// follow-ups go at once, for libWait only.
 func TestUnansweredLibraryRequestIsBounded(t *testing.T) {
 	d := syncAlbum(t)
 	d.libReqSeq(t)
-	if d.idle(time.Now().Add(libWait - idleAfter)) {
-		t.Fatal("exits before libWait")
+	if !d.urgent() {
+		t.Fatal("no tick every second while the answer is awaited")
 	}
-	if !d.idle(time.Now().Add(libWait)) {
-		t.Error("an unanswered library request keeps the app running past libWait")
+	d.mu.Lock()
+	d.lib.seq = time.Now().Add(-libWait).UnixNano()
+	d.mu.Unlock()
+	if d.urgent() {
+		t.Error("an unanswered library request ticks every second past libWait")
 	}
 }
 
-// More playlists than one request holds (the firmware takes 32 KiB) go in several: scan and the
-// first in one, the rest in follow-ups, each sent once the one before is answered (I20).
-func TestLibraryRequestSplit(t *testing.T) {
-	d := newTestDaemon(t, &nav{}, "library", true)
+// restart is the app's next run on d's card. keepTmp: the Q2 stayed on, so the library request
+// is still in /tmp; else /tmp starts empty, as after the Q2 powered off (/tmp is RAM).
+func (d *tdaemon) restart(t *testing.T, keepTmp bool) *tdaemon {
+	t.Helper()
+	tmp := t.TempDir()
+	if keepTmp {
+		b, err := os.ReadFile(filepath.Join(d.tmp, "q2-jellyfin.library"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(tmp, "q2-jellyfin.library"), b, 0o644)
+	}
+	d2 := newTestDaemonIn(t, d.card, tmp, &nav{albums: 1, songsPer: 2}, "library", true)
+	d2.bg.Wait() // libStart
+	return d2
+}
+
+// The app exited before the firmware answered; the answer comes, and the next start takes it: the
+// playlist added is the app's own.
+func TestLibraryAnsweredAfterExit(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	seq, _ := d.libReq(t)
+	d2 := d.restart(t, true)
+	d2.answer(seq + " ok")
+	d2.tick()
+	if !d2.manifest().Imported[mix] {
+		t.Fatal("answer not taken")
+	}
+}
+
+// The Q2 powered off before the firmware ran the request (it waits while music plays): the next
+// start sends it again, so the new songs and playlists still reach the Library.
+func TestLibraryRequestLostResent(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	d.libReq(t)
+	d2 := d.restart(t, false)
+	if _, err := os.Stat(filepath.Join(d2.tmp, "q2-jellyfin.library")); err != nil {
+		t.Fatal("the lost request is not sent again")
+	}
+	if _, lines := d2.libReq(t); strings.Join(lines, "|") != "scan|add "+mix {
+		t.Fatalf("request %q", lines)
+	}
+}
+
+// The start doesn't wait for the resend of a lost request (libStart), which reads the whole
+// manifest: the socket listens at once. Here the manifest is a FIFO, so reading it blocks until fed.
+func TestLibraryResentInBackground(t *testing.T) {
+	d := syncPlaylist(t)
+	d.libReq(t)
+	mf := filepath.Join(d.card, ".jellyfin", "manifest.json")
+	b, _ := os.ReadFile(mf)
+	os.Remove(mf)
+	if err := syscall.Mkfifo(mf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// feed writes the manifest once libStart opens it; non-blocking, so it fails, not hangs, if never read.
+	feed := func() error {
+		for end := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			f, err := os.OpenFile(mf, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				_, err = f.Write(b)
+				f.Close()
+				return err
+			}
+			if time.Now().After(end) {
+				return fmt.Errorf("the manifest is never read: %v", err)
+			}
+		}
+	}
+	late := make(chan error, 1)
+	timer := time.AfterFunc(5*time.Second, func() { late <- feed() })
+	tmp := t.TempDir()
+	d2 := newTestDaemonIn(t, d.card, tmp, &nav{albums: 1, songsPer: 2}, "library", true)
+	if !timer.Stop() {
+		<-late
+		t.Fatal("the start waits for the library request to be sent again")
+	}
+	if err := feed(); err != nil {
+		t.Fatal(err)
+	}
+	d2.bg.Wait()
+	os.Remove(mf)
+	os.WriteFile(mf, b, 0o644)
+	if _, err := os.Stat(filepath.Join(tmp, "q2-jellyfin.library")); err != nil {
+		t.Fatal("the lost request is not sent again")
+	}
+}
+
+// A request this run sent before libStart ran names every playlist: libStart reading library.more
+// late adds no follow-up request.
+func TestLibStartAfterThisRunsRequest(t *testing.T) {
+	d := syncPlaylist(t)
+	d.libReq(t)
+	d2 := d.restart(t, false)
+	seq, _ := d2.libReq(t)
+	os.WriteFile(d2.libMore(), []byte("more"), 0o644)
+	d2.libStart()
+	d2.answer(seq + " ok")
+	d2.tick()
+	if seq2, _ := d2.libReq(t); seq2 != seq {
+		t.Fatal("an extra request after libStart")
+	}
+}
+
+// The earlier run's request was answered while the app was closed, and library.more says "more":
+// the first tick takes the answer before libStart runs, and the full follow-up is sent anyway.
+// libStart is held off by d.mu, taken before it can run (one P, so the go statement doesn't run it
+// at once), and, where it reads the manifest first, by the manifest as a FIFO, which waits until fed.
+// The answer has an "exists" line, so libPoll records it without waiting for that read.
+func TestLibraryMoreReadBeforeFirstTick(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	os.WriteFile(d.libMore(), []byte("more"), 0o644)
+	tmp := t.TempDir()
+	b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-jellyfin.library"))
+	os.WriteFile(filepath.Join(tmp, "q2-jellyfin.library"), b, 0o644)
+	os.WriteFile(filepath.Join(tmp, "q2-jellyfin.library.done"), []byte(seq+" ok\nexists /mnt/sdcard/Playlists/Other.m3u\n"), 0o644)
+	os.WriteFile(filepath.Join(tmp, "q2-addon.caps"), []byte("library\n"), 0o644)
+	mf := filepath.Join(d.card, ".jellyfin", "manifest.json")
+	man, _ := os.ReadFile(mf)
+	os.Remove(mf)
+	if err := syscall.Mkfifo(mf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	procs := runtime.GOMAXPROCS(1)
+	d2 := newDaemon(filepath.Join(d.card, ".jellyfin"), d.card, tmp)
+	d2.mu.Lock()
+	runtime.GOMAXPROCS(procs)
+	t.Cleanup(d2.bg.Wait) // its log.txt is written before the TempDir goes
+	// Hold libStart in its read, if it reads the manifest: a writer that opens is the FIFO's reader
+	// waiting. The tick's reads get a plain file.
+	var w *os.File
+	for end := time.Now().Add(time.Second); w == nil && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		w, _ = os.OpenFile(mf, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	}
+	os.Remove(mf)
+	os.WriteFile(mf, man, 0o644)
+	done := make(chan struct{})
+	go func() { d2.libPoll(); d2.mu.Unlock(); close(done) }() // the first tick's
+	// its follow-up may wait for libStart's read (one manifest read at a time)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+	}
+	if w != nil {
+		w.Write(man)
+		w.Close()
+	}
+	<-done
+	d2.bg.Wait()
+	b, _ = os.ReadFile(filepath.Join(tmp, "q2-jellyfin.library"))
+	if lines := strings.Split(string(b), "\n"); lines[0] == seq || len(lines) < 2 || lines[1] != "scan" {
+		t.Fatalf("no full follow-up request: %q", lines)
+	}
+}
+
+// The app is stopped while syncDone reads the manifest, before the request is written ('Sync
+// complete' already shows): library.more is on the card, so the next start sends the request. The
+// manifest is a FIFO, so syncDone's read waits until fed.
+func TestLibraryStopDuringSyncDone(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	eventually(t, "the sync's OnDone to return", func() bool { return !d.runner.Busy() })
+	d.answer(seq + " ok")
+	d.tick()
+	if exists(d.libMore()) {
+		t.Fatal("the answer is not taken")
+	}
+	d.bg.Wait() // the preview after the sync reads the manifest too
+	mf := filepath.Join(d.card, ".jellyfin", "manifest.json")
+	man, _ := os.ReadFile(mf)
+	os.Remove(mf)
+	if err := syscall.Mkfifo(mf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { d.syncDone(plan.Plan{PlaylistsStale: true}); close(done) }()
+	// a writer that opens is syncDone's read waiting; it gets nothing until fed
+	var w *os.File
+	for end := time.Now().Add(5 * time.Second); w == nil; time.Sleep(10 * time.Millisecond) {
+		if w, _ = os.OpenFile(mf, os.O_WRONLY|syscall.O_NONBLOCK, 0); w == nil && time.Now().After(end) {
+			t.Fatal("syncDone never reads the manifest")
+		}
+	}
+	os.Remove(mf)
+	os.WriteFile(mf, man, 0o644)
+	d2 := d.restart(t, false) // the earlier run killed here
+	w.Write(man)
+	w.Close()
+	<-done
+	if _, lines := d2.libReq(t); len(lines) == 0 || lines[0] != "scan" {
+		t.Fatalf("request %q", lines)
+	}
+}
+
+// Once its answer is taken, nothing is owed: the next start, /tmp emptied or not, sends nothing.
+func TestLibraryAnsweredNotResent(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.tick()
+	if exists(d.libMore()) {
+		t.Fatal("library.more kept once answered")
+	}
+	d2 := d.restart(t, false)
+	if _, err := os.Stat(filepath.Join(d2.tmp, "q2-jellyfin.library")); err == nil {
+		t.Fatal("an answered request sent again")
+	}
+}
+
+// A request still in /tmp awaits its answer: the next start doesn't send another.
+func TestLibraryWaitingNotResent(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	d2 := d.restart(t, true)
+	if seq2, _ := d2.libReq(t); seq2 != seq {
+		t.Fatalf("request rewritten: %s -> %s", seq, seq2)
+	}
+}
+
+// The answer is lost (the Q2 powered off before Jellyfin was opened again), but the firmware had
+// added Mix: the next start sends the request again and the firmware answers "exists". Only the lost
+// answer could tell that from a playlist the user made, so Mix is taken for the user's, as any
+// "exists" is: renamed "Mix (Jellyfin)" and added, a second copy, but the Q2's Mix never replaced.
+func TestLibraryAnswerLostNeverReplaces(t *testing.T) {
+	d := syncPlaylist(t)
+	dir := filepath.Join(d.card, "_explaylist_data")
+	mix, mixJ := filepath.Join(dir, "Mix.m3u"), filepath.Join(dir, "Mix (Jellyfin).m3u")
+	d.libReq(t)
+	d2 := d.restart(t, false)
+	seq, lines := d2.libReq(t)
+	if strings.Join(lines, "|") != "scan|add "+mix {
+		t.Fatalf("request %q", lines)
+	}
+	d2.answer(seq+" ok", "exists "+mix)
+	d2.tick()
+	if m := d2.manifest(); m.Playlists["Mix"] != mixJ || m.Imported[mix] {
+		t.Fatalf("%+v %+v", m.Playlists, m.Imported)
+	}
+	if seq2, lines := d2.libReq(t); seq2 == seq || strings.Join(lines, "|") != "add "+mixJ {
+		t.Fatalf("follow-up %s %q", seq2, lines)
+	}
+}
+
+// After a lost answer, a playlist the app never sent, meeting one the user made, is renamed
+// "<name> (Jellyfin)" and added again, and one the firmware added is the app's (R35).
+func TestLibraryAnswerLostUsersPlaylist(t *testing.T) {
+	d := syncPlaylist(t)
+	dir := filepath.Join(d.card, "_explaylist_data")
+	mix, rock, rockJ := filepath.Join(dir, "Mix.m3u"), filepath.Join(dir, "Rock.m3u"), filepath.Join(dir, "Rock (Jellyfin).m3u")
+	d.libReq(t)
+	os.WriteFile(rock, []byte("#EXTM3U\n"), 0o644)
+	m := d.manifest()
+	m.Playlists["Rock"] = rock
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d2 := d.restart(t, false)
+	seq, lines := d2.libReq(t)
+	if strings.Join(lines, "|") != "scan|add "+mix+"|add "+rock {
+		t.Fatalf("request %q", lines)
+	}
+	d2.answer(seq+" ok", "exists "+rock)
+	d2.tick()
+	if m := d2.manifest(); m.Playlists["Rock"] != rockJ || m.Imported[rock] || !m.Imported[mix] {
+		t.Fatalf("%+v %+v", m.Playlists, m.Imported)
+	}
+	if seq2, lines := d2.libReq(t); seq2 == seq || strings.Join(lines, "|") != "add "+rockJ {
+		t.Fatalf("follow-up %s %q", seq2, lines)
+	}
+}
+
+// manyPlaylists records 400 playlists, more than one library request holds, half of them imported.
+func (d *tdaemon) manyPlaylists(t *testing.T) (want map[string]bool) {
+	t.Helper()
 	m := &library.Manifest{Playlists: map[string]string{}, Imported: map[string]bool{}}
-	want := map[string]bool{}
+	want = map[string]bool{}
 	for i := 0; i < 400; i++ {
 		name := fmt.Sprintf("%03d %s", i, strings.Repeat("x", 59)) // 63 bytes, the most the Q2 keeps
 		f := filepath.Join(d.card, "_explaylist_data", name+".m3u")
@@ -2412,7 +2699,41 @@ func TestLibraryRequestSplit(t *testing.T) {
 	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
 		t.Fatal(err)
 	}
+	return want
+}
+
+// More playlists than one request holds (the firmware takes 32 KiB) go in several: scan and the
+// first in one, the rest in follow-ups, each sent once the one before is answered (I20).
+func TestLibraryRequestSplit(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	want := d.manyPlaylists(t)
 	d.syncDone(plan.Plan{PlaylistsStale: true})
+	d.answerAll(t, want)
+}
+
+// A request that left playlists for a follow-up (I20) is answered after the app exited: the next
+// start, taking the answer, sends them all again (library.more), not only at the next sync.
+func TestLibraryRestAfterExit(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	want := d.manyPlaylists(t)
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	seq, _ := d.libReq(t)
+	d2 := d.restart(t, true)
+	d2.answer(seq + " ok")
+	d2.tick()
+	if seq2, _ := d2.libReq(t); seq2 == seq {
+		t.Fatal("the rest is never sent")
+	}
+	d2.answerAll(t, want)
+	if exists(d2.libMore()) {
+		t.Error("library.more kept once all are sent")
+	}
+}
+
+// answerAll answers the request on file and each follow-up, until the last: together they name
+// every playlist of want once, each within the firmware's limit, scan in the first only.
+func (d *tdaemon) answerAll(t *testing.T, want map[string]bool) {
+	t.Helper()
 	sent := map[string]bool{}
 	for k := 0; ; k++ {
 		b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-jellyfin.library"))
@@ -2441,7 +2762,7 @@ func TestLibraryRequestSplit(t *testing.T) {
 			t.Fatal("no end")
 		}
 	}
-	if len(sent) != 400 || !d.lib.ok {
+	if len(sent) != len(want) || !d.lib.ok {
 		t.Fatalf("%d sent, ok %v", len(sent), d.lib.ok)
 	}
 }
