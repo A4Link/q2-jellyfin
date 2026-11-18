@@ -35,7 +35,7 @@ In the order data flows:
 | `internal/syncer` | Runs a sync: `.part` files renamed when done, resume, deletes last |
 | `internal/library` | Card layout `Jellyfin/…`, the manifest, `.m3u` files and the ownership guard: every card write or delete goes through it |
 | `internal/fw` | The firmware's capabilities and the library update request |
-| `cmd/q2-jellyfin` | The daemon: Q2 screens (`device*.go`), sign-in on the Q2 (`login.go`), streaming |
+| `cmd/q2-jellyfin` | The daemon: Q2 screens (`device*.go`), sign-in on the Q2 (`login.go`), streaming, and the loopback relay Q2 Pod's player streams through (`relay.go`) |
 | `contrib/shanlingq2` | Build, packaging and the card's launcher |
 
 The app is a Q2 Pod card app: the firmware draws every screen from the rows the app sends over its socket (Q2SPOT/1, see Q2 Pod's `docs/librespot.md`).

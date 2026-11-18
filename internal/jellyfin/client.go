@@ -88,6 +88,15 @@ func (c *Client) setLast(err error) {
 	c.last.mu.Unlock()
 }
 
+// setStatus sets the last result from a server's answer with status code.
+func (c *Client) setStatus(op string, code int) {
+	if code == http.StatusUnauthorized || code >= 502 && code <= 504 {
+		c.setLast(statusError(op, code)) // the sign-in refused, or a proxy whose Jellyfin is down
+	} else {
+		c.setLast(nil)
+	}
+}
+
 // New refuses anything but an https server address.
 func New(c Creds, hc *http.Client) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(c.Server), "/"))
@@ -191,11 +200,7 @@ func (c *Client) do(ctx context.Context, method, op, u string, body []byte, from
 		}
 		return nil, ae
 	}
-	if code := resp.StatusCode; code == http.StatusUnauthorized || code >= 502 && code <= 504 {
-		c.setLast(statusError(op, code)) // the sign-in refused, or a proxy whose Jellyfin is down
-	} else {
-		c.setLast(nil)
-	}
+	c.setStatus(op, resp.StatusCode)
 	if resp.StatusCode/100 != 2 || (op != "Primary" && op != "Lyrics") { // a cover or lyrics that came: no line (audit B6)
 		c.logf("%s %s -> %d", method, u, resp.StatusCode)
 	}
@@ -779,24 +784,6 @@ func (c *Client) transcodeURL(id, q string) string {
 		"audioBitRate": {rate}})
 }
 
-// PlayerURL is PlayURL for Q2 Pod's own player, which sends no headers: the token rides in the
-// query (ApiKey). The URL is a secret: it goes only into the firmware's queue file in /tmp.
-func (c *Client) PlayerURL(id, q string) string { return c.withKey(c.PlayURL(id, q)) }
-
-// PlayerCoverURL is id's cover for Now Playing, fetched by the firmware without headers.
-func (c *Client) PlayerCoverURL(id string) string { return c.withKey(c.ThumbURL(id, 320)) }
-
-func (c *Client) withKey(u string) string {
-	pu, err := url.Parse(u)
-	if err != nil {
-		return u
-	}
-	q := pu.Query()
-	q.Set("ApiKey", c.c.Token)
-	pu.RawQuery = q.Encode()
-	return pu.String()
-}
-
 // ThumbURL is id's primary image cropped to a px square JPEG, for a list row's cover.
 func (c *Client) ThumbURL(id string, px int) string {
 	s := strconv.Itoa(px)
@@ -827,6 +814,32 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 		strings.HasPrefix(mt, "text/") {
 		resp.Body.Close()
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "The server sent an error instead of the file"}
+	}
+	return resp, nil
+}
+
+// RoundTrip sends req, for one of the URLs above, as the client's own requests go: with the
+// sign-in in the Authorization header, over a verified connection, following a redirect itself
+// (https only, the token never to another host). It makes the client the app's relay's transport
+// (an http.RoundTripper), for Q2 Pod's player, which sends no headers and checks no certificate.
+// The answer, or a server that couldn't be reached, sets the last result and, but for a 2xx or a
+// 416 (a seek past the end), is logged, as do() does: the player shows nothing when a song fails.
+func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.RequestURI = "" // a client request has none
+	req.Header.Set("Authorization", c.authHeader())
+	op := opName(req.URL.Path)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		// As in do(): the player hanging up (a seek, the next song) or a cover failing doesn't count.
+		if !errors.Is(req.Context().Err(), context.Canceled) && op != "Primary" {
+			c.setLast(&APIError{Op: op, Msg: applog.Redact(err.Error()), kind: transportKind(err)})
+		}
+		return nil, err
+	}
+	c.setStatus(op, resp.StatusCode)
+	if code := resp.StatusCode; code/100 != 2 && code != http.StatusRequestedRangeNotSatisfiable {
+		c.logf("%s %s -> %d", req.Method, req.URL, code)
 	}
 	return resp, nil
 }

@@ -641,9 +641,10 @@ func TestReportsNowStoppedNotStarted(t *testing.T) {
 	d.nowSteps(t, n, t0, []nowStep{{40 * time.Second, "100\t1\tstopped\t5\t200", nil}})
 }
 
-// The app stays up while its URL queue plays, so every song is reported: a playing line read keeps
-// it for idleAfter; paused or stopped (no line written) it exits idleAfter after the queue last
-// played; a line of another queue keeps nothing. Reporting off, or signed out, it exits as before.
+// The app stays up while its URL queue plays, so every song is reported and streamed (relay.go): a
+// playing line read keeps it for idleAfter; paused or stopped (no line written) it exits idleAfter
+// after the queue last played; a line of another queue keeps nothing. Reporting off, it stays up
+// all the same and sends nothing; signed out, it exits.
 func TestReportsNowKeepsAppUp(t *testing.T) {
 	n := &nav{}
 	d := newTestDaemon(t, n, "urls now", true)
@@ -664,16 +665,35 @@ func TestReportsNowKeepsAppUp(t *testing.T) {
 	if !d.idle(t0.Add(time.Hour + time.Second)) {
 		t.Fatal("kept up by a queue not its own")
 	}
-	d.nowLine(t, n, t0.Add(2*time.Hour), "100\t0\tplaying\t10\t200")
 	d.do("reportplays") // off
-	if !d.idle(t0.Add(2*time.Hour + time.Second)) {
-		t.Fatal("reporting off: still up")
+	if got := d.nowLine(t, n, t0.Add(2*time.Hour), "100\t0\tplaying\t10\t200"); len(got) != 0 {
+		t.Fatalf("reporting off: sent %q", got)
 	}
-	d.do("reportplays") // on
+	if d.idle(t0.Add(2*time.Hour + time.Second)) {
+		t.Fatal("reporting off: exits while its queue plays")
+	}
 	pressSignOut(d)
 	d.bg.Wait()
 	if !d.idle(t0.Add(2*time.Hour + time.Second)) {
 		t.Fatal("signed out: still up")
+	}
+}
+
+// A queue of only synced songs plays card files, with nothing through the relay: playing, it
+// doesn't keep the app up, reporting on or off.
+func TestReportsNowSyncedQueueNotKept(t *testing.T) {
+	n := &nav{}
+	d := newTestDaemon(t, n, "urls now", true)
+	d.nowQueued("100", []string{"", ""})
+	t0 := time.Now().Add(2 * idleAfter) // long after the last press
+	d.nowLine(t, n, t0, "100	0	playing	0	200")
+	if !d.idle(t0.Add(time.Second)) {
+		t.Fatal("kept up by a queue of synced songs")
+	}
+	d.do("reportplays") // off
+	d.nowLine(t, n, t0.Add(10*time.Second), "100	1	playing	0	200")
+	if !d.idle(t0.Add(11 * time.Second)) {
+		t.Fatal("reporting off: kept up by a queue of synced songs")
 	}
 }
 
