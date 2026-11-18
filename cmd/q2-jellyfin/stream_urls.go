@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -158,8 +159,11 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) bool {
 }
 
 // urlsLyrics gives a URL queue's songs their server lyrics for Q2 Pod's Now Playing: dir/<line>.lrc,
-// which Q2 Pod (its lyrics change, not yet merged upstream) reads for the track at that line (tidal.c app_lyrics). The first song's come
-// before it plays; the rest follow in queue order from it, until another queue starts.
+// which Q2 Pod (from 1.7.4) reads for the track at that line (tidal.c app_lyrics). The first song's come
+// before it plays, as Q2 Pod reads a song's file once, as it loads (its docs/internals.md), so a
+// slow server holds Play back lyricsWait at most; the next lyricsAhead-1 lines follow in queue
+// order from it, until another queue starts. A song further on has none unless a later Play
+// reaches it.
 func (s *streamer) urlsLyrics(songs []jellyfin.Song, first int, dir string) {
 	gen := s.lyricsGen.Add(1)
 	clearLyricLines(dir) // the last queue's lines; songs' lyrics stay, by id, for the next Play (audit B1)
@@ -217,7 +221,7 @@ func (s *streamer) urlsLyrics(songs []jellyfin.Song, first int, dir string) {
 		misses++
 	}
 	go func() {
-		for k := 1; k < len(songs) && misses < 2 && s.lyricsGen.Load() == gen; k++ {
+		for k := 1; k < min(len(songs), lyricsAhead) && misses < 2 && s.lyricsGen.Load() == gen; k++ {
 			if write((first + k) % len(songs)) {
 				misses++
 			}
@@ -229,32 +233,38 @@ func (s *streamer) urlsLyrics(songs []jellyfin.Song, first int, dir string) {
 // any other inside dir).
 func keptLyrics(dir, id string) string { return filepath.Join(dir, "id-"+filepath.Base(id)+".lrc") }
 
-// clearLyricLines removes the last queue's line files (<n>.lrc), keeping the songs' kept lyrics,
-// and all of those too once there are more than lyricsKeep.
+// clearLyricLines removes the last queue's line files (<n>.lrc), keeping the songs' kept lyrics
+// but the oldest of them past lyricsKeep.
 func clearLyricLines(dir string) {
 	ents, _ := os.ReadDir(dir)
-	kept := 0
+	var kept []os.FileInfo
 	for _, e := range ents {
 		n := e.Name()
 		if strings.HasPrefix(n, "id-") {
-			kept++
+			if fi, err := e.Info(); err == nil {
+				kept = append(kept, fi)
+			}
 		} else if _, err := strconv.Atoi(strings.TrimSuffix(n, ".lrc")); err == nil {
 			os.Remove(filepath.Join(dir, n))
 		}
 	}
-	if kept > lyricsKeep {
-		for _, e := range ents {
-			if strings.HasPrefix(e.Name(), "id-") {
-				os.Remove(filepath.Join(dir, e.Name()))
-			}
-		}
+	if len(kept) <= lyricsKeep {
+		return
+	}
+	slices.SortFunc(kept, func(a, b os.FileInfo) int { return a.ModTime().Compare(b.ModTime()) })
+	for _, fi := range kept[:len(kept)-lyricsKeep] {
+		os.Remove(filepath.Join(dir, fi.Name()))
 	}
 }
 
 // lyricsKeep is how many songs' lyrics may stay from earlier Plays: /tmp is RAM and each file takes
-// at least a 4 KB page, so past it they all go when the next Play starts (independent review
+// at least a 4 KB page, so past it the oldest go when the next Play starts (independent review
 // 2026-11-10 #2). The queue playing keeps its own songs' lyrics, as before.
 const lyricsKeep = 100
+
+// lyricsAhead is how many lines from the song started a Play gives lyrics: a queue of 500 songs
+// would be 500 requests one after another, most for songs never reached.
+const lyricsAhead = 20
 
 // lyricsWait is the most one song's lyrics may take.
 const lyricsWait = 3 * time.Second
