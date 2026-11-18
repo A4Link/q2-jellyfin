@@ -38,6 +38,9 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 - **A hostile server can no longer use up the Q2's memory with one answer:** an answer whose lists hold more than 50,000 values in all is refused with *Answer too large for the Q2*, as one over 8 MB is: 8 MB of tiny values such as `0` or `null` took over 1 GB to read. A real page of 500 songs holds about 500 to 1,500. An answer's headers are capped at 64 KB (they were allowed 10 MB); bigger ones fail as a server that can't be reached does. Of an item's image tags only its cover's is read, so any others in an answer are skipped instead of kept in memory.
 - **A very long song title, artist or album no longer crashes the app at Play** under Q2 Pod's `urls`: each is cut to 1,000 bytes in the play queue, so the song pressed always fits in it. Before, a field over 256 KB from the server made every Play of that song exit the app, and with it a stream or sync under way.
+### Changed
+
+- **New connections to the server are quicker to set up:** a connection opened after a minute's pause, or alongside others, resumes the earlier secure session instead of a full handshake, which is slow on the Q2. Browsing after a pause, seeking in a streamed song and loading covers spend less time waiting. The server's certificate is still checked by name and date. With a server that speaks only TLS 1.2, each connection's keys also cross the network inside a session ticket sealed with the server's ticket key, so traffic recorded then, including the password sent at sign-in, can be read if that key ever leaks; TLS 1.3 servers are not affected.
 
 ## [0.8.0] - 2026-11-16
 
