@@ -425,15 +425,16 @@ func TestStreamEndKeepsWindow(t *testing.T) {
 	}
 }
 
-// A body that runs past its song's size (no Content-Length) is cut, never left to fill the card;
-// one shorter than its Content-Length, or empty, is no song (M9, I8); nor is an Ogg transcode
-// without its end-of-stream page, which a sync would take from the cache (finding 13c).
+// A body that runs past its song's size (with or without a Content-Length) is cut, never left to
+// fill the card; one shorter than its Content-Length, or empty, is no song (M9, I8); nor is an Ogg
+// transcode without its end-of-stream page, which a sync would take from the cache (finding 13c).
 func TestStreamBodyBounds(t *testing.T) {
 	for name, body := range map[string]func(string) (io.Reader, int64){
-		"endless": func(string) (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
-		"short":   func(string) (io.Reader, int64) { return strings.NewReader("half"), 1000 },
-		"empty":   func(string) (io.Reader, int64) { return strings.NewReader(""), -1 },
-		"Ogg cut": func(string) (io.Reader, int64) { return strings.NewReader("OggS" + strings.Repeat("x", 40)), -1 },
+		"endless":             func(string) (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+		"long Content-Length": func(string) (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), 40 << 20 },
+		"short":               func(string) (io.Reader, int64) { return strings.NewReader("half"), 1000 },
+		"empty":               func(string) (io.Reader, int64) { return strings.NewReader(""), -1 },
+		"Ogg cut":             func(string) (io.Reader, int64) { return strings.NewReader("OggS" + strings.Repeat("x", 40)), -1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t, fw.Caps{Playlist: true})

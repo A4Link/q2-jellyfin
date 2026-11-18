@@ -1335,15 +1335,15 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	return n, nil
 }
 
-// Limit is the most an answer's body may hold: its Content-Length when the server sent one, else
-// twice the size expected (want, an estimate for a transcode) and 8 MiB, so a server that never
-// stops can't fill the card (M9); no limit when neither is known.
+// Limit is the most an answer's body may hold: twice the size expected (want, an estimate for a
+// transcode) and 8 MiB, so a server can't fill the card past what was checked, whatever
+// Content-Length it sends (M9); else its Content-Length; no limit when neither is known.
 func Limit(contentLength, want int64) int64 {
 	switch {
-	case contentLength >= 0:
-		return contentLength
 	case want > 0:
 		return 2*want + 8<<20
+	case contentLength >= 0:
+		return contentLength
 	}
 	return 1<<63 - 2
 }
@@ -1354,10 +1354,10 @@ func SizeErr(n, contentLength, limit int64) error {
 	switch {
 	case n == 0:
 		return errors.New("the server sent an empty file")
-	case contentLength >= 0 && n < contentLength:
-		return fmt.Errorf("the server sent %d of %d bytes", n, contentLength)
 	case n > limit:
 		return fmt.Errorf("the server sent more than the %d bytes expected", limit)
+	case contentLength >= 0 && n < contentLength:
+		return fmt.Errorf("the server sent %d of %d bytes", n, contentLength)
 	}
 	return nil
 }

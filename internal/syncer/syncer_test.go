@@ -2166,12 +2166,13 @@ type zeros struct{}
 func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
 
 // A body short of its Content-Length, an empty one, or one that runs on past twice its song's
-// size (no Content-Length) is never saved as the song (I8, M9).
+// size (with or without a Content-Length) is never saved as the song (I8, M9).
 func TestBodyBounds(t *testing.T) {
 	for name, body := range map[string]func() (io.Reader, int64){
-		"short":   func() (io.Reader, int64) { return strings.NewReader("half"), 1000 },
-		"empty":   func() (io.Reader, int64) { return strings.NewReader(""), -1 },
-		"endless": func() (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+		"short":               func() (io.Reader, int64) { return strings.NewReader("half"), 1000 },
+		"empty":               func() (io.Reader, int64) { return strings.NewReader(""), -1 },
+		"endless":             func() (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+		"long Content-Length": func() (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), 40 << 20 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
@@ -2240,6 +2241,14 @@ func TestOggTranscodeEnds(t *testing.T) {
 				t.Fatalf("saved %v, want %v: %+v", err == nil, c.saved, s)
 			}
 		})
+	}
+}
+
+// A body cut at the limit says it was too long, though it is short of its Content-Length.
+func TestSizeErrLong(t *testing.T) {
+	limit := Limit(40<<20, 1000)
+	if err := SizeErr(limit+1, 40<<20, limit); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatal(err)
 	}
 }
 
