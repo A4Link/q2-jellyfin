@@ -79,7 +79,8 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		}
 		rows = append(rows, info(it.Name+" · no longer on the server"))
 	}
-	r := previewRows(pl, keepFreeBytes(d.settings().KeepFree), len(man.Songs))
+	// The free space as it is now: Clear Playback Cache may have freed some since the preview.
+	r := previewRows(pl, d.free(d.card), keepFreeBytes(d.settings().KeepFree), len(man.Songs), d.cacheRows)
 	r.Rows = append(rows, r.Rows...)
 	return r
 }
@@ -122,7 +123,7 @@ func (d *daemon) downloadsHint(err error) []q2spot.Row {
 	return nil
 }
 
-func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
+func previewRows(p *plan.Plan, free, reserve int64, onCard int, cache func() []q2spot.Row) q2spot.Reply {
 	if !p.Changes() {
 		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
 	}
@@ -159,12 +160,12 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 	case p.PlaylistsStale:
 		rows = append(rows, info("Update playlists"))
 	}
-	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(p.FreeBytes)+" free"))
+	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(free)+" free"))
 	// Whether it all fits keeps Space to Keep Free in hand too: a sync that would end under it pauses
 	// there. It starts anyway, and the run pauses before the card falls under it. The removals count
 	// as freed: a run short of space removes them first (syncer space).
-	if p.NeedBytes > 0 && p.NeedBytes-p.RemoveBytes+plan.Margin+reserve > p.FreeBytes {
-		rows = append(rows, info("Not all of it fits on the card"), info("It pauses with "+size(reserve)+" left"))
+	if p.NeedBytes > 0 && p.NeedBytes-p.RemoveBytes+plan.Margin+reserve > free {
+		rows = append(append(rows, info("Not all of it fits on the card"), info("It pauses with "+size(reserve)+" left")), cache()...)
 	}
 	rows = append(rows, act("start", "Start Sync", ""))
 	return q2spot.Reply{Rows: rows}
@@ -194,11 +195,11 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 	if s.State == "paused" {
 		switch {
 		case errors.Is(s.Err, syncer.ErrSpaceLow):
-			rows = append(rows, spaceRows(s.Err)...)
+			rows = append(append(rows, spaceRows(s.Err)...), d.cacheRows()...)
 		case errors.Is(s.Err, q2.ErrNoCard):
 			rows = append(rows, info("Card not available"))
 		case errors.Is(s.Err, syncer.ErrCardFull):
-			rows = append(rows, info("The card is full"))
+			rows = append(append(rows, info("The card is full")), d.cacheRows()...)
 		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
 			rows = append(append(rows, info(jellyfin.Message(s.Err, d.hostName()))), d.downloadsHint(s.Err)...) // with code 50 (R39) too
 		}
@@ -512,6 +513,9 @@ func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
 		det = withErr(det, s.Err)
 	}
 	rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(s.Err)...)
+	if errors.Is(s.Err, syscall.ENOSPC) { // "The card is full"
+		rows = append(rows, d.cacheRows()...)
+	}
 	if s.Failed > 0 {
 		rows = append(rows, list("failed", "Failed Songs", "", ""))
 	}

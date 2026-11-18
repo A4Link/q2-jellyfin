@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/A4Link/q2-jellyfin/internal/library"
+	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
 // The playback cache, .jellyfin/cache: songs that earlier versions of the app kept there once
@@ -42,6 +43,15 @@ func (d *daemon) cacheSize() int64 {
 		n += c.size
 	}
 	return n
+}
+
+// cacheRows point a sync short of space at the cache, which it no longer takes room from; none
+// while the cache is empty.
+func (d *daemon) cacheRows() []q2spot.Row {
+	if n := d.cacheSize(); n > 0 {
+		return []q2spot.Row{{Kind: "info", Title: "Clear Playback Cache frees " + size(n), Subtitle: "In Quality and Storage"}}
+	}
+	return nil
 }
 
 // clearCache empties the cache and reports the bytes it held.
