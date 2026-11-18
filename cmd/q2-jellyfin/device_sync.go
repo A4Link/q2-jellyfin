@@ -767,7 +767,10 @@ func (d *daemon) libFailedRows(msg string, at time.Time) []q2spot.Row {
 func (d *daemon) sendLibrary() (*libJob, error) {
 	d.libPoll()
 	if seq, _ := fw.ReadRequest(d.libReq()); seq != 0 && seq != d.libTaken { // still awaiting its answer
-		d.libAgain = true
+		if !d.libAgain {
+			d.libAgain = true
+			d.saveLib(true)
+		}
 		if d.lib == nil || d.lib.seq != seq {
 			d.lib = &libJob{seq: seq}
 		}
@@ -788,6 +791,7 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 		sort.Strings(imports)
 		sort.Strings(adds)
 	}
+	d.libAgain = false // this request names them all
 	return d.writeLibrary(true, imports, adds)
 }
 
@@ -818,7 +822,47 @@ func (d *daemon) writeLibrary(scan bool, imports, adds []string) (*libJob, error
 		return nil, err
 	}
 	d.lib, d.libRest = &libJob{seq: seq}, [2][]string{restImports, restAdds}
+	d.saveLib(true)
 	return d.lib, nil
+}
+
+// libMore is .jellyfin/library.more, there while a library request awaits its answer: empty, or
+// "more" when it leaves playlists to send (libRest, libAgain). The app may exit before the firmware
+// answers (I15), and /tmp is RAM: the next run takes the answer, or sends the request again if
+// the Q2 was switched off first (libStart).
+func (d *daemon) libMore() string { return filepath.Join(d.dir, "library.more") }
+
+// saveLib keeps library.more: waiting, a request awaits its answer. d.mu is held.
+func (d *daemon) saveLib(waiting bool) {
+	var err error
+	if d.libAgain || len(d.libRest[0])+len(d.libRest[1]) > 0 {
+		err = q2.WriteFile(d.libMore(), []byte("more"))
+	} else if waiting {
+		err = q2.WriteFile(d.libMore(), nil)
+	} else if err = os.Remove(d.libMore()); errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		d.log.Printf("library: %v", err)
+	}
+}
+
+// libStart picks up the library request an earlier run left (library.more): its answer is taken
+// as usual (libPoll), and "more" (read by newDaemon: libAgain) sends them all once it comes. With
+// no request in /tmp, the Q2 was switched off before the firmware ran it: it is sent again. It runs
+// in the background, so the socket listens at once; a request this run already sent (d.lib) names
+// them all.
+func (d *daemon) libStart() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !exists(d.libMore()) || d.lib != nil {
+		return
+	}
+	if seq, _ := fw.ReadRequest(d.libReq()); seq == 0 && d.caps.Library {
+		if _, err := d.sendLibrary(); err != nil {
+			d.log.Printf("library: %v", err)
+		}
+	}
 }
 
 func (d *daemon) libReq() string { return filepath.Join(d.tmp, "q2-jellyfin.library") }
@@ -880,6 +924,7 @@ func (d *daemon) libPoll() {
 	}
 	d.libRest, d.libClash = [2][]string{}, nil
 	d.libTaken = seq
+	d.saveLib(false)
 	if j := d.lib; j != nil && j.seq == seq {
 		j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
 	}
@@ -904,12 +949,19 @@ func there(paths []string) []string {
 }
 
 // syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware
-// to scan and import, whether or not the Sync page is open.
+// to scan and import, whether or not the Sync page is open. library.more is written first, before
+// the manifest read: an app stopped during that read sends the request at the next start (libStart).
 func (d *daemon) syncDone(p plan.Plan) {
 	d.mu.Lock()
 	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
+	send := d.caps.Library && changes(p)
+	if send {
+		if err := q2.WriteFile(d.libMore(), []byte("more")); err != nil {
+			d.log.Printf("library: %v", err)
+		}
+	}
 	d.mu.Unlock()
-	if !d.caps.Library || !changes(p) {
+	if !send {
 		return
 	}
 	d.mu.Lock()
