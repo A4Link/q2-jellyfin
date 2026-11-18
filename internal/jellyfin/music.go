@@ -102,6 +102,17 @@ func (c *Client) musicFolders(ctx context.Context) (musicRoots, error) {
 	return roots, nil
 }
 
+// CheckMusic asks the server again for the user's music libraries, not the ones kept: ErrNoMusic
+// when it shows none. Jellyfin answers 404 for an item of a library the account no longer sees,
+// as for one deleted.
+func (c *Client) CheckMusic(ctx context.Context) error {
+	c.scope.mu.Lock()
+	c.scope.s = nil
+	c.scope.mu.Unlock()
+	_, err := c.music(ctx)
+	return err
+}
+
 // slashPath is a server path with "/" separators (a Windows server's too), without a trailing one.
 func slashPath(p string) string { return strings.TrimRight(strings.ReplaceAll(p, `\`, "/"), "/") }
 

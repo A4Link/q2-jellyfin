@@ -715,6 +715,10 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		name = a.Name
 		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
 			s, err := cl.AlbumSongs(ctx, al.ID)
+			var ae *jellyfin.APIError
+			if errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
+				continue // that album deleted since the list: the artist is still there
+			}
 			if err != nil {
 				return nil, "", err
 			}

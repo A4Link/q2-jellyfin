@@ -111,6 +111,7 @@ type preview struct {
 	done   bool
 	plan   *plan.Plan
 	err    error
+	gone   []selection.Item   // chosen items the server no longer has: out of Sync at Start Sync
 	cancel context.CancelFunc // stops its fetches (dropPreview)
 }
 

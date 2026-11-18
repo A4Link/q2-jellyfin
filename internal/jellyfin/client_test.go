@@ -489,6 +489,29 @@ func TestMissingSongIsGone(t *testing.T) {
 	}
 }
 
+// CheckMusic asks /UserViews again rather than trusting the kept libraries: a music library the
+// account lost since is ErrNoMusic.
+func TestCheckMusicAsksAgain(t *testing.T) {
+	var lost atomic.Bool
+	f := &fake{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/UserViews" && lost.Load() {
+			w.Write([]byte(`{"Items":[{"Id":"films","Name":"Movies","CollectionType":"movies"}]}`))
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := signedIn(t, srv)
+	if _, err := c.music(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lost.Store(true)
+	if err := c.CheckMusic(context.Background()); !errors.Is(err, ErrNoMusic) {
+		t.Fatalf("got %v, want ErrNoMusic", err)
+	}
+}
+
 // An error sent as JSON with a 200 is never handed back as a song's bytes.
 func TestGetRefusesJSONBody(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{

@@ -658,6 +658,12 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		q.Set("limit", strconv.Itoa(listPage))
 		var r itemPage
 		if err := c.call(ctx, "GET", p, q, nil, &r); err != nil {
+			var ae *APIError
+			if errors.As(err, &ae) && ae.Code == CodeGone { // a list's 404 is no item deleted: an HTTP error
+				e := *ae
+				e.Code, e.kind = 0, ErrUnreachable
+				err = &e
+			}
 			return 0, err
 		}
 		if total >= 0 && r.TotalRecordCount != total {

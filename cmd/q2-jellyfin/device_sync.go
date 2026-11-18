@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -77,7 +78,7 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		return checking
 	}
 	d.mu.Lock()
-	done, pl, err := p.done, p.plan, p.err
+	done, pl, err, gone := p.done, p.plan, p.err, p.gone
 	if done && err != nil && d.preview == p {
 		d.preview = nil // shown once; the next Sync tries again
 	}
@@ -90,8 +91,16 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		r.Rows = append(d.syncSources(), r.Rows...)
 		return r
 	}
+	rows := d.syncSources()
+	for i, it := range gone { // a few by name: the page is one reply, and Start Sync is its last row
+		if i == 5 {
+			rows = append(rows, info(fmt.Sprintf("and %d more no longer on the server", len(gone)-5)))
+			break
+		}
+		rows = append(rows, info(it.Name+" · no longer on the server"))
+	}
 	r := previewRows(pl, keepFreeBytes(d.settings().KeepFree), len(man.Songs))
-	r.Rows = append(d.syncSources(), r.Rows...)
+	r.Rows = append(rows, r.Rows...)
 	return r
 }
 
@@ -159,17 +168,20 @@ func (d *daemon) downloadsHint(err error) []q2spot.Row {
 }
 
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
-// failure fails the preview: a missing item's songs would otherwise read as removed. ctx ends with
+// failure fails the preview: a missing item's songs would otherwise read as removed. The exception
+// is an item the server says it no longer has (deleted there): it is planned as having no songs, so
+// those only it wanted are removed, and it leaves Sync with Start Sync (dropGone). ctx ends with
 // the preview (dropPreview).
-func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *preview) {
-	ctx, cancel := context.WithCancel(ctx)
+func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *preview) {
+	ctx, cancel := context.WithCancel(pctx)
 	defer cancel()
 	sel, err := d.selection()
 	resolved, names := map[string][]jellyfin.Song{}, map[string]string{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	var werr error // the first worker's failure, under mu; it cancels ctx, so the rest return at once
+	var werr error            // the first worker's failure, under mu; it cancels ctx, so the rest return at once
+	var gone []selection.Item // under mu
 	items := sel.Items
 	for _, it := range items {
 		if err != nil {
@@ -206,6 +218,10 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 			key := selection.Key(it.Kind, it.ID)
 			mu.Lock()
 			defer mu.Unlock()
+			var ae *jellyfin.APIError
+			if it.Kind != selection.KindFavorites && errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
+				gone, e = append(gone, it), nil
+			}
 			if e != nil && werr == nil {
 				werr = e
 				cancel()
@@ -217,6 +233,18 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 	if err == nil {
 		err = werr
 	}
+	if err == nil && len(gone) > 0 { // or the account lost its music library: nothing goes then
+		if err = cl.CheckMusic(ctx); err != nil {
+			gone = nil
+		}
+	}
+	var ae *jellyfin.APIError // a list of a library the account lost answers 401 (403 from a proxy)
+	if errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) {
+		if merr := cl.CheckMusic(pctx); errors.Is(merr, jellyfin.ErrNoMusic) { // ctx: cancelled by the failure
+			err = merr
+		}
+	}
+	sel.Items = slices.DeleteFunc(sel.Items, func(it selection.Item) bool { return isGone(gone, it) })
 	man, merr := d.manifestErr()
 	if err == nil { // Sync Favourites and a hold start one with no Sync page to stop it
 		err = merr
@@ -237,8 +265,11 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 			d.log.Printf("sync: refresh: %v", rerr)
 		}
 	}
+	if err == nil && !changes(pl) {
+		d.dropGone(gone) // nothing on the Q2 is left to remove for them: no Start Sync to wait for
+	}
 	d.mu.Lock()
-	p.done, p.plan, p.err, p.at = true, &pl, err, time.Now()
+	p.done, p.plan, p.err, p.gone, p.at = true, &pl, err, gone, time.Now()
 	auto := d.autoStart && p == d.preview && d.cl == cl // never for an account signed out meanwhile
 	again := auto && p.gen != d.gen                     // changed again meanwhile: start from a new preview
 	if auto && !again {
@@ -259,6 +290,28 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 	if err == nil { // after the preview shows: a request per song
 		d.backfillLyrics(ctx, resolved, pl)
 	}
+}
+
+// dropGone takes the items the server no longer has out of Sync. They had no songs in the plan, so
+// the plan stays as it is: no new preview.
+func (d *daemon) dropGone(gone []selection.Item) {
+	if len(gone) == 0 {
+		return
+	}
+	d.selMu.Lock()
+	defer d.selMu.Unlock()
+	sel, err := d.selection()
+	if err == nil {
+		sel.Items = slices.DeleteFunc(sel.Items, func(it selection.Item) bool { return isGone(gone, it) })
+		err = sel.Save(d.selPath())
+	}
+	if err != nil {
+		d.log.Printf("sync: selection: %v", err)
+	}
+}
+
+func isGone(gone []selection.Item, it selection.Item) bool {
+	return slices.ContainsFunc(gone, func(g selection.Item) bool { return g.Kind == it.Kind && g.ID == it.ID })
 }
 
 // changes reports whether p has anything to do: a song to move, or a playlist file to write or delete.
@@ -356,19 +409,34 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 	return q2spot.Reply{Message: "refresh", Rows: rows}
 }
 
+// previewGone is the items the current preview found deleted on the server.
+func (d *daemon) previewGone() []selection.Item {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p := d.preview; p != nil && p.err == nil {
+		return p.gone
+	}
+	return nil
+}
+
 // jobsRow opens Sync Jobs.
 var jobsRow = list("jobs", "Sync Jobs", "Hold or resume what syncs", "")
 
 // jobs is Sync Jobs: every item in Sync not yet all on the Q2, and every held one. A press holds
-// or resumes it (hold).
+// or resumes it (hold). One the preview found gone is an info row: holding it would keep nothing.
 func (d *daemon) jobs(cursor string) q2spot.Reply {
 	sel, err := d.selection()
 	if err != nil {
 		return damagedSelection()
 	}
+	gone := d.previewGone()
 	v := d.view()
 	var rows []q2spot.Row
 	for _, it := range sel.Items {
+		if isGone(gone, it) {
+			rows = append(rows, q2spot.Row{Kind: "info", Title: it.Name, Subtitle: "No longer on the server"})
+			continue
+		}
 		st := v.jobStatus(it.Kind, it.ID)
 		if st == "On Q2" && !it.Held {
 			continue
@@ -571,6 +639,7 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.dropPreview() // its lyrics backfill too: the sync writes lyrics for what it fetches
 		d.showDone = true
 		d.mu.Unlock()
+		d.dropGone(p.gone)
 		d.wantReports(true) // with the server in reach: the plays waiting go too
 	case "pause": // R27: stopping waits for the download to notice; the reply doesn't
 		d.spawn(d.runner.Pause)
