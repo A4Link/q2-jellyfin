@@ -145,8 +145,12 @@ func (c *Client) logf(format string, a ...any) {
 }
 
 const (
-	// maxBody caps an API answer: decoding takes about twice its size, and the Q2 has about 60 MB.
+	// maxBody caps an API answer: real items decode to about twice their size, and the Q2 has
+	// about 60 MB. Tiny array values (0, null, {}) decode to far more, so maxValues caps them too.
 	maxBody = 8 << 20
+	// maxValues caps the commas between array values in one answer: a real 500-song page has about
+	// 500 to 1,500.
+	maxValues = 50_000
 	// idleAfter fails a body Read that gets no data for this long (a hung transcode or NAS).
 	idleAfter = 30 * time.Second
 )
@@ -256,7 +260,7 @@ func (c *Client) call(ctx context.Context, method, p string, q url.Values, in, o
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return statusError(op, resp.StatusCode)
 	}
-	if len(data) > maxBody {
+	if len(data) > maxBody || arrayValues(data) > maxValues {
 		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: "Answer too large for the Q2"}
 	}
 	if out != nil && len(bytes.TrimSpace(data)) > 0 {
@@ -265,6 +269,36 @@ func (c *Client) call(ctx context.Context, method, p string, q url.Values, in, o
 		}
 	}
 	return nil
+}
+
+// arrayValues counts the commas between array values in data, at any depth, skipping strings.
+func arrayValues(data []byte) int {
+	n := 0
+	var open []byte // the [ and { not yet closed
+	for i := 0; i < len(data); i++ {
+		switch b := data[i]; b {
+		case '"':
+			for i++; i < len(data) && data[i] != '"'; i++ {
+				if data[i] == '\\' {
+					i++
+				}
+			}
+		case '[', '{':
+			if len(open) == 10_000 {
+				return n // json.Unmarshal refuses deeper nesting
+			}
+			open = append(open, b)
+		case ']', '}':
+			if len(open) > 0 {
+				open = open[:len(open)-1]
+			}
+		case ',':
+			if len(open) > 0 && open[len(open)-1] == '[' {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // opName names a request for logs and the Details row: the first path segment that isn't an id
