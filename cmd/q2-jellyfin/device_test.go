@@ -1981,6 +1981,159 @@ func TestLibraryAddsThenImports(t *testing.T) {
 	}
 }
 
+// R35: a playlist taken out of Sync is no longer the app's: the user may delete the Q2's copy and
+// make their own of that name. Added back, it goes as "add", which never replaces theirs.
+func TestLibraryReaddedPlaylistAdds(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.tick()
+	if !d.manifest().Imported[mix] {
+		t.Fatal("not recorded as imported")
+	}
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" && !exists(mix) })
+	if d.manifest().Imported[mix] {
+		t.Fatal("still recorded as imported")
+	}
+	var seq2 string
+	eventually(t, "the next request", func() bool { seq2, _ = d.libReq(t); return seq2 != seq })
+	d.answer(seq2 + " ok")
+	d.tick()
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	d.preview(t)
+	d.do("start")
+	var lines []string
+	eventually(t, "the request adding it", func() bool {
+		var seq3 string
+		seq3, lines = d.libReq(t)
+		return seq3 != seq2
+	})
+	if strings.Join(lines, "|") != "scan|add "+mix {
+		t.Fatalf("request %q", lines)
+	}
+}
+
+// A playlist added back twice while the Q2 keeps its copies: the second time the Q2 has
+// "Mix (Jellyfin)" too, so the clash lasts, and its message names the next step. A playlist
+// renamed in the same answer still gets its follow-up, whose own clash is counted; once the Q2's
+// copies are gone, the next sync adds them.
+func TestLibrarySecondReaddClash(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2, playlists: 2}, "library", true)
+	d.do("toggle", "playlist:pl1")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	dir := filepath.Join(d.card, "_explaylist_data")
+	mix, mixS := filepath.Join(dir, "Mix.m3u"), filepath.Join(dir, "Mix (Jellyfin).m3u")
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.tick()
+	// readd takes the playlist (now at f) out of Sync, syncs, adds it back and syncs.
+	readd := func(seq, f string) string {
+		d.do("toggle", "playlist:pl1")
+		d.do("check")
+		d.preview(t)
+		d.do("start")
+		eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" && !exists(f) })
+		var seq2 string
+		eventually(t, "the next request", func() bool { seq2, _ = d.libReq(t); return seq2 != seq })
+		d.answer(seq2 + " ok")
+		d.tick()
+		d.do("toggle", "playlist:pl1")
+		d.do("check")
+		d.preview(t)
+		d.do("start")
+		var seq3 string
+		var lines []string
+		eventually(t, "the request adding it", func() bool { seq3, lines = d.libReq(t); return seq3 != seq2 })
+		if strings.Join(lines, "|") != "scan|add "+mix {
+			t.Fatalf("request %q", lines)
+		}
+		d.answer(seq3+" ok", "exists "+mix)
+		d.tick()
+		var seq4 string
+		eventually(t, "the follow-up", func() bool { seq4, lines = d.libReq(t); return seq4 != seq3 })
+		if strings.Join(lines, "|") != "add "+mixS {
+			t.Fatalf("follow-up %q", lines)
+		}
+		return seq4
+	}
+	seq = readd(seq, mix)
+	d.answer(seq + " ok")
+	d.tick()
+	if !d.manifest().Imported[mixS] {
+		t.Fatal("Mix (Jellyfin) not recorded as imported")
+	}
+	seq = readd(seq, mixS)
+	d.answer(seq+" ok", "exists "+mixS)
+	r := d.do("sync")
+	if _, ok := find(r, "Couldn't import Mix (Jellyfin): the Q2 has a playlist with that name. Delete it in Library → Playlists, then Check Again"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+	if m := d.manifest(); m.Playlists["Mix"] != mixS || m.Imported[mixS] {
+		t.Fatalf("%+v %+v", m.Playlists, m.Imported)
+	}
+
+	mix2, mix2S := filepath.Join(dir, "Mix 2.m3u"), filepath.Join(dir, "Mix 2 (Jellyfin).m3u")
+	d.do("toggle", "playlist:pl2")
+	d.do("check")
+	d.preview(t)
+	d.do("start")
+	seq2 := seq
+	eventually(t, "the request adding Mix 2", func() bool { seq2, _ = d.libReq(t); return seq2 != seq })
+	d.answer(seq2+" ok", "exists "+mix2, "exists "+mixS)
+	d.tick()
+	seq3, lines := d.libReq(t)
+	if seq3 == seq2 || strings.Join(lines, "|") != "add "+mix2S {
+		t.Fatalf("follow-up %s %q", seq3, lines)
+	}
+	d.answer(seq3+" ok", "exists "+mix2S)
+	r = d.do("sync")
+	if _, ok := find(r, "Couldn't import Mix (Jellyfin) and 1 more: the Q2 has playlists with those names. Delete them in Library → Playlists, then Check Again"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+
+	d.do("check")
+	r = d.preview(t)
+	if _, ok := find(r, "Start Sync"); !ok {
+		t.Fatalf("no Start Sync after the clash: %q", titles(r))
+	}
+	d.do("start")
+	seq4 := seq3
+	eventually(t, "the request adding them again", func() bool { seq4, lines = d.libReq(t); return seq4 != seq3 })
+	if l := strings.Join(lines, "|"); !strings.Contains(l, "add "+mixS) || !strings.Contains(l, "add "+mix2S) {
+		t.Fatalf("request %q", lines)
+	}
+	d.answer(seq4 + " ok")
+	d.tick()
+	if m := d.manifest(); !m.Imported[mixS] || !m.Imported[mix2S] {
+		t.Fatalf("%+v", m.Imported)
+	}
+}
+
+// R35: an answer taken after the sync that removed the playlist doesn't mark it as the app's again.
+func TestLibraryLateAnswerSkipsRemovedPlaylist(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	seq, _ := d.libReq(t)
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" && !exists(mix) })
+	d.answer(seq + " ok")
+	eventually(t, "the answer taken", func() bool { d.tick(); s, _ := d.libReq(t); return s != seq })
+	if d.manifest().Imported[mix] {
+		t.Fatal("recorded as imported after its removal")
+	}
+}
+
 // A playlist file an older version recorded under a name longer than the Q2 keeps is never sent
 // (issue #1): the Q2 would add another copy, or refuse the whole request. The next sync moves it.
 func TestLibraryNeverSendsLongName(t *testing.T) {
