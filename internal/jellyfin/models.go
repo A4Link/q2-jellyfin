@@ -106,7 +106,7 @@ func (w wireItem) suffix() string {
 		c = cmp.Or(w.MediaSources[0].Container, c)
 	}
 	if ext := strings.TrimPrefix(strings.ToLower(path.Ext(strings.ReplaceAll(p, `\`, "/"))), "."); ext != "" {
-		return ext
+		return strings.Clone(ext) // a slice would keep the whole server path in memory
 	}
 	parts := strings.Split(strings.ToLower(c), ",")
 	for _, want := range []string{"m4a", "mp4"} {

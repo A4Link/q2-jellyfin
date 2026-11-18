@@ -165,12 +165,14 @@ type daemon struct {
 	artistAlbums       map[string][]jellyfin.Album // artist id -> its albums, as last fetched
 	lists              listCache                   // whole Artists and Playlists lists, between a list's pages
 	libCount           [2]int                      // albums, playlists of the Entire Library, as last resolved
+	libKnown           bool                        // libCount is set: a check has resolved the Entire Library
 	playSeq            int                         // the latest play request; an older one still waiting is dropped
 	playMu             sync.Mutex                  // one streamer.start at a time
 	playKey            string                      // the list ("kind:id") the latest Play started in (status.go)
 	polls              pollCache                   // song lists kept while a song buffers (status.go)
 	queue              queueCache                  // the play queue as last read (playqueue.go)
 	art                artState                    // list covers (art.go)
+	manMu              sync.Mutex                  // guards man..manSize (manifestErr). Lock order: d.mu, then manMu; never d.mu under manMu
 	man                *library.Manifest
 	manErr             error // the manifest is there but can't be read: man is empty, not the card's
 	manAt              time.Time
@@ -406,9 +408,10 @@ func (d *daemon) manifest() *library.Manifest {
 func (d *daemon) manifestErr() (*library.Manifest, error) {
 	p := filepath.Join(d.card, ".jellyfin", "manifest.json")
 	st, err := os.Stat(p)
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.manMu.Lock()
+	defer d.manMu.Unlock()
 	if d.man == nil || err != nil || !st.ModTime().Equal(d.manAt) || st.Size() != d.manSize {
+		d.man = nil // the old copy can go while the new one is read
 		d.man, d.manErr = library.LoadManifest(p)
 		d.manAt, d.manSize = time.Time{}, 0
 		if err == nil {

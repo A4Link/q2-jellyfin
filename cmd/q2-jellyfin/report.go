@@ -552,7 +552,7 @@ func (d *daemon) readPlays() {
 // hour after now (logged under a clock since set back) waits for its time, not to move the mark
 // past the listens to come.
 func listens(card string, man *library.Manifest, m playsMark, now time.Time) ([]report, playsMark) {
-	idx := newSongIndex(card, man)
+	var idx songIndex // built at the first new listen: a send with nothing new builds nothing
 	next := m
 	seen := map[string]bool{}
 	for _, h := range m.Seen {
@@ -581,6 +581,9 @@ func listens(card string, man *library.Manifest, m playsMark, now time.Time) ([]
 			}
 			if t == next.At {
 				next.Seen = append(next.Seen, h)
+			}
+			if idx == nil {
+				idx = newSongIndex(card, man)
 			}
 			if id := idx.find(f[0], f[1], f[2], f[3]); id != "" && !liveNear(m.Live, id, t) {
 				rs = append(rs, report{Kind: playedKind, Item: id, At: t})

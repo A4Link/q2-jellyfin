@@ -622,10 +622,9 @@ func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
 	if sel.Has(selection.KindLibrary, "all") {
 		sub = "On"
 		d.mu.Lock()
-		c := d.libCount
-		_, ok := d.resolved[selection.Key(selection.KindLibrary, "all")]
+		c, known := d.libCount, d.libKnown // kept while a check drops the list
 		d.mu.Unlock()
-		if ok {
+		if known {
 			sub = fmt.Sprintf("On · %s · %s", plural(c[0], "album"), plural(c[1], "playlist"))
 		}
 	}

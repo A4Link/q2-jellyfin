@@ -112,6 +112,11 @@ type Runner struct {
 	log  *applog.Log
 	onOp func(op, path string) // tests: "download" and "remove", in order
 
+	// fileMu is held by a run, or an edit, while it has the manifest loaded: a whole load and save
+	// takes seconds on a big library, and Snapshot, Busy and Moving must not wait for it (r.mu).
+	// editMu, taken before fileMu, lets edits wait for each other: fileMu is then only a run's.
+	fileMu, editMu sync.Mutex
+
 	mu                    sync.Mutex
 	plan                  *plan.Plan
 	moving                map[string]bool // the songs plan renames, replaces or removes, for Moving
@@ -166,16 +171,18 @@ func (r *Runner) Start(p plan.Plan) error {
 // won't continue: a song paused, cut or left by a restart, then taken out of Sync, whose .part no
 // removal would ever be for (audit 2026-11-10 #7). Once a run, in its background.
 func (j *job) dropParts() {
-	want := map[string]bool{}
-	for _, w := range append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...) {
-		want[w.Path+".part"] = true
+	want := map[string]bool{} // the planned songs' paths
+	for _, ws := range [][]plan.Want{j.p.Add, j.p.Replace} {
+		for _, w := range ws {
+			want[w.Path] = true
+		}
 	}
 	filepath.WalkDir(filepath.Join(j.root, "Jellyfin"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
 		part := strings.TrimSuffix(p, ".key") // a .part's key goes with it
-		if !strings.HasSuffix(part, ".part") || want[part] {
+		if !strings.HasSuffix(part, ".part") || want[strings.TrimSuffix(part, ".part")] {
 			return nil
 		}
 		if library.Remove(j.root, p) == nil {
@@ -195,8 +202,10 @@ func (r *Runner) launch() {
 	r.deletedN = 0
 	r.heldRetry = false
 	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
-	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
-		r.bytesTotal += w.Bytes
+	for _, ws := range [][]plan.Want{p.Add, p.Replace} {
+		for _, w := range ws {
+			r.bytesTotal += w.Bytes
+		}
 	}
 	r.moving = map[string]bool{}
 	for _, mv := range p.Rename {
@@ -217,7 +226,9 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 	finished := false
 	defer func() { // deferred before the unlock below, so it runs after it
 		if finished && r.OnDone != nil {
-			r.OnDone(p)
+			q := p
+			p = plan.Plan{} // so the plan can be freed once OnDone has used it
+			r.OnDone(q)
 		}
 		r.mu.Lock()
 		r.ending = false
@@ -239,6 +250,10 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 		r.logf("sync: %v", err)
 	default:
 		r.state, finished, r.ending = "done", true, true
+		r.moving = nil // Moving answers only while running or paused
+		if r.failedN == 0 {
+			r.plan = nil // only Retry Failed reads it again; a big plan is megabytes
+		}
 	}
 }
 
@@ -262,7 +277,7 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 	if len(keep) == 0 {
 		return nil
 	}
-	return r.edit(func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
+	return r.edit(true, func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
 }
 
 // Imported takes the firmware's answer to a library request that imported sent[0], added sent[1],
@@ -272,7 +287,8 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 // One skipped under that name too is a clash; its sum is forgotten, so the next preview offers a
 // sync, whose request adds it again. Only an exists naming exactly an add of the request
 // counts; any other is logged and ignored, and then no add is recorded (one may have been
-// skipped: the guard fails closed). ErrBusy while a sync runs.
+// skipped: the guard fails closed). ErrBusy while a sync runs or another edit saves: it doesn't
+// wait, as its caller holds the daemon's lock.
 func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []string, err error) {
 	imports, adds := sent[0], sent[1]
 	added, skipped, trusted := map[string]bool{}, map[string]bool{}, true
@@ -287,7 +303,7 @@ func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []str
 		r.logf("library: ignoring \"exists %s\": not an add of this request", f)
 		trusted = false
 	}
-	err = r.edit(func(m *library.Manifest) (bool, error) {
+	err = r.edit(false, func(m *library.Manifest) (bool, error) {
 		changed, kept := false, map[string]bool{}
 		for _, f := range m.Playlists {
 			kept[f] = true
@@ -327,10 +343,23 @@ func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []str
 }
 
 // edit changes the manifest while no sync runs: a run holds it in memory and saves it whole.
-func (r *Runner) edit(f func(*library.Manifest) (bool, error)) error {
+// It waits for another edit, or, unless wait, is ErrBusy (Imported: its caller holds the daemon's
+// lock and tries again).
+func (r *Runner) edit(wait bool, f func(*library.Manifest) (bool, error)) error {
+	if wait {
+		r.editMu.Lock()
+	} else if !r.editMu.TryLock() {
+		return ErrBusy
+	}
+	defer r.editMu.Unlock()
+	if !r.fileMu.TryLock() { // a run's
+		return ErrBusy
+	}
+	defer r.fileMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state == "running" {
+	running := r.state == "running" // launched, its work not yet holding fileMu
+	r.mu.Unlock()
+	if running {
 		return ErrBusy
 	}
 	m, err := library.LoadManifest(r.manifestPath())
@@ -398,6 +427,16 @@ func (r *Runner) RetryFailed() bool {
 	return ok && r.Start(*p) == nil
 }
 
+// Forget drops the plan of a run that has ended (done or error), which a new preview replaces:
+// Retry Failed then no longer runs it. A paused run keeps it for Resume.
+func (r *Runner) Forget() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == "done" || r.state == "error" {
+		r.plan, r.moving = nil, nil
+	}
+}
+
 // DropMissing forgets the songs of m, the card's manifest as the caller read it, whose files are
 // gone from the card (deleted by hand, or with the folder after the app was removed), so the next
 // plan fetches them again (I9). It also forgets the gone files of m.Stale, deleted by a run that
@@ -423,7 +462,7 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 	if len(gone) == 0 && len(staleGone) == 0 || !r.CardMounted() {
 		return nil
 	}
-	return r.edit(func(m *library.Manifest) (bool, error) {
+	return r.edit(true, func(m *library.Manifest) (bool, error) {
 		n := 0
 		for id, path := range gone {
 			if e := m.Songs[id]; e != nil && e.Path == path {
@@ -536,6 +575,8 @@ func (r *Runner) cardErr(err error) error {
 }
 
 func (r *Runner) work(ctx context.Context, p plan.Plan) error {
+	r.fileMu.Lock() // an edit that began before the launch saves first
+	defer r.fileMu.Unlock()
 	m, err := library.LoadManifest(r.manifestPath())
 	if err != nil {
 		return r.cardErr(err)
@@ -901,8 +942,10 @@ func (j *job) playlists() error {
 		}
 	}
 	planned := map[string]string{} // a path the plan gives a song -> its id
-	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
-		planned[w.Path] = w.Song.ID
+	for _, ws := range [][]plan.Want{p.Add, p.Replace} {
+		for _, w := range ws {
+			planned[w.Path] = w.Song.ID
+		}
 	}
 	for _, mv := range p.Rename {
 		planned[mv.To] = mv.ID

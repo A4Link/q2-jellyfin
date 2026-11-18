@@ -386,6 +386,26 @@ func TestListensLateAndTwice(t *testing.T) {
 	}
 }
 
+// A read with no new listen doesn't index the synced songs: it costs the same with 500 of them as
+// with none (audit 0.8.1 round 3 #5).
+func TestListensIndexOnlyForNew(t *testing.T) {
+	card := t.TempDir()
+	now := time.Now()
+	os.WriteFile(filepath.Join(card, ".scrobbler.log"), []byte(logHeader+listen("Miles", "Kind", "Blue", 2, now.Unix()-500)), 0o644)
+	mark := playsMark{At: now.Unix() - 100}
+	big := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for i := 0; i < 500; i++ {
+		s := jellyfin.Song{ID: fmt.Sprint("s", i), Title: fmt.Sprint("Song ", i), Album: "Alb", AlbumArtist: "Art", Track: i, Suffix: "flac"}
+		big.Songs[s.ID] = &library.Entry{ID: s.ID, Path: library.SongPath(card, s, "opus-160", false)}
+	}
+	allocs := func(m *library.Manifest) float64 {
+		return testing.AllocsPerRun(5, func() { listens(card, m, mark, now) })
+	}
+	if none, many := allocs(&library.Manifest{Songs: map[string]*library.Entry{}}), allocs(big); many > none+10 && !raceOn {
+		t.Fatalf("%v allocations with 500 songs, %v with none", many, none)
+	}
+}
+
 // Turned off, or signed out, while a send runs: it stops there. A song streamed with reporting
 // off, or after Sign Out, leaves nothing to send. On again reads on from then, even after a read
 // that finished once it was off.

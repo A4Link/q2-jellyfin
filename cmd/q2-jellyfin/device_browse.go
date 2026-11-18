@@ -24,7 +24,7 @@ import (
 // view is what status subtitles are read from: the selection, the manifest and the songs fetched,
 // indexed in one pass per request, so a list of thousands of items never walks the manifest per
 // row (I17).
-// ponytail: built again per request (twice with Sync Now), about 25 ms per 40k songs on a laptop;
+// ponytail: built again per request (twice on a first page with Sync Now), about 25 ms per 40k songs on a laptop;
 // cache it by manifest, selection and resolve if pages of a huge library are slow on the Q2.
 type view struct {
 	sel     selection.Set
@@ -58,9 +58,10 @@ func (d *daemon) view() view {
 			v.lib, v.libHeld = true, it.Held
 		}
 	}
-	song := map[string]jellyfin.Song{} // the fetched songs on the card
+	song := map[string]*jellyfin.Song{} // the fetched songs on the card; pointers, not 100-byte copies
 	for _, songs := range res {
-		for _, s := range songs {
+		for i := range songs {
+			s := &songs[i]
 			if m.Songs[s.ID] == nil {
 				continue
 			}
@@ -72,7 +73,11 @@ func (d *daemon) view() view {
 	}
 	for id, e := range m.Songs {
 		// A song not fetched since the start: an original on the card is of its file's format.
-		sg, known := song[id]
+		var sg jellyfin.Song
+		p, known := song[id]
+		if known {
+			sg = *p
+		}
 		if !known && quality.IsOriginal(e.Quality) {
 			sg.Suffix = strings.ToLower(strings.TrimPrefix(filepath.Ext(e.Path), "."))
 		}
@@ -229,8 +234,11 @@ func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 
 // withSyncNow puts the Sync Now row first on a list's first page (after its search box), pushing the last row to the next.
 func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
+	if cursor != "" || r.Status != "" {
+		return r
+	}
 	row, ok := d.syncNowRow()
-	if !ok || cursor != "" || r.Status != "" {
+	if !ok {
 		return r
 	}
 	if len(r.Rows) >= q2spot.MaxRows { // room for it: the page's last rows go to the next one
@@ -1000,8 +1008,16 @@ func (d *daemon) onQ2Subtitle(sel selection.Set, err error) string {
 	if err != nil {
 		return "Selection file is damaged"
 	}
+	// While a sync runs, the copy already read: reading each save again would hold two copies
+	// (the bytes catch up when it ends).
+	d.manMu.Lock()
+	m := d.man
+	d.manMu.Unlock()
+	if m == nil || !d.runner.Busy() {
+		m = d.manifest()
+	}
 	var bytes int64
-	for _, e := range d.manifest().Songs {
+	for _, e := range m.Songs {
 		bytes += e.Size
 	}
 	return plural(len(sel.Items), "item") + " · " + size(bytes)
