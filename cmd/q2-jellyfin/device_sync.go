@@ -158,6 +158,69 @@ func (d *daemon) downloadsHint(err error) []q2spot.Row {
 	return nil
 }
 
+// batched is what songBatch looked up together: single songs, albums and playlists, by id.
+type batched struct {
+	songs     map[string]jellyfin.Song
+	albums    map[string]jellyfin.Album
+	playlists map[string]jellyfin.Playlist
+}
+
+// songBatch looks up the single songs among items together, and the albums and playlists together
+// (audit 0.8.1 round 3 #14, round 4 #12). A failure or an item left out is left to the item's own
+// lookup in songsOf, so only that lookup's 404 makes it gone.
+func songBatch(ctx context.Context, cl *jellyfin.Client, items []selection.Item) batched {
+	var songs, lists []string
+	for _, it := range items {
+		switch it.Kind {
+		case selection.KindSong:
+			songs = append(songs, it.ID)
+		case selection.KindAlbum, selection.KindPlaylist:
+			lists = append(lists, it.ID)
+		}
+	}
+	var b batched
+	if len(songs) > 1 { // one item: its own lookup is the one request
+		b.songs, _ = cl.Songs(ctx, songs)
+	}
+	if len(lists) > 1 {
+		b.albums, b.playlists, _ = cl.AlbumsAndPlaylists(ctx, lists)
+	}
+	return b
+}
+
+// itemSongs is songsOf, but an item songBatch answered needs no item request of its own.
+func (d *daemon) itemSongs(ctx context.Context, cl *jellyfin.Client, it selection.Item, b batched) ([]jellyfin.Song, string, error) {
+	var songs []jellyfin.Song
+	var name string
+	var err error
+	s, isSong := b.songs[it.ID]
+	a, isAlbum := b.albums[it.ID]
+	p, isPlaylist := b.playlists[it.ID]
+	switch {
+	case it.Kind == selection.KindSong && isSong:
+		songs, name = []jellyfin.Song{s}, s.Title
+	case it.Kind == selection.KindAlbum && isAlbum:
+		songs, err = cl.AlbumSongs(ctx, it.ID, false)
+		oneArtist(a, songs) // as getAlbum does (M41)
+		name = a.Name
+	case it.Kind == selection.KindPlaylist && isPlaylist:
+		songs, err = cl.PlaylistSongs(ctx, it.ID, false)
+		name = p.Name
+	default:
+		return d.songsOf(ctx, cl, it.Kind, it.ID)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if songs == nil {
+		songs = []jellyfin.Song{}
+	}
+	d.mu.Lock()
+	d.resolved[selection.Key(it.Kind, it.ID)] = songs // as songsOf keeps it
+	d.mu.Unlock()
+	return songs, name, nil
+}
+
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
 // failure fails the preview: a missing item's songs would otherwise read as removed. The exception
 // is an item the server says it no longer has (deleted there): it is planned as having no songs, so
@@ -179,6 +242,7 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 	var werr error            // the first worker's failure, under mu; it cancels ctx, so the rest return at once
 	var gone []selection.Item // under mu
 	items := sel.Items
+	got := songBatch(ctx, cl, items)
 	for _, it := range items {
 		if err != nil {
 			break // the selection didn't load; no worker has started
@@ -210,7 +274,7 @@ func (d *daemon) computePreview(pctx context.Context, cl *jellyfin.Client, p *pr
 			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			songs, name, e := d.songsOf(ctx, cl, it.Kind, it.ID)
+			songs, name, e := d.itemSongs(ctx, cl, it, got)
 			key := selection.Key(it.Kind, it.ID)
 			mu.Lock()
 			defer mu.Unlock()
@@ -1117,9 +1181,8 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 	}
 	for i, p := range pls {
 		run(func() (err error) {
-			var pl jellyfin.Playlist
-			pl, res.playlists[i].songs, err = cl.Playlist(ctx, p.ID)
-			res.playlists[i].id, res.playlists[i].name = p.ID, cmp.Or(pl.Name, p.Name)
+			res.playlists[i].songs, err = cl.PlaylistSongs(ctx, p.ID, false) // the list named it: no item request
+			res.playlists[i].id, res.playlists[i].name = p.ID, p.Name
 			return
 		})
 	}

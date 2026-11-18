@@ -87,6 +87,11 @@ type nav struct {
 	lastPlayed       sync.Map     // song id -> the datePlayed last marked, its UserData.LastPlayedDate
 	hearts           sync.Map     // song id -> its favourite state as last set (/UserFavoriteItems), over favs
 	favStatus        atomic.Int32 // when set, /UserFavoriteItems answers this HTTP status
+	songReqs         atomic.Int32 // /Items/al<i>.<j> calls served (cl.Song)
+	batchReqs        atomic.Int32 // /Items?ids= calls served (cl.Songs, cl.AlbumsAndPlaylists)
+	leaveOut         string       // an item /Items?ids= leaves out of its answer
+	playlistReqs     atomic.Int32 // /Items/pl<k> calls served (cl.Playlist)
+	userDataSent     sync.Map     // "<list> <enableUserData sent>" -> true, for song and album lists (userDataKey)
 }
 
 // reported is the play reports served so far.
@@ -179,6 +184,9 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if k := userDataKey(r); k != "" {
+		n.userDataSent.Store(k+" "+q.Get("enableUserData"), true)
+	}
 	ok := func(v any) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(v)
@@ -337,6 +345,25 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		kind := q.Get("includeItemTypes")
 		off, _ := strconv.Atoi(q.Get("startIndex"))
 		switch {
+		case q.Get("ids") != "":
+			n.batchReqs.Add(1)
+			var s []map[string]any
+			for _, id := range strings.Split(q.Get("ids"), ",") {
+				var a, j int
+				switch {
+				case n.noMusic || id == n.leaveOut || id == n.failID: // gone, or the account can't see it
+				case strings.HasPrefix(id, "pl"):
+					k, _ := strconv.Atoi(strings.TrimPrefix(id, "pl"))
+					s = append(s, n.playlist(k))
+				case !strings.Contains(id, "."):
+					s = append(s, n.album(albumOf(id)))
+				default:
+					if _, err := fmt.Sscanf(id, "al%d.%d", &a, &j); err == nil {
+						s = append(s, n.song(a, j))
+					}
+				}
+			}
+			page(s)
 		case q.Get("isFavorite") == "true":
 			var fav []map[string]any
 			for j := 0; j < max(n.favs, n.songsPer) && off == 0; j++ {
@@ -460,12 +487,14 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case n.noMusic: // Jellyfin: an item of a library the account can't see is not found
 			fail(70)
 		case strings.HasPrefix(id, "pl"):
+			n.playlistReqs.Add(1)
 			kk, _ := strconv.Atoi(strings.TrimPrefix(id, "pl"))
 			ok(n.playlist(kk))
 		case strings.HasPrefix(id, "ar"):
 			n.artistItemReqs.Add(1)
 			ok(map[string]any{"Id": "ar1", "Type": "MusicArtist", "Name": "Artist", "AlbumCount": 2})
 		case strings.Contains(id, "."): // a song: al<i>.<j>
+			n.songReqs.Add(1)
 			al, j, _ := strings.Cut(strings.TrimPrefix(id, "al"), ".")
 			a, _ := strconv.Atoi(al)
 			k, _ := strconv.Atoi(j)
@@ -1986,6 +2015,124 @@ func TestArtistSongsOneRequestPerAlbum(t *testing.T) {
 	want := "al0.0 Various Artists,al0.1 Various Artists,al1.0 Various Artists,al1.1 Various Artists"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("%q", got)
+	}
+}
+
+// Songs chosen one by one are looked up together; one the batch leaves out gets its own lookup
+// (audit 0.8.1 round 3 #14).
+func TestSongsResolvedInOneBatch(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2, leaveOut: "al1.0"}
+	d := newTestDaemon(t, n, "", true)
+	for _, id := range []string{"al0.0", "al0.1", "al1.0"} {
+		d.do("toggle", "song:"+id)
+	}
+	n.songReqs.Store(0)
+	d.preview(t)
+	if b, s := n.batchReqs.Load(), n.songReqs.Load(); b != 1 || s != 1 {
+		t.Fatalf("%d batch requests, %d song requests", b, s)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, id := range []string{"al0.0", "al0.1", "al1.0"} {
+		if s := d.resolved["song:"+id]; len(s) != 1 || s[0].ID != id {
+			t.Errorf("%s: %+v", id, s)
+		}
+	}
+}
+
+// Albums and playlists chosen one by one are looked up together; one the batch leaves out gets its
+// own lookup, and a batched compilation still syncs as one folder (audit 0.8.1 round 4 #12, M41).
+func TestAlbumsAndPlaylistsResolvedInOneBatch(t *testing.T) {
+	n := &nav{albums: 3, songsPer: 2, playlists: 2, various: true, leaveOut: "al2"}
+	d := newTestDaemon(t, n, "", true)
+	for _, k := range []string{"album:al0", "album:al1", "album:al2", "playlist:pl1", "playlist:pl2"} {
+		d.do("toggle", k)
+	}
+	n.albumReqs.Store(0)
+	n.playlistReqs.Store(0)
+	d.preview(t)
+	if b, a, p := n.batchReqs.Load(), n.albumReqs.Load(), n.playlistReqs.Load(); b != 1 || a != 1 || p != 0 {
+		t.Fatalf("%d batch requests, %d album requests, %d playlist requests", b, a, p)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, k := range []string{"album:al0", "album:al1", "album:al2", "playlist:pl1", "playlist:pl2"} {
+		if s := d.resolved[k]; len(s) != 2 {
+			t.Errorf("%s: %+v", k, s)
+		}
+	}
+	if s := d.resolved["album:al0"]; s[0].AlbumArtist != "Various Artists" || s[1].AlbumArtist != "Various Artists" {
+		t.Errorf("album artists %q %q", s[0].AlbumArtist, s[1].AlbumArtist)
+	}
+}
+
+// Entire Library takes each playlist's name from the playlist list: no item request per playlist
+// (audit 0.8.1 round 4 #11).
+func TestEntireLibraryNoPlaylistItemRequests(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 1, playlists: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	if p := n.playlistReqs.Load(); p != 0 {
+		t.Errorf("%d playlist item requests", p)
+	}
+	if pl := d.daemon.preview.plan.Playlists; len(pl["Mix"]) != 1 || len(pl["Mix 2"]) != 1 {
+		t.Errorf("playlists %v", pl)
+	}
+}
+
+// userDataKey names the song and album lists whose user data a test watches: a playlist's songs,
+// an album's songs, /Items' albums and /Items?ids=.
+func userDataKey(r *http.Request) string {
+	q := r.URL.Query()
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/Playlists/") && strings.HasSuffix(r.URL.Path, "/Items"):
+		return "playlist"
+	case r.URL.Path != "/Items":
+		return ""
+	case q.Get("ids") != "":
+		return "ids"
+	case q.Get("includeItemTypes") == "Audio" && strings.HasPrefix(q.Get("parentId"), "al"):
+		return "album"
+	case q.Get("includeItemTypes") == "MusicAlbum":
+		return "albums"
+	}
+	return ""
+}
+
+// The Sync check asks for no user data (hearts): not for playlists' or albums' songs, album pages
+// or ids= lookups. An album's or playlist's page still does, for Now Playing's heart (audit 0.8.1
+// round 6 speed 2).
+func TestCheckAsksNoUserData(t *testing.T) {
+	n := &nav{albums: 3, songsPer: 2, playlists: 2}
+	d := newTestDaemon(t, n, "", true)
+	for _, k := range []string{"album:al0", "playlist:pl1", "artist:ar1", "song:al2.0", "song:al2.1", "library:all"} {
+		d.do("toggle", k)
+	}
+	n.userDataSent.Range(func(k, _ any) bool { // Add to Sync without a page looks the item up
+		n.userDataSent.Delete(k)
+		return true
+	})
+	d.preview(t)
+	want := map[string]bool{"album false": true, "albums false": true, "ids false": true, "playlist false": true}
+	n.userDataSent.Range(func(k, _ any) bool {
+		if !want[k.(string)] {
+			t.Errorf("check: %s", k)
+		}
+		delete(want, k.(string))
+		return true
+	})
+	if len(want) != 0 {
+		t.Errorf("check: no %v", want)
+	}
+	for _, k := range []string{"album:al1", "playlist:pl2"} {
+		op, _, _ := strings.Cut(k, ":")
+		d.do(op, k)
+	}
+	for _, k := range []string{"album true", "playlist true"} {
+		if _, ok := n.userDataSent.Load(k); !ok {
+			t.Errorf("pages: no %q", k)
+		}
 	}
 }
 

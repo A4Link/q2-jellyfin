@@ -476,24 +476,33 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 	if err != nil {
 		return Playlist{}, nil, err
 	}
-	s, err := c.musicFolders(ctx)
-	if err != nil {
-		return Playlist{}, nil, err
-	}
-	kept := []Song{} // music only, in the playlist's order, duplicates included
-	// With the user's data: a song's heart (Favorite) shows in Now Playing.
-	q := url.Values{"userId": {c.c.UserID}, "fields": {itemFields}, "enableUserData": {"true"}}
-	_, err = c.eachPage(ctx, "/Playlists/"+url.PathEscape(id)+"/Items", q, func(e wireItem) {
-		if s.inMusic(e) {
-			kept = append(kept, e.song())
-		}
-	})
+	kept, err := c.PlaylistSongs(ctx, id, true)
 	if err != nil {
 		return Playlist{}, nil, err
 	}
 	p := w.playlist()
 	p.SongCount = len(kept)
 	return p, kept, nil
+}
+
+// PlaylistSongs is Playlist's songs without the playlist, for a caller that has the playlist from
+// a list already. hearts asks for each song's user data (Favorite); the Sync check reads none.
+func (c *Client) PlaylistSongs(ctx context.Context, id string, hearts bool) ([]Song, error) {
+	s, err := c.musicFolders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kept := []Song{} // music only, in the playlist's order, duplicates included
+	q := url.Values{"userId": {c.c.UserID}, "fields": {itemFields}, "enableUserData": {strconv.FormatBool(hearts)}}
+	_, err = c.eachPage(ctx, "/Playlists/"+url.PathEscape(id)+"/Items", q, func(e wireItem) {
+		if s.inMusic(e) {
+			kept = append(kept, e.song())
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return kept, nil
 }
 
 // orders are the orders each list can come in from the server, by key: its sortBy, then the
@@ -535,7 +544,8 @@ func sortQuery(q url.Values, list, key string, reverse bool) (url.Values, error)
 // one list across them needs a query without the library (known limitation, Acceptance Criteria
 // L7).
 func (c *Client) Albums(ctx context.Context, offset, size int, order string, reverse bool) ([]Album, error) {
-	q, err := sortQuery(url.Values{"includeItemTypes": {"MusicAlbum"}, "recursive": {"true"}}, "albums", order, reverse)
+	q, err := sortQuery(url.Values{"includeItemTypes": {"MusicAlbum"}, "recursive": {"true"},
+		"enableUserData": {"false"}}, "albums", order, reverse) // an album's user data is never read
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +561,7 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 	if err != nil {
 		return Album{}, nil, err
 	}
-	s, err := c.AlbumSongs(ctx, id)
+	s, err := c.AlbumSongs(ctx, id, true)
 	if err != nil {
 		return Album{}, nil, err
 	}
@@ -563,10 +573,11 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 }
 
 // AlbumSongs is Album's songs without the album: one request, for a caller that has the album
-// from a list already (an artist's albums).
-func (c *Client) AlbumSongs(ctx context.Context, id string) ([]Song, error) {
+// from a list already (an artist's albums). hearts asks for each song's user data (Favorite), which
+// Jellyfin sends unless told not to; the Sync check reads none.
+func (c *Client) AlbumSongs(ctx context.Context, id string, hearts bool) ([]Song, error) {
 	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
-		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}})
+		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}, "enableUserData": {strconv.FormatBool(hearts)}})
 	if err != nil {
 		return nil, err
 	}
@@ -744,6 +755,55 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 		return Song{}, &APIError{Op: "Items", HTTP: 404, Code: CodeGone, Msg: "Not in a music library"}
 	}
 	return w.song(), nil
+}
+
+// Songs looks up many songs at once, 100 a request (GET /Items?ids=), and returns the music songs
+// the server answered, by id. An id left out is not gone: its own Song call says so.
+func (c *Client) Songs(ctx context.Context, ids []string) (map[string]Song, error) {
+	s, err := c.musicFolders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]Song{}
+	err = c.byIDs(ctx, ids, func(w wireItem) {
+		if w.Type == "Audio" && s.inMusic(w) {
+			out[w.ID] = w.song()
+		}
+	})
+	return out, err
+}
+
+// AlbumsAndPlaylists looks up many albums and playlists at once, 100 a request (GET /Items?ids=),
+// and returns those the server answered, by id. An id left out is not gone: its own Album or
+// Playlist call says so.
+func (c *Client) AlbumsAndPlaylists(ctx context.Context, ids []string) (map[string]Album, map[string]Playlist, error) {
+	als, pls := map[string]Album{}, map[string]Playlist{}
+	err := c.byIDs(ctx, ids, func(w wireItem) {
+		switch w.Type {
+		case "MusicAlbum":
+			als[w.ID] = w.album()
+		case "Playlist":
+			pls[w.ID] = w.playlist()
+		}
+	})
+	return als, pls, err
+}
+
+// byIDs calls f for each item GET /Items?ids= answers, 100 ids a request, without user data: only
+// the Sync check calls it.
+func (c *Client) byIDs(ctx context.Context, ids []string, f func(wireItem)) error {
+	for len(ids) > 0 {
+		n := min(len(ids), 100)
+		r, err := c.items(ctx, url.Values{"ids": {strings.Join(ids[:n], ",")}, "enableUserData": {"false"}})
+		if err != nil {
+			return err
+		}
+		for _, w := range r.Items {
+			f(w)
+		}
+		ids = ids[n:]
+	}
+	return nil
 }
 
 // ---- media ----

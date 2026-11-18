@@ -365,6 +365,115 @@ func TestPlaylistOrderAndDuplicates(t *testing.T) {
 	}
 }
 
+// Songs asks for 100 ids a request and keeps only the music songs answered (audit 0.8.1 round 3
+// #14): not a video, not a song outside the music libraries, not an id the server left out.
+func TestSongsBatched(t *testing.T) {
+	var batches []int
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			ids := strings.Split(r.URL.Query().Get("ids"), ",")
+			batches = append(batches, len(ids))
+			var items []string
+			for _, id := range ids {
+				switch id {
+				case "s0":
+					items = append(items, `{"Id":"s0","Type":"Video","Path":"/music/Artist/v.mp4"}`)
+				case "s1":
+					items = append(items, `{"Id":"s1","Type":"Audio","Path":"/mixed/memo.mp3"}`)
+				case "s2": // left out
+				default:
+					items = append(items, `{"Id":"`+id+`","Type":"Audio","Name":"T","Path":"/music/Artist/`+id+`.flac"}`)
+				}
+			}
+			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `]}`))
+		},
+	})
+	var ids []string
+	for i := 0; i < 150; i++ {
+		ids = append(ids, fmt.Sprintf("s%d", i))
+	}
+	got, err := signedIn(t, srv).Songs(context.Background(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(batches) != "[100 50]" {
+		t.Fatalf("batches %v", batches)
+	}
+	if len(got) != 147 || got["s3"].ID != "s3" {
+		t.Fatalf("%d songs, s3 %+v", len(got), got["s3"])
+	}
+	for _, id := range []string{"s0", "s1", "s2"} {
+		if _, ok := got[id]; ok {
+			t.Errorf("%s kept", id)
+		}
+	}
+}
+
+// AlbumsAndPlaylists asks for 100 ids a request and keeps the albums and playlists answered (audit
+// 0.8.1 round 4 #12): not a song, not an id the server left out.
+func TestAlbumsAndPlaylistsBatched(t *testing.T) {
+	var batches []int
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			ids := strings.Split(r.URL.Query().Get("ids"), ",")
+			batches = append(batches, len(ids))
+			var items []string
+			for _, id := range ids {
+				switch {
+				case id == "a0":
+					items = append(items, `{"Id":"a0","Type":"Audio","Path":"/music/Artist/a0.flac"}`)
+				case id == "a1": // left out
+				case strings.HasPrefix(id, "p"):
+					items = append(items, `{"Id":"`+id+`","Type":"Playlist","Name":"Mix","ChildCount":3}`)
+				default:
+					items = append(items, `{"Id":"`+id+`","Type":"MusicAlbum","Name":"Album","AlbumArtist":"Artist"}`)
+				}
+			}
+			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `]}`))
+		},
+	})
+	ids := []string{"p0", "p1"}
+	for i := 0; i < 148; i++ {
+		ids = append(ids, fmt.Sprintf("a%d", i))
+	}
+	als, pls, err := signedIn(t, srv).AlbumsAndPlaylists(context.Background(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(batches) != "[100 50]" {
+		t.Fatalf("batches %v", batches)
+	}
+	if len(als) != 146 || als["a2"].Artist != "Artist" || len(pls) != 2 || pls["p1"].Name != "Mix" {
+		t.Fatalf("%d albums, a2 %+v, %d playlists, p1 %+v", len(als), als["a2"], len(pls), pls["p1"])
+	}
+	for _, id := range []string{"a0", "a1"} {
+		if _, ok := als[id]; ok {
+			t.Errorf("%s kept", id)
+		}
+	}
+}
+
+// PlaylistSongs pages the playlist's songs without asking for the playlist's item (audit 0.8.1
+// round 4 #11).
+func TestPlaylistSongsNoItemRequest(t *testing.T) {
+	f, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Playlists/p1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"s1","Type":"Audio","Path":"/music/Artist/s1.flac"}],"TotalRecordCount":1}`))
+		},
+	})
+	s, err := signedIn(t, srv).PlaylistSongs(context.Background(), "p1", false)
+	if err != nil || len(s) != 1 || s[0].ID != "s1" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.seen {
+		if r.URL.Path == "/Items/p1" {
+			t.Errorf("item request %s", r.URL)
+		}
+	}
+}
+
 // isFolderScan is the music libraries' folder lookup (musicFolders): every top-level item of lib1.
 func isFolderScan(r *http.Request) bool {
 	return r.URL.Path == "/Items" && r.URL.Query().Get("parentId") == "lib1" && r.URL.Query().Get("includeItemTypes") == ""
