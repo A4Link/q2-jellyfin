@@ -42,6 +42,7 @@ type Plan struct {
 	ReplaceBytes         int64 // what the replaces add, or free when negative
 	RemoveBytes          int64 // what the removals free (a run short of space removes them first)
 	Fits                 bool
+	Whole                bool // the selection holds Entire Library: no song of it can be taken out of Sync (I2)
 }
 
 // estimate is the bytes a song takes at q: its server size for Original, else its duration at the
@@ -127,7 +128,7 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 		claim[key(e.Path)] = id
 	}
 
-	var p Plan
+	p := Plan{Whole: sel.Has(selection.KindLibrary, "all")}
 	final := map[string]string{} // song id -> path it will have
 	var back []string            // unchanged songs that may still have the " [id]" name of a past clash
 	for _, id := range ids {

@@ -163,11 +163,16 @@ func spaceRows(err error) []q2spot.Row {
 	if !errors.As(err, &sl) {
 		return nil
 	}
-	rows := []q2spot.Row{info("Stopped: the card is nearly full"),
-		info(size(sl.Left) + " free · keeping " + size(sl.Reserve) + " free"),
-		info("Songs synced so far are on the card")}
-	if sl.Held { // the removals would have made room (re-audit 2026-11-10 #3)
-		return append(rows, info("A song failed, so nothing was removed"), info("Take it out of Sync, then Resume"))
+	free := q2spot.Row{Kind: "info", Title: size(sl.Left) + " free · keeping " + size(sl.Reserve) + " free"}
+	if sl.Next > 0 { // 0 when the server gave no size
+		free.Subtitle = "The next song needs " + size(sl.Next)
+	}
+	rows := []q2spot.Row{info("Paused: the card is nearly full"), free, info("Songs synced so far are on the card")}
+	if sl.Held && sl.Retry { // a shared failure (a lost connection): the next run tries again
+		return append(rows, info("Songs failed, so nothing was removed"), info("Resume to try them again"))
+	}
+	if sl.Held { // songs' own failures, outside Entire Library (re-audit 2026-11-10 #3)
+		return append(rows, info("Songs failed, so nothing was removed"), info("Resume, or take them out of Sync"))
 	}
 	return append(rows, info("Free some space or sync less, then Resume"))
 }

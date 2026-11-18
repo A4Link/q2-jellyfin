@@ -1011,14 +1011,14 @@ func TestSyncPreviewLongCheck(t *testing.T) {
 	}
 }
 
-// Not all of it fits: the preview says so, and still offers Start Sync, which stops at Space to
+// Not all of it fits: the preview says so, and still offers Start Sync, which pauses at Space to
 // Keep Free (space_test.go has the run).
 func TestSyncNotEnoughSpace(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
 	d.free = func(string) int64 { return 0 }
 	d.do("toggle", "album:al0")
 	r := d.preview(t)
-	for _, w := range []string{"Not all of it fits on the card", "It stops with 512 MB left", "Start Sync"} {
+	for _, w := range []string{"Not all of it fits on the card", "It pauses with 512 MB left", "Start Sync"} {
 		if _, ok := find(r, w); !ok {
 			t.Errorf("no %q in %q", w, titles(r))
 		}
@@ -2793,6 +2793,22 @@ func TestDoneSaysRemoved(t *testing.T) {
 	d.syncOK(t)
 	if r := d.do("sync"); afterOptions(r)[0].Title != "Sync complete · 2 songs removed · 0 failed" {
 		t.Errorf("done %q", titles(r))
+	}
+}
+
+// Removals held back by failed songs say so on the done page (I2).
+func TestDoneSaysNotRemoved(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
+	r := d.doneRows(syncer.Snapshot{State: "done", Total: 2, Failed: 2, Held: 3})
+	if got := afterOptions(r); got[1].Title != "3 songs not removed: songs failed to sync" ||
+		got[1].Subtitle != "Retry in Failed Songs, or take them out of Sync" || got[2].Title != "Failed Songs" {
+		t.Errorf("done %q", titles(r))
+	}
+	// A lost connection (or card) held them: taking songs out of Sync doesn't help, and under
+	// Entire Library can't be done.
+	r = d.doneRows(syncer.Snapshot{State: "done", Total: 2, Failed: 1, Held: 3, HeldRetry: true})
+	if got := afterOptions(r); got[1].Subtitle != "Retry in Failed Songs" {
+		t.Errorf("after a lost connection: %q", got[1].Subtitle)
 	}
 }
 

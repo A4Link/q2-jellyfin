@@ -116,7 +116,7 @@ Before 1.7.3, Q2 Pod's player can't tell the end of what has arrived from the en
 
 ## Sync rules
 
-- **The card never fills up.** Before each song, the sync checks the card: if that song would leave less than **Settings → Quality and Storage → Space to Keep Free** (256 MB, 512 MB by default, 1 GB or 2 GB), it stops there and says so: *Stopped: the card is nearly full*, how much is free, and *Free some space or sync less, then Resume*. The songs it brought are on the card, and their playlists list them. When not everything will fit, the preview says so up front, and the sync starts anyway and stops at that limit. The playback cache gives up its songs first, before the sync stops.
+- **The card never fills up.** Before each song, the sync checks the card: if that song would leave less than **Settings → Quality and Storage → Space to Keep Free** (256 MB, 512 MB by default, 1 GB or 2 GB), it pauses there and says so: *Paused: the card is nearly full*, how much is free and what the next song needs, and *Free some space or sync less, then Resume*. The songs it brought are on the card, and their playlists list them. When not everything will fit, the preview says so up front, and the sync starts anyway and pauses at that limit. The playback cache gives up its songs first, before the sync pauses.
 
 - An artist includes albums added to the server later. A playlist follows the server, order and duplicates included. A song reached through several items is stored once.
 - Songs land at `Jellyfin/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/<name>.m3u`, its name cut to the 63 bytes the Q2 keeps. A playlist taken out of Sync has its `.m3u` deleted, but the Q2's own copy, imported from it, stays (Q2 Pod can't delete one): delete it in **Library → Playlists**.
@@ -140,7 +140,7 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 
 - **Smart Wi-Fi keeps Wi-Fi on for a queue played from Jellyfin.** For Q2 Pod, a queue played from Jellyfin is a stream, synced songs included, so Smart Wi-Fi keeps Wi-Fi on while it is the Q2's queue, playing, paused or stopped. Synced songs played from the Q2's own **Library** don't keep it on.
 
-- **An account without the download permission can't sync lossy songs as they are.** Under an Opus Sync Quality, MP3, AAC and Opus songs sync as the server's file, which the server sends only to a user with **Allow media downloading**. Without it the sync stops with *Downloads are turned off for this account on the server* and, in the row below, *Turn on Always Re-encode in Quality and Storage*. Either give the user the permission, or turn on **Always Re-encode** so those songs are transcoded like the rest. Under Original, which downloads every song, the row below says *Or choose an Opus Sync Quality and Always Re-encode*.
+- **An account without the download permission can't sync lossy songs as they are.** Under an Opus Sync Quality, MP3, AAC and Opus songs sync as the server's file, which the server sends only to a user with **Allow media downloading**. Without it the sync pauses with *Downloads are turned off for this account on the server* and, in the row below, *Turn on Always Re-encode in Quality and Storage*. Either give the user the permission, or turn on **Always Re-encode** so those songs are transcoded like the rest. Under Original, which downloads every song, the row below says *Or choose an Opus Sync Quality and Always Re-encode*.
 
 ## Errors and logs
 

@@ -752,7 +752,7 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		return q2spot.Reply{Rows: []q2spot.Row{list("defq", "Sync Quality: "+quality.Name(s.def()), "For every synced song", ""),
 			list("streamq", "Streaming Quality: "+quality.Name(s.stream()), "For songs streamed", ""),
 			reencodeRow(s),
-			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync stops before the card has less"},
+			{Kind: "action", URI: "keepfree", Title: "Space to Keep Free: " + keepFreeName(s.KeepFree), Subtitle: "A sync pauses before the card has less"},
 			act("cache", "Playback Cache: "+cacheName(s.PlaybackCache), ""),
 			{Kind: "action", URI: "clearcache", Title: "Clear Playback Cache", Subtitle: size(d.stream.cacheSize()) + " of played songs"}}}
 	}

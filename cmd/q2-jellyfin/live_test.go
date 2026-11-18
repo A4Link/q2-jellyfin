@@ -259,7 +259,7 @@ func TestLiveSyncStopsAtReserve(t *testing.T) {
 	if !errors.As(s.Err, &sl) || s.Done >= 3 {
 		t.Fatalf("%+v", s)
 	}
-	if !strings.Contains(strings.Join(titles(d.do("sync")), "|"), "Stopped: the card is nearly full") {
+	if !strings.Contains(strings.Join(titles(d.do("sync")), "|"), "Paused: the card is nearly full") {
 		t.Fatalf("%q", titles(d.do("sync")))
 	}
 	if n, have := len(m3uTitles(t, d, "Favourites")), len(onCard(t, d)); n != have {
