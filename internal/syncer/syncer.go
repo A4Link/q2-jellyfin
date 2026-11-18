@@ -938,7 +938,15 @@ func (j *job) removals() error {
 		if err := j.save(); err != nil {
 			return err
 		}
-		for _, e := range es {
+		for i, e := range es {
+			if err := j.check(j.ctx); err != nil { // a stop gets 3 s, not a batch of deletes
+				for _, e := range es[i:] { // still on the card: recorded again by work's save
+					m.Songs[e.ID] = e
+					j.recorded[strings.ToLower(e.Path)]++
+				}
+				j.unsaved++
+				return err
+			}
 			if keep[strings.ToLower(e.Path)] {
 				continue
 			}
