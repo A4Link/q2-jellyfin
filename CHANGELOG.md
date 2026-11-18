@@ -29,7 +29,7 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Removed
 
 - **Q2 Pod before 1.7.3 is no longer supported:** Jellyfin needs Q2 Pod 1.7.3 or later. On an older Q2 Pod it opens to one page that says *Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin.* and does nothing else: no sign-in, browsing, sync or streaming. Update Q2 Pod, then open Jellyfin again; your sign-in, settings and synced music stay on the card, and a `Jellyfin sign-in.txt` is read then. Streaming there by downloading each song to the card first goes with it: the *Buffering…* message, a song row's *Connecting…*, *Buffering 40 %* or *Downloading 60 %*, and a failed stream's message on the main page. From 1.7.3 Q2 Pod's own player streams, as before.
-- **The Playback Cache:** nothing is added to it any more (from 1.7.3 nothing was), Quality and Storage no longer has its size setting, and a sync no longer takes songs from it, or their room: it downloads them. Songs an earlier version cached stay on the card until you press **Clear Playback Cache** twice in Quality and Storage, shown while the cache holds songs.
+- **The Playback Cache:** nothing is added to it any more (from 1.7.3 nothing was), Quality and Storage no longer has its size setting, and a sync no longer takes songs from it, or their room: it downloads them. Songs an earlier version cached stay on the card until you press **Clear Playback Cache** twice in Quality and Storage, shown while the cache holds songs. A sync short of space or stopped by a full card, and its preview, say how much that frees; once it is cleared, the preview counts the room it freed.
 
 ### Fixed
 

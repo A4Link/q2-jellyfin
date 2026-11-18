@@ -1852,7 +1852,7 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
 		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
 	} {
-		if r := previewRows(p, 512<<20, 10); !strings.Contains(strings.Join(titles(r), "|"), want) {
+		if r := previewRows(p, 0, 512<<20, 10, nil); !strings.Contains(strings.Join(titles(r), "|"), want) {
 			t.Errorf("want %q: %q", want, titles(r))
 		}
 	}
@@ -1868,7 +1868,7 @@ func TestPreviewWarnsMostRemoved(t *testing.T) {
 		for range c.remove {
 			p.Remove = append(p.Remove, &library.Entry{Size: 1000})
 		}
-		got := strings.Contains(strings.Join(titles(previewRows(p, 512<<20, c.onCard)), "|"), warn)
+		got := strings.Contains(strings.Join(titles(previewRows(p, 0, 512<<20, c.onCard, nil)), "|"), warn)
 		if want := c.remove*2 > c.onCard; got != want {
 			t.Errorf("%d of %d removed: warning %v", c.remove, c.onCard, got)
 		}
