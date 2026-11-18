@@ -966,6 +966,51 @@ func TestSyncPreviewRefreshThenRows(t *testing.T) {
 	}
 }
 
+// A failed check offers Check Again before Details, as the stopped page does; it checks again.
+func TestSyncPreviewFailedCheckAgain(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	n.rawStatus.Store(502)
+	r := afterOptions(d.preview(t))
+	if len(r) != 3 || r[1].URI != "check" || r[1].Title != "Check Again" || r[2].Title != "Details" {
+		t.Fatalf("failed preview %q", titles(q2spot.Reply{Rows: r}))
+	}
+	n.rawStatus.Store(0)
+	d.do("check")
+	if r := d.do("sync"); r.Message != "refresh" {
+		t.Fatalf("after Check Again %q %q", r.Message, titles(r))
+	} else if _, ok := find(r, "Checking server…"); !ok {
+		t.Fatalf("after Check Again %q", titles(r))
+	}
+	d.preview(t)
+}
+
+// A check that runs long says why the page waits.
+func TestSyncPreviewLongCheck(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1, holdList: make(chan struct{})}
+	t.Cleanup(func() { close(n.holdList) })
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	row := func() q2spot.Row {
+		r := d.do("sync")
+		row, ok := find(r, "Checking server…")
+		if r.Message != "refresh" || !ok {
+			t.Fatalf("reply %q %q", r.Message, titles(r))
+		}
+		return row
+	}
+	if s := row().Subtitle; s != "" {
+		t.Fatalf("a quick check says %q", s)
+	}
+	d.mu.Lock()
+	d.daemon.preview.at = d.daemon.preview.at.Add(-30 * time.Second)
+	d.mu.Unlock()
+	if s := row().Subtitle; s != "A big library takes minutes" {
+		t.Fatalf("after 30 s %q", s)
+	}
+}
+
 // Not all of it fits: the preview says so, and still offers Start Sync, which stops at Space to
 // Keep Free (space_test.go has the run).
 func TestSyncNotEnoughSpace(t *testing.T) {
@@ -1090,8 +1135,12 @@ func TestStateHoldDuringSync(t *testing.T) {
 	if st := state(); strings.Contains(st, "hold=1") {
 		t.Fatalf("hold kept after the sync:\n%s", st)
 	}
-	if r := d.do("sync"); afterOptions(r)[0].Title != "Sync complete · 2 songs · 0 failed" {
+	r := d.do("sync")
+	if afterOptions(r)[0].Title != "Sync complete · 2 songs · 0 failed" {
 		t.Errorf("done rows %q", titles(r))
+	}
+	if row, ok := find(r, "Check Again"); !ok || row.Subtitle != "" { // nothing changed during the sync
+		t.Errorf("Check Again subtitle %q", row.Subtitle)
 	}
 }
 
@@ -1199,7 +1248,7 @@ func TestPreviewListNotFoundNotGone(t *testing.T) {
 	sel.Toggle(selection.Item{Kind: selection.KindPlaylist, ID: "pl1", Name: "Mix"})
 	sel.Save(filepath.Join(d.dir, "selection.json"))
 	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
-	if got != "The server answered HTTP 404|Details" {
+	if got != "The server answered HTTP 404|Check Again|Details" {
 		t.Fatalf("preview %q", got)
 	}
 	if it := d.selected(t); len(it) != 1 {
@@ -2640,12 +2689,19 @@ func TestSyncStoppedDetails(t *testing.T) {
 	if _, ok := find(r, "Details"); !ok {
 		t.Errorf("no Details: %q", titles(r))
 	}
+	d.mu.Lock()
+	d.gen = d.runGen + 1 // Sync changed after the sync started
+	d.mu.Unlock()
+	if row, _ := find(d.do("sync"), "Check Again"); row.Subtitle != "Sync changed since it started" {
+		t.Errorf("Check Again subtitle %q", row.Subtitle)
+	}
 	if got := d.stopMessage(&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}); got != "The card is full" {
 		t.Errorf("ENOSPC: %q", got)
 	}
 }
 
-// Choosing something while a sync runs keeps its summary for when it ends (M38).
+// Choosing something while a sync runs keeps its summary for when it ends (M38), whose Check Again
+// says that the choice waits.
 func TestDonePageKeptAfterChoosingDuringSync(t *testing.T) {
 	n := &nav{albums: 2, songsPer: 2, block: make(chan struct{})}
 	d := newTestDaemon(t, n, "", true)
@@ -2656,7 +2712,9 @@ func TestDonePageKeptAfterChoosingDuringSync(t *testing.T) {
 	d.do("toggle", "album:al1")
 	close(n.block)
 	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
-	if r := d.do("sync"); !strings.HasPrefix(afterOptions(r)[0].Title, "Sync complete") {
+	r := d.do("sync")
+	if rows := afterOptions(r); !strings.HasPrefix(rows[0].Title, "Sync complete") ||
+		rows[len(rows)-1].Title != "Check Again" || rows[len(rows)-1].Subtitle != "Sync changed since it started" {
 		t.Fatalf("rows %q", titles(r))
 	}
 }

@@ -61,7 +61,10 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 			det = withErr(det, snap.Err)
 		}
 		rows := append(append(d.syncSources(), info(msg)), d.downloadsHint(snap.Err)...)
-		return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), act("check", "Check Again", ""),
+		d.mu.Lock()
+		check := d.checkRow()
+		d.mu.Unlock()
+		return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), check,
 			list("details", "Details", "", det))}
 	}
 	if _, err := d.selection(); err != nil {
@@ -78,17 +81,20 @@ func (d *daemon) syncPage(cl *jellyfin.Client) q2spot.Reply {
 		return checking
 	}
 	d.mu.Lock()
-	done, pl, err, gone := p.done, p.plan, p.err, p.gone
+	done, at, pl, err, gone := p.done, p.at, p.plan, p.err, p.gone
 	if done && err != nil && d.preview == p {
 		d.preview = nil // shown once; the next Sync tries again
 	}
 	d.mu.Unlock()
 	switch {
 	case !done:
+		if time.Since(at) > 20*time.Second {
+			checking.Rows[len(checking.Rows)-1].Subtitle = "A big library takes minutes"
+		}
 		return checking
 	case err != nil: // offline too: the options stay, On This Q2 needs no server
 		r := d.errRows(err, "")
-		r.Rows = append(d.syncSources(), r.Rows...)
+		r.Rows = append(d.syncSources(), r.Rows[0], act("check", "Check Again", ""), r.Rows[1])
 		return r
 	}
 	rows := d.syncSources()
@@ -552,6 +558,7 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	if auto {
 		done, ok, msg, at = d.libState()
 	}
+	check := d.checkRow()
 	d.mu.Unlock()
 	reply := q2spot.Reply{}
 	switch {
@@ -565,8 +572,18 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	default:
 		rows = append(rows, d.libFailedRows(msg, at)...)
 	}
-	reply.Rows = append(rows, act("check", "Check Again", ""))
+	reply.Rows = append(rows, check)
 	return reply
+}
+
+// checkRow is Check Again, saying when Sync changed after the sync started: that change waits for
+// it. d.mu is held.
+func (d *daemon) checkRow() q2spot.Row {
+	r := act("check", "Check Again", "")
+	if d.gen != d.runGen {
+		r.Subtitle = "Sync changed since it started"
+	}
+	return r
 }
 
 func (d *daemon) failed(cursor string) q2spot.Reply {
@@ -638,6 +655,7 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.mu.Lock()
 		d.dropPreview() // its lyrics backfill too: the sync writes lyrics for what it fetches
 		d.showDone = true
+		d.runGen = p.gen
 		d.mu.Unlock()
 		d.dropGone(p.gone)
 		d.wantReports(true) // with the server in reach: the plays waiting go too

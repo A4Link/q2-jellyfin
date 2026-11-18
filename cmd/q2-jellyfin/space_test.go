@@ -126,6 +126,11 @@ func TestChoosePlaylists(t *testing.T) {
 	if row, _ := find(d.do("sync"), "Choose Playlists"); row.Subtitle != "1 playlist in Sync" || row.Kind != "list" {
 		t.Fatalf("%+v", row)
 	}
+	// Under Entire Library the row says so, as that page's rows do, not '1 playlist in Sync'.
+	d.do("toggle", "library:all")
+	if row, _ := find(d.do("sync"), "Choose Playlists"); row.Subtitle != "Included via Entire Library" {
+		t.Fatalf("Entire Library %+v", row)
+	}
 }
 
 // Choose Playlists that fails stays live, so it shows the playlists once the server answers.
