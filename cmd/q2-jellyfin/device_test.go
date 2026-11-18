@@ -35,11 +35,15 @@ type nav struct {
 	stall            bool          // every request hangs until the client gives up
 	errCode          int           // every API call fails: 40 answers 401, any other 404
 	block            chan struct{} // downloads wait for it
-	failID           string        // getAlbum fails for this album only; every-song listings fail
+	failID           string        // getAlbum fails for this album only (HTTP 502); every-song listings fail
+	goneID           string        // an album deleted on the server: getAlbum and its songs request answer 404
+	allGone          bool          // as goneID, for every album
+	rootsGone        bool          // the music library's folder listing answers 404
 	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
 	noMusic          bool          // the account has no music library: /UserViews lists only films
+	libLost          atomic.Bool   // as noMusic, and lists of the kept library "music" answer 401
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
 	mediaErr         int           // download and stream answer 404 (or 401 for 40)
@@ -261,6 +265,14 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(n.errCode)
 		return
 	}
+	if n.libLost.Load() && (p == "/UserViews" || q.Get("parentId") == "music") { // Jellyfin: not permitted to access Library
+		if p == "/UserViews" {
+			ok(map[string]any{"Items": []any{map[string]any{"Id": "films", "Name": "Movies", "CollectionType": "movies"}}})
+			return
+		}
+		fail(40)
+		return
+	}
 	albumOf := func(id string) int { i, _ := strconv.Atoi(strings.TrimPrefix(id, "al")); return i }
 	switch {
 	case strings.HasPrefix(p, "/Items/") && strings.HasSuffix(p, "/Images/Primary"):
@@ -291,6 +303,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/UserViews": // one music library, "music", holding /music (jellyfin/music.go)
 		ok(map[string]any{"Items": []any{map[string]any{"Id": "music", "Name": "Music", "CollectionType": "music"}}})
 	case p == "/Items" && q.Get("parentId") == "music" && q.Get("includeItemTypes") == "":
+		if n.rootsGone {
+			fail(70)
+			return
+		}
 		page([]map[string]any{{"Id": "ar1", "Type": "MusicArtist", "Path": "/music/Artist"}})
 	case p == "/Artists/AlbumArtists" && q.Get("searchTerm") != "": // "Artist" for a term it holds
 		n.searchReqs.Add(1)
@@ -342,6 +358,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				page(nil)
 			}
 		case q.Get("parentId") != "" && q.Get("parentId") != "music": // an album's songs
+			if q.Get("parentId") == n.goneID || n.allGone {
+				fail(70)
+				return
+			}
 			page(n.songs(albumOf(q.Get("parentId"))))
 		case q.Get("albumArtistIds") != "":
 			page([]map[string]any{n.album(0), n.album(1)})
@@ -432,6 +452,8 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, "/Items/"):
 		id := strings.TrimPrefix(p, "/Items/")
 		switch {
+		case n.noMusic: // Jellyfin: an item of a library the account can't see is not found
+			fail(70)
 		case strings.HasPrefix(id, "pl"):
 			kk, _ := strconv.Atoi(strings.TrimPrefix(id, "pl"))
 			ok(n.playlist(kk))
@@ -454,6 +476,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if id == n.failID {
+				http.Error(w, "proxy error", http.StatusBadGateway)
+				return
+			}
+			if id == n.goneID || n.allGone {
 				fail(70)
 				return
 			}
@@ -652,13 +678,15 @@ func TestDownloadsOffHint(t *testing.T) {
 // in reach as they were in Settings, and in one place under the highlight while the rows below them
 // change (M33).
 func TestSyncOptionsEveryState(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, errCode: 70}, "", true)
+	n := &nav{albums: 1, songsPer: 1}
+	n.rawStatus.Store(502)
+	d := newTestDaemon(t, n, "", true)
 	sel := selection.Set{Items: []selection.Item{{Kind: selection.KindAlbum, ID: "al0", Name: "Album 000", Quality: "original"}}}
 	if err := sel.Save(filepath.Join(d.dir, "selection.json")); err != nil {
 		t.Fatal(err)
 	}
 	r := d.preview(t)
-	if got := strings.Join(titles(r), "|"); !strings.HasPrefix(got, syncOptions+"|Not found on the server") {
+	if got := strings.Join(titles(r), "|"); !strings.HasPrefix(got, syncOptions+"|The server answered HTTP 502") {
 		t.Fatalf("after a failed preview %q", got)
 	}
 	// Running and paused: the ETA, Now and pause rows come and go below the options.
@@ -1067,6 +1095,192 @@ func TestStateHoldDuringSync(t *testing.T) {
 	}
 }
 
+// An item in Sync that the server deleted no longer fails the preview: it is named, the songs only
+// it wanted are under Removed, nothing goes before Start Sync, and Start Sync takes it out of Sync,
+// on its own and under Entire Library alike (audit 0.8.1).
+func TestPreviewItemGone(t *testing.T) {
+	for _, lib := range []bool{false, true} {
+		card := t.TempDir()
+		d := newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1}, "", true)
+		if lib {
+			d.do("toggle", "library:all")
+		} else {
+			d.do("toggle", "album:al0")
+		}
+		sel := selection.Set{Version: 1, Items: d.selected(t)}
+		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: "al1", Name: "Album 001"})
+		sel.Save(filepath.Join(d.dir, "selection.json"))
+		d.preview(t)
+		d.do("start")
+		eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+
+		// The server deletes Album 001: gone from the album and every-song lists, 404 on its own.
+		d = newTestDaemonOn(t, card, &nav{albums: 1, songsPer: 1, goneID: "al1"}, "", true)
+		r := d.preview(t)
+		got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(r)}), "|")
+		if !strings.HasPrefix(got, "Album 001 · no longer on the server|−1 song") || !strings.HasSuffix(got, "|Start Sync") {
+			t.Fatalf("lib %v: preview %q", lib, got)
+		}
+		if rm := d.daemon.preview.plan.Remove; len(rm) != 1 || !strings.Contains(rm[0].Path, "Album 001") {
+			t.Fatalf("lib %v: Remove %+v", lib, rm)
+		}
+		if st := d.runner.Snapshot().State; st == "running" || len(d.selected(t)) != 2 {
+			t.Fatalf("lib %v: before Start Sync: %s, %+v", lib, st, d.selected(t))
+		}
+		// Sync Jobs agrees, with nothing to press: holding it would keep none of its songs.
+		if row, _ := find(d.do("jobs"), "Album 001"); row.Kind != "info" || row.Subtitle != "No longer on the server" {
+			t.Fatalf("lib %v: Sync Jobs row %+v", lib, row)
+		}
+		// So does On This Q2, and a hold there still takes it out.
+		if row, _ := find(d.do("onq2"), "Album 001"); row.Kind != "info" || !strings.HasPrefix(row.Subtitle, "No longer on the server · ") ||
+			row.Context != "album:al1" || row.Position != "toggle" {
+			t.Fatalf("lib %v: On This Q2 row %+v", lib, row)
+		}
+		d.do("start")
+		eventually(t, "the second sync", func() bool { return d.runner.Snapshot().State == "done" })
+		if it := d.selected(t); len(it) != 1 || it[0].ID == "al1" {
+			t.Errorf("lib %v: selection after Start Sync %+v", lib, it)
+		}
+	}
+}
+
+// Many deleted items: a few are named and the rest counted, so Start Sync stays within the reply's 50 rows.
+func TestPreviewManyItemsGone(t *testing.T) {
+	card := t.TempDir()
+	d := newTestDaemonOn(t, card, &nav{albums: 60, songsPer: 1}, "", true)
+	for i := 0; i < 60; i++ {
+		d.do("toggle", fmt.Sprintf("album:al%d", i))
+	}
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+
+	d = newTestDaemonOn(t, card, &nav{albums: 60, songsPer: 1, allGone: true}, "", true)
+	r := d.preview(t)
+	got := titles(q2spot.Reply{Rows: afterOptions(r)})
+	if len(got) < 7 || !strings.HasSuffix(got[4], " · no longer on the server") || got[5] != "and 55 more no longer on the server" {
+		t.Fatalf("preview %q", got)
+	}
+	if _, kept := r.Encode("1"); kept != len(r.Rows) || got[len(got)-1] != "Start Sync" {
+		t.Fatalf("%d of %d rows kept: %q", kept, len(r.Rows), got)
+	}
+}
+
+// An artist one of whose albums the server deleted stays in Sync: only that album's songs go.
+func TestPreviewArtistAlbumGone(t *testing.T) {
+	card := t.TempDir()
+	d := newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1}, "", true)
+	d.do("toggle", "artist:ar1") // al0 and al1
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+
+	// Album 001 deleted after the artist's album list: its songs request answers 404.
+	d = newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1, goneID: "al1"}, "", true)
+	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+	if !strings.HasPrefix(got, "−1 song") {
+		t.Fatalf("preview %q", got)
+	}
+	if rm := d.daemon.preview.plan.Remove; len(rm) != 1 || !strings.Contains(rm[0].Path, "Album 001") {
+		t.Fatalf("Remove %+v", rm)
+	}
+	d.do("start")
+	eventually(t, "the second sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if it := d.selected(t); len(it) != 1 || it[0].ID != "ar1" {
+		t.Errorf("selection %+v", it)
+	}
+}
+
+// Only an item's own lookup says it is gone: a 404 on the music library's listing, which a playlist
+// needs, fails the preview as before and takes nothing out of Sync.
+func TestPreviewListNotFoundNotGone(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, rootsGone: true}, "", true)
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindPlaylist, ID: "pl1", Name: "Mix"})
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+	if got != "The server answered HTTP 404|Details" {
+		t.Fatalf("preview %q", got)
+	}
+	if it := d.selected(t); len(it) != 1 {
+		t.Errorf("selection %+v", it)
+	}
+}
+
+// An account that lost its music library gets 404 for each album and song it chose, as for a
+// deleted one: the preview says there is no music library, and nothing is removed or taken out of
+// Sync (audit 0.8.1 round 4, D1).
+func TestPreviewGoneNoMusic(t *testing.T) {
+	for _, keys := range [][]string{{"album:al0", "album:al1"}, {"song:al0.0", "song:al1.0"}} {
+		card := t.TempDir()
+		d := newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1}, "", true)
+		for _, k := range keys {
+			d.do("toggle", k)
+		}
+		d.preview(t)
+		d.do("start")
+		eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+
+		d = newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1, noMusic: true}, "", true)
+		got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+		if !strings.HasPrefix(got, "No music library on the server for this account") || strings.Contains(got, "no longer on the server") {
+			t.Fatalf("%v: preview %q", keys, got)
+		}
+		d.do("start")
+		d.bg.Wait()
+		if st := d.runner.Snapshot().State; st == "running" || st == "done" {
+			t.Fatalf("%v: sync %s", keys, st)
+		}
+		if n := len(d.manifest().Songs); n != 2 {
+			t.Errorf("%v: %d songs left on the card", keys, n)
+		}
+		if it := d.selected(t); len(it) != 2 {
+			t.Errorf("%v: selection %+v", keys, it)
+		}
+	}
+}
+
+// A music library the account lost while Jellyfin runs: lists of it (Entire Library here) answer
+// 401, not 404. The preview checks the libraries and says there is none, not "Sign in again", and
+// removes nothing (audit 0.8.1 round 5, D3).
+func TestPreviewListLibraryLost(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 1}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+
+	n.libLost.Store(true)
+	d.do("check")
+	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+	if !strings.HasPrefix(got, "No music library on the server for this account") || strings.Contains(got, "Start Sync") {
+		t.Fatalf("preview %q", got)
+	}
+	if k := len(d.manifest().Songs); k != 2 {
+		t.Errorf("%d songs left on the card", k)
+	}
+	if it := d.selected(t); len(it) != 1 {
+		t.Errorf("selection %+v", it)
+	}
+}
+
+// A deleted item with nothing of its own on the Q2 leaves Sync with the preview: there is no Start
+// Sync to wait for.
+func TestPreviewItemGoneNothingToRemove(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, goneID: "al1"}, "", true)
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: "al1", Name: "Album 001"})
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+	if got != "Album 001 · no longer on the server|Everything is up to date" {
+		t.Fatalf("preview %q", got)
+	}
+	if it := d.selected(t); len(it) != 0 {
+		t.Errorf("selection %+v", it)
+	}
+}
+
 // A fast failure while the preview is still starting its workers (run with -race).
 func TestPreviewFailsFastWithoutRace(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 40, songsPer: 1, failID: "al0"}, "", true)
@@ -1076,7 +1290,7 @@ func TestPreviewFailsFastWithoutRace(t *testing.T) {
 	}
 	sel.Save(filepath.Join(d.dir, "selection.json"))
 	r := d.preview(t)
-	if _, ok := find(r, "Not found on the server"); !ok {
+	if _, ok := find(r, "The server answered HTTP 502"); !ok {
 		t.Fatalf("preview rows %q", titles(r))
 	}
 	if _, ok := find(r, "Start Sync"); ok {

@@ -637,6 +637,7 @@ func (d *daemon) onQ2(cursor string) q2spot.Reply {
 	if _, err := d.selection(); err != nil {
 		return damagedSelection()
 	}
+	gone := d.previewGone()
 	v := d.view()
 	var rows []q2spot.Row
 	if len(v.sel.Items) == 0 {
@@ -659,10 +660,14 @@ func (d *daemon) onQ2(cursor string) q2spot.Reply {
 		}
 		row := v.item(it.Kind, it.ID, it.Name, "", total)
 		row.Subtitle = join(row.Subtitle, size(b))
-		rows = append(rows, row)
-		if it.Kind == selection.KindSong {
-			rows[len(rows)-1].Kind, rows[len(rows)-1].URI = "info", ""
+		gn := isGone(gone, it)
+		if gn { // as Sync Jobs says; its page would fail, and a hold still takes it out
+			row.Subtitle = join("No longer on the server", size(b))
 		}
+		if it.Kind == selection.KindSong || gn {
+			row.Kind, row.URI = "info", ""
+		}
+		rows = append(rows, row)
 	}
 	return page(rows, cursor)
 }

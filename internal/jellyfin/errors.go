@@ -103,8 +103,9 @@ func Message(err error, host string) string {
 	case errors.Is(err, ErrNoSuchUser):
 		return "No user by that name on the server"
 	case errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) && ae.Op != "AuthenticateByName":
-		// a token the server stopped taking (the Q2 revoked, the server rebuilt), or a library the
-		// account lost: no password was typed, and only a new sign-in helps
+		// a token the server stopped taking (the Q2 revoked, the server rebuilt): no password was
+		// typed, and only a new sign-in helps. A list of a library the account lost answers 401
+		// too; the Sync preview then asks CheckMusic and says ErrNoMusic when none is left
 		return "Server refused this Q2. Sign in again: Settings → Account → Sign Out"
 	case errors.Is(err, ErrAuth):
 		return "Wrong username or password"
