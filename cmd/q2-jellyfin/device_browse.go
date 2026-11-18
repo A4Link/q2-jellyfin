@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -535,16 +536,46 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		d.artistAlbums[id] = als
 		d.mu.Unlock()
 		name = a.Name
-		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
-			s, err := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
-			var ae *jellyfin.APIError
-			if errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
-				continue // that album deleted since the list: the artist is still there
+		// The albums from the list: only their songs to fetch (audit 2026-11-16 #15), 4 at a time.
+		// As resolveLibrary's run: the slot is taken before the goroutine starts, and the first
+		// failure (in time, so a cancelled album never hides it) stops the rest.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		got := make([][]jellyfin.Song, len(als))
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var first error
+		sem := make(chan struct{}, 4) // as resolveItems
+		for i, al := range als {
+			sem <- struct{}{}
+			if ctx.Err() != nil {
+				break
 			}
-			if err != nil {
-				return nil, "", err
-			}
-			oneArtist(al, s)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				s, e := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
+				var ae *jellyfin.APIError
+				if errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
+					return // that album deleted since the list: the artist is still there
+				}
+				if e != nil {
+					mu.Lock()
+					first = cmp.Or(first, e)
+					mu.Unlock()
+					cancel()
+					return
+				}
+				oneArtist(al, s)
+				got[i] = s
+			}()
+		}
+		wg.Wait()
+		if err := cmp.Or(first, ctx.Err()); err != nil {
+			return nil, "", err
+		}
+		for _, s := range got {
 			songs = append(songs, s...)
 		}
 	case selection.KindSong:
