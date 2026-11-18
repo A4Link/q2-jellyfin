@@ -2,7 +2,8 @@
 """Run launcher.sh (the card's run) on the host with a fake app: after a failure it restarts, waiting
 5 s and doubling; an exit of 0 ends the loop and tidies /tmp; a second run while it runs starts
 nothing; a TERM to the loop's pid stops the app and tidies,
-and an app that ignores it is killed 2 s later.
+and an app that ignores it is killed 2 s later. The app is copied to /tmp after run returns, so a
+slow copy doesn't hold up Q2 Pod, and a failed copy tidies /tmp.
 Usage: test_launcher.py"""
 import os
 import pathlib
@@ -103,4 +104,22 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # a TERM in the b
     os.kill(int((t/f'q2-{app}').read_text()), signal.SIGTERM)
     wait(lambda: not (t/f'q2-{app}').exists(), 'the TERM in the backoff', secs=1)
     subprocess.run(['pkill', '-f', f'{tmp}/bin/sleep'])
-print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time, TERM passed and KILL after 2 s.')
+with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # run returns before the app's copy ends
+    tmp = pathlib.Path(d)
+    card, t, env = rig(tmp, 'echo start >> "$Q2_TEST/starts"\n')
+    (tmp/'bin/cp').write_text('#!/bin/sh\ncase "$*" in *.bin) /bin/sleep 2;; esac\nexec /bin/cp "$@"\n')
+    (tmp/'bin/cp').chmod(0o755)
+    start = time.time()
+    subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
+    assert time.time() - start < 1, f'run took {time.time() - start:.1f} s: the copy held it up'
+    assert (t/f'q2-{app}').exists(), 'no pid file'
+    wait(lambda: lines(tmp/'starts') == ['start'] and not list(t.iterdir()), 'the copied app to run')
+with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # a failed copy tidies /tmp
+    tmp = pathlib.Path(d)
+    card, t, env = rig(tmp, 'echo start >> "$Q2_TEST/starts"\n')
+    (tmp/'bin/cp').write_text('#!/bin/sh\ncase "$*" in *.bin) exit 1;; esac\nexec /bin/cp "$@"\n')
+    (tmp/'bin/cp').chmod(0o755)
+    subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
+    wait(lambda: not list(t.iterdir()), 'the failed copy to tidy')
+    assert not lines(tmp/'starts'), lines(tmp/'starts')
+print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time, TERM passed and KILL after 2 s, copies in the background.')
