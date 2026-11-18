@@ -346,11 +346,11 @@ func previewRows(p *plan.Plan, reserve int64, onCard int) q2spot.Reply {
 		rows = append(rows, info("Update playlists"))
 	}
 	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(p.FreeBytes)+" free"))
-	// Whether it all fits keeps Space to Keep Free in hand too: a sync that would end under it stops
-	// there. It starts anyway, and the run stops before the card falls under it. The removals count
+	// Whether it all fits keeps Space to Keep Free in hand too: a sync that would end under it pauses
+	// there. It starts anyway, and the run pauses before the card falls under it. The removals count
 	// as freed: a run short of space removes them first (syncer space).
 	if p.NeedBytes > 0 && p.NeedBytes-p.RemoveBytes+planMargin+reserve > p.FreeBytes {
-		rows = append(rows, info("Not all of it fits on the card"), info("It stops with "+size(reserve)+" left"))
+		rows = append(rows, info("Not all of it fits on the card"), info("It pauses with "+size(reserve)+" left"))
 	}
 	rows = append(rows, act("start", "Start Sync", ""))
 	return q2spot.Reply{Rows: rows}
@@ -562,6 +562,13 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 		did = []string{"Playlists updated"}
 	}
 	rows := append(d.syncSources(), info(fmt.Sprintf("Sync complete · %s · %d failed", strings.Join(did, " · "), s.Failed)))
+	if s.Held > 0 { // removals wait for the failed songs (I2)
+		sub := "Retry in Failed Songs, or take them out of Sync"
+		if s.HeldRetry { // a shared failure: taking songs out doesn't help, and can't under Entire Library
+			sub = "Retry in Failed Songs"
+		}
+		rows = append(rows, q2spot.Row{Kind: "info", Title: plural(s.Held, "song") + " not removed: songs failed to sync", Subtitle: sub})
+	}
 	if s.Failed > 0 {
 		rows = append(rows, list("failed", "Failed Songs", "", ""))
 	}

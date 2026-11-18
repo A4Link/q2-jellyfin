@@ -1180,18 +1180,19 @@ func TestPlaylistNamesWhereTheSongIs(t *testing.T) {
 	}
 }
 
-// Nothing is removed while a wanted song failed: the card never ends with less than before (I2).
-func TestRemovesWaitForFailedDownloads(t *testing.T) {
+// Nothing is removed when the songs asked for didn't come (I2): songs taken out of Sync for ones
+// that failed stay, and so does a playlist no longer selected.
+func TestRemovesWaitForSongsThatDidntCome(t *testing.T) {
 	f, r, root := setup(t)
-	a := want(root, "a", "original")
-	f.status["a"] = 404
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	f.status["a"], f.status["bb"] = 404, 404
 	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
 	put(t, z.Path, "z")
 	stale := library.PlaylistFile(root, "Gone")
 	put(t, stale, "#EXTM3U\n")
 	(&library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}).Save(root, root+"/.jellyfin/manifest.json")
-	r.Start(plan.Plan{Add: []plan.Want{a}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
-	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+	r.Start(plan.Plan{Add: []plan.Want{a, b}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 2 || s.Held != 1 {
 		t.Fatalf("%+v", s)
 	}
 	for _, p := range []string{z.Path, stale} {
@@ -1201,6 +1202,68 @@ func TestRemovesWaitForFailedDownloads(t *testing.T) {
 	}
 	if m := manifest(t, root); m.Songs["z"] == nil || m.Playlists["Gone"] != stale {
 		t.Errorf("%+v %+v", m.Songs, m.Playlists)
+	}
+}
+
+// A single song that fails on its own doesn't hold back the removals: under Entire Library it can't
+// be taken out of Sync, and nothing would ever be removed again. A failure the whole sync shares (a
+// proxy's 502), or several songs failing and more than arrive, still does (I2). After a shared
+// failure the snapshot says so (HeldRetry), as taking songs out of Sync doesn't help.
+func TestRemovalsHeldOnlyBySharedFailures(t *testing.T) {
+	all := []string{"a", "x", "bb", "ccc"}
+	for _, c := range []struct {
+		name   string
+		ids    []string
+		status map[string]int
+		whole  bool // Entire Library: nothing is swapped, so own failures hold nothing
+		held   bool
+	}{
+		{"one of four fails", all, map[string]int{"x": 404}, false, false},
+		{"one bad song, nothing else to fetch", []string{"x"}, map[string]int{"x": 404}, false, false},
+		{"most fail", all, map[string]int{"x": 404, "bb": 404, "ccc": 500}, false, true},
+		{"server down once", all, map[string]int{"x": 502}, false, true},
+		{"two bad songs, a swap", []string{"x", "bb"}, map[string]int{"x": 404, "bb": 404}, false, true},
+		{"two bad songs, Entire Library", []string{"x", "bb"}, map[string]int{"x": 404, "bb": 404}, true, false},
+		{"server down once, Entire Library", all, map[string]int{"x": 502}, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, r, root := setup(t)
+			f.status = c.status
+			z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+			put(t, z.Path, "z")
+			stale := library.PlaylistFile(root, "Gone")
+			put(t, stale, "#EXTM3U\n")
+			(&library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}).Save(root, root+"/.jellyfin/manifest.json")
+			var ws []plan.Want
+			for _, id := range c.ids {
+				ws = append(ws, want(root, id, "original"))
+			}
+			r.Start(plan.Plan{Add: ws, Remove: []*library.Entry{z}, Playlists: map[string][]string{}, Whole: c.whole})
+			s := wait(t, r)
+			if s.State != "done" || s.Failed != len(c.status) || (s.Held == 1) != c.held || (s.Removed == 1) == c.held {
+				t.Fatalf("%s: %d failed, %d held, %d removed", s.State, s.Failed, s.Held, s.Removed)
+			}
+			if retry := c.status["x"] == 502; s.HeldRetry != retry { // the done page's advice: Retry only
+				t.Errorf("HeldRetry %v, want %v", s.HeldRetry, retry)
+			}
+			for _, p := range []string{z.Path, stale} {
+				if _, err := os.Stat(p); (err == nil) != c.held {
+					t.Errorf("%s: %v", p, err)
+				}
+			}
+		})
+	}
+}
+
+// A plan run again (Retry Failed, Resume) after an earlier run removed its songs holds none back:
+// the done page doesn't say songs were not removed that are gone already.
+func TestHeldCountsOnlySongsStillOnTheCard(t *testing.T) {
+	f, r, root := setup(t)
+	f.status["x"], f.status["bb"] = 404, 404
+	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "x", "original"), want(root, "bb", "original")}, Remove: []*library.Entry{z}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 2 || s.Held != 0 {
+		t.Fatalf("%s: %d failed, %d held", s.State, s.Failed, s.Held)
 	}
 }
 
@@ -1829,12 +1892,23 @@ func TestEarlyRemovalThenReplaceDropsSharedFile(t *testing.T) {
 	}
 }
 
-// Short of space after a song failed, nothing is removed (I2) and the stop says the removals were
-// held back, so the user knows why it stops at the same place (re-audit 2026-11-10 #3).
+// Short of space after songs failed, nothing is removed (I2) and the stop says the removals were
+// held back, so the user knows why it stops at the same place (re-audit 2026-11-10 #3). A failure
+// the whole sync shares (a lost connection) says Resume alone can make them (Retry), outside
+// Entire Library too; songs failing on their own don't.
 func TestSpaceLowHeldByFailedSong(t *testing.T) {
+	for _, c := range []struct {
+		status map[string]int
+		retry  bool
+	}{{map[string]int{"a": 404, "bb": 404}, false}, {map[string]int{"a": 502}, true}} {
+		spaceLowHeld(t, c.status, c.retry)
+	}
+}
+
+func spaceLowHeld(t *testing.T, status map[string]int, retry bool) {
 	f, r, root := setup(t)
-	a, c, gone := want(root, "a", "original"), want(root, "c", "original"), want(root, "g", "original")
-	f.status["a"] = 404
+	a, b, c, gone := want(root, "a", "original"), want(root, "bb", "original"), want(root, "c", "original"), want(root, "g", "original")
+	f.status = status
 	put(t, gone.Path, "old")
 	ge := &library.Entry{ID: "g", Path: gone.Path, Quality: "original", Size: 3, Items: gone.Items}
 	m := &library.Manifest{Songs: map[string]*library.Entry{"g": ge}}
@@ -1842,18 +1916,18 @@ func TestSpaceLowHeldByFailedSong(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
-	r.Free = func() int64 { // room for a, then none
-		if calls.Add(1) == 1 {
+	r.Free = func() int64 { // room for a and bb, then none
+		if calls.Add(1) <= 2 {
 			return 1 << 30
 		}
 		return 0
 	}
 	r.Reserve = func() int64 { return 1 }
-	r.Start(plan.Plan{Add: []plan.Want{a, c}, Remove: []*library.Entry{ge}})
+	r.Start(plan.Plan{Add: []plan.Want{a, b, c}, Remove: []*library.Entry{ge}})
 	s := wait(t, r)
 	var sl *SpaceLowError
-	if !errors.As(s.Err, &sl) || !sl.Held {
-		t.Fatalf("%+v", s)
+	if !errors.As(s.Err, &sl) || !sl.Held || sl.Retry != retry {
+		t.Fatalf("%v: %+v %+v", status, s, sl)
 	}
 	if _, err := os.Stat(gone.Path); err != nil {
 		t.Fatalf("removed though a song failed: %v", err)

@@ -1,5 +1,5 @@
 // Package syncer runs a sync plan: renames, downloads (to .part, fsynced, renamed), covers,
-// playlists, then removals (only once every download arrived). The manifest never names a file
+// playlists, then removals (held back while failures look server-wide, I2). The manifest never names a file
 // that isn't there; downloads are recorded in batches, so a crash re-fetches at most a batch. It
 // pauses when the card goes, the server can't be reached or the card is full, and a plan run again
 // continues where it stopped.
@@ -80,6 +80,8 @@ type Snapshot struct {
 	Err                   error
 	ErrAt                 time.Time // when the run stopped with Err
 	Renamed, Removed      int       // songs this run renamed and removed
+	Held                  int       // songs taken out of Sync that this run left, as songs failed (I2)
+	HeldRetry             bool      // Held came from a shared failure (a connection, the card): Retry Failed is the way out
 	Failures              []Failure
 }
 
@@ -117,6 +119,8 @@ type Runner struct {
 	done                  chan struct{}
 	doneN, total, failedN int
 	renamedN, removedN    int
+	heldN                 int  // songs taken out of Sync that the removals left (I2)
+	heldRetry             bool // heldN came from a shared failure (j.hold)
 	errAt                 time.Time
 	bytesDone, bytesTotal int64
 	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
@@ -183,7 +187,8 @@ func (r *Runner) launch() {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel, r.done = cancel, make(chan struct{})
 	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
-	r.doneN, r.failedN, r.total, r.renamedN, r.removedN = 0, 0, len(p.Add)+len(p.Replace), 0, 0
+	r.doneN, r.failedN, r.total, r.renamedN, r.removedN, r.heldN = 0, 0, len(p.Add)+len(p.Replace), 0, 0, 0
+	r.heldRetry = false
 	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
 	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
 		r.bytesTotal += w.Bytes
@@ -433,7 +438,7 @@ func (r *Runner) Snapshot() Snapshot {
 	done := r.bytesDone + min(r.cur, r.curMax)
 	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
 		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, ErrAt: r.errAt,
-		Renamed: r.renamedN, Removed: r.removedN, Failures: append([]Failure(nil), r.failures...)}
+		Renamed: r.renamedN, Removed: r.removedN, Held: r.heldN, HeldRetry: r.heldRetry, Failures: append([]Failure(nil), r.failures...)}
 	switch {
 	case s.State == "done":
 		s.Permille = 1000
@@ -537,18 +542,28 @@ type job struct {
 	m       *library.Manifest
 	unsaved int       // changes not on the card yet
 	saved   time.Time // when the manifest was last saved
-	failed  bool      // a wanted song is missing: nothing is removed this run (I2)
+	failed  int       // songs whose download failed this run ...
+	arrived int       // ... and songs downloaded or taken from the cache
+	hold    bool      // a failure the whole sync shares, or a stop short of space: nothing is removed (I2)
 	removed bool      // the removals ran (space ran them early)
 	// recorded counts the songs recorded at each file (lower case): two at one, from older builds,
 	// keep it when one of them is replaced or removed.
 	recorded map[string]int
 }
 
+// held reports whether this run removes nothing (I2): a failure looked server-wide (hold), or,
+// outside Entire Library, several songs failed and fewer arrived, as when an album taken out of
+// Sync is swapped for one that didn't come. A single song failing on its own holds nothing back,
+// nor do any under Entire Library: nothing is swapped there, and its songs can't be taken out of
+// Sync, so they would stop every removal for good.
+func (j *job) held() bool { return j.hold || !j.p.Whole && j.failed > 1 && j.arrived < j.failed }
+
 // SpaceLowError is a run stopped at the card's reserve: Left bytes were free, and the next song
 // (Next bytes) would have left fewer than Reserve.
 type SpaceLowError struct {
 	Left, Next, Reserve int64
-	Held                bool // songs taken out of Sync would have made room, but a song failed first (I2)
+	Held                bool // songs taken out of Sync would have made room, but songs failed first (I2)
+	Retry               bool // held by a failure the whole sync shares: Resume alone can make the removals
 }
 
 func (e *SpaceLowError) Error() string {
@@ -557,13 +572,13 @@ func (e *SpaceLowError) Error() string {
 func (e *SpaceLowError) Is(target error) bool { return target == ErrSpaceLow }
 
 // space stops the run before w when downloading it would leave less than the reserve free. First,
-// while every download so far arrived, the songs taken out of Sync are removed to make room (they
-// go at the end anyway); a sync that removes and adds would otherwise stop at the same song every
-// time. Decided 2026-11-10 (audit #2): a download that fails after that leaves the card with the
+// unless the failures so far hold the removals (held), the songs taken out of Sync are removed to
+// make room (they go at the end anyway); a sync that removes and adds would otherwise stop at the
+// same song every time. Decided 2026-11-10 (audit #2): a download that fails after that leaves the card with the
 // removed songs gone and the new ones in part, as the user asked for them to go. When it still
 // doesn't fit, what is on the card stays recorded, and its playlists are written for the songs
-// that arrived (nothing more is removed: a run with a failed download removes nothing, I2), so a
-// part-synced playlist plays at once. Held back by a failed song, the error says so (Held).
+// that arrived (nothing more is removed, I2), so a part-synced playlist plays at once. Held back
+// by failed songs, the error says so (Held), and whether they failed for a shared cause (Retry).
 func (j *job) space(w plan.Want) error {
 	if j.Free == nil || j.Reserve == nil {
 		return nil
@@ -572,8 +587,8 @@ func (j *job) space(w plan.Want) error {
 	if left-w.Bytes >= reserve {
 		return nil
 	}
-	held := j.failed && !j.removed && len(j.p.Remove) > 0
-	if !j.failed && !j.removed && len(j.p.Remove) > 0 {
+	held, shared := j.held() && !j.removed && j.toRemove() > 0, j.hold
+	if !j.held() && !j.removed && len(j.p.Remove) > 0 {
 		j.logf("sync: short of space: removing the songs taken out of Sync first")
 		if err := j.removals(); err != nil {
 			return err
@@ -582,13 +597,13 @@ func (j *job) space(w plan.Want) error {
 			return nil
 		}
 	}
-	j.failed = true
+	j.hold = true
 	for _, phase := range []func() error{j.keep, j.playlists} {
 		if err := phase(); err != nil {
 			return err
 		}
 	}
-	err := &SpaceLowError{Left: left, Next: w.Bytes, Reserve: reserve, Held: held}
+	err := &SpaceLowError{Left: left, Next: w.Bytes, Reserve: reserve, Held: held, Retry: shared}
 	j.logf("sync: stopped: %v", err)
 	return err
 }
@@ -710,7 +725,7 @@ func (j *job) downloads() error {
 				return q2.ErrNoCard
 			}
 			j.fail(id, w.Song.Title, "download", err)
-			j.failed = true
+			j.failed++
 			switch stop := StopReason(err); {
 			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 				return stop
@@ -718,6 +733,7 @@ func (j *job) downloads() error {
 				streak, once = 0, true
 			default: // a connection or the card can come back: two songs in a row
 				once = false
+				j.hold = true
 				if streak++; streak >= 2 {
 					return stop
 				}
@@ -757,6 +773,7 @@ func (j *job) downloads() error {
 			covers[dir] = true
 			j.cover(j.ctx, w)
 		}
+		j.arrived++
 		j.finished(w)
 		j.op("download", w.Path)
 	}
@@ -787,7 +804,7 @@ func (j *job) keep() error {
 }
 
 // playlists writes every selected playlist's .m3u, naming where each song is, and deletes the
-// recorded ones no longer selected (unless a download failed).
+// recorded ones no longer selected (unless failed songs hold the removals, I2).
 func (j *job) playlists() error {
 	m, p := j.m, j.p
 	for name, f := range m.Playlists {
@@ -850,7 +867,7 @@ func (j *job) playlists() error {
 		j.unsaved++                                                   // saved with a stop between playlists too
 		j.op("playlist", f)
 	}
-	if !j.failed {
+	if !j.held() {
 		for name, f := range m.Playlists {
 			if _, ok := p.Playlists[name]; !ok {
 				if m.Remove(j.root, f) == nil {
@@ -864,12 +881,30 @@ func (j *job) playlists() error {
 	return j.save()
 }
 
+// toRemove counts the songs of the plan's Remove still on the card: a Retry Failed or Resume runs
+// the plan again after an earlier run removed them.
+func (j *job) toRemove() int {
+	n := 0
+	for _, e := range j.p.Remove {
+		if j.m.Songs[e.ID] != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // removals deletes the songs no longer selected, once: last, or earlier when the card is short of
-// space (space), and only while no download has failed (I2). Each batch leaves the manifest before
-// its files go (I4).
+// space (space), and only while failed songs don't hold them (I2). Each batch leaves the manifest
+// before its files go (I4).
 func (j *job) removals() error {
-	if j.failed || j.removed {
-		return nil // I2: the card never ends with less than before; Retry Failed or the next Sync removes
+	if j.removed {
+		return nil
+	}
+	if j.held() { // I2: what was asked for didn't come, so what it replaces stays; Retry Failed or the next Sync removes
+		j.mu.Lock()
+		j.heldN, j.heldRetry = j.toRemove(), j.hold
+		j.mu.Unlock()
+		return nil
 	}
 	j.removed = true
 	m := j.m

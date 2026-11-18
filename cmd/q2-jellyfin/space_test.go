@@ -10,6 +10,7 @@ import (
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/syncer"
 )
 
@@ -30,6 +31,20 @@ func cardOf(d *tdaemon, room int64) {
 	}
 }
 
+// Stopped short of space with the removals held back by failed songs, the page says so, for any
+// number of them (I2).
+func TestSpaceHeldRows(t *testing.T) {
+	got := strings.Join(titles(q2spot.Reply{Rows: spaceRows(&syncer.SpaceLowError{Held: true})}), "|")
+	if !strings.Contains(got, "Songs failed, so nothing was removed|Resume, or take them out of Sync") {
+		t.Errorf("%q", got)
+	}
+	// held by a shared failure (a lost connection), in or out of Entire Library: only Resume is offered
+	got = strings.Join(titles(q2spot.Reply{Rows: spaceRows(&syncer.SpaceLowError{Held: true, Retry: true})}), "|")
+	if !strings.HasSuffix(got, "Songs failed, so nothing was removed|Resume to try them again") {
+		t.Errorf("%q", got)
+	}
+}
+
 // A sync stops before a song would leave the card under Space to Keep Free: the songs before it
 // are on the card and in their playlist, and the Sync page says why and offers Resume.
 func TestSyncStopsAtReserve(t *testing.T) {
@@ -45,9 +60,18 @@ func TestSyncStopsAtReserve(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 	got := strings.Join(titles(d.do("sync")), "|")
-	for _, w := range []string{"Stopped: the card is nearly full", "keeping 512 MB free", "Free some space or sync less, then Resume", "Resume"} {
+	for _, w := range []string{"Paused: the card is nearly full", "keeping 512 MB free", "Free some space or sync less, then Resume", "Resume"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("Sync page lacks %q: %q", w, got)
+		}
+	}
+	// the free-space row says why it paused: the next song doesn't fit above the setting
+	if sl.Next != 1000 {
+		t.Errorf("next song %d bytes, want 1000", sl.Next)
+	}
+	for _, r := range d.do("sync").Rows {
+		if strings.Contains(r.Title, "keeping 512 MB free") && r.Subtitle != "The next song needs "+size(sl.Next) {
+			t.Errorf("free-space row subtitle %q", r.Subtitle)
 		}
 	}
 	b, err := os.ReadFile(filepath.Join(d.card, "_explaylist_data", "Favourites.m3u"))
@@ -160,7 +184,7 @@ func TestChoosePlaylistsPages(t *testing.T) {
 
 func TestKeepFreeSetting(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
-	if _, ok := find(d.do("storage"), "Space to Keep Free: 512 MB"); !ok {
+	if r, ok := find(d.do("storage"), "Space to Keep Free: 512 MB"); !ok || r.Subtitle != "A sync pauses before the card has less" {
 		t.Fatalf("%q", titles(d.do("storage")))
 	}
 	for _, want := range []string{"1 GB", "2 GB", "256 MB", "512 MB"} {
@@ -226,5 +250,14 @@ func TestSyncRemovesFirstWhenShort(t *testing.T) {
 	}
 	if len(songs) != 3 || strings.Contains(strings.Join(songs, " "), "Album 000") {
 		t.Fatalf("on the card: %q", songs)
+	}
+}
+
+// A song with no size from the server (Next 0) gets no "needs" line under the free-space row.
+func TestSpaceRowsNoNextSize(t *testing.T) {
+	for _, r := range spaceRows(&syncer.SpaceLowError{Left: 1500 << 20, Reserve: 2 << 30}) {
+		if r.Subtitle != "" {
+			t.Errorf("row %q has subtitle %q", r.Title, r.Subtitle)
+		}
 	}
 }

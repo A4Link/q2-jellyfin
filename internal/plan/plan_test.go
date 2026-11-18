@@ -49,6 +49,22 @@ func TestPlanDuplicatesAcrossItems(t *testing.T) {
 	}
 }
 
+// Whole says the selection holds Entire Library, which nothing can be swapped for (I2).
+func TestPlanWhole(t *testing.T) {
+	res := map[string][]jellyfin.Song{"library:all": {song("s1", "One")}, "album:a1": {song("s1", "One")}}
+	for _, c := range []struct {
+		items []selection.Item
+		whole bool
+	}{
+		{[]selection.Item{item("album", "a1")}, false},
+		{[]selection.Item{item("album", "a1"), item(selection.KindLibrary, "all")}, true},
+	} {
+		if p := Compute(selection.Set{Items: c.items}, "", false, res, nil, manifest(), root, big); p.Whole != c.whole {
+			t.Errorf("%v: Whole = %v", c.items, p.Whole)
+		}
+	}
+}
+
 // Every item's songs are at Sync Quality ("" is Original), whatever quality is saved with the item.
 func TestPlanSyncQuality(t *testing.T) {
 	s := song("s1", "One")
