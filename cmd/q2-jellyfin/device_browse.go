@@ -726,7 +726,7 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		d.mu.Unlock()
 		name = a.Name
 		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
-			s, err := cl.AlbumSongs(ctx, al.ID)
+			s, err := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
 			var ae *jellyfin.APIError
 			if errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
 				continue // that album deleted since the list: the artist is still there

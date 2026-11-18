@@ -513,7 +513,7 @@ func TestLiveFavorite(t *testing.T) {
 	if err != nil || !slices.ContainsFunc(favs, func(x Song) bool { return x.ID == id && x.Favorite }) {
 		t.Fatalf("Favourites %+v %v", favs, err)
 	}
-	// /Items gives user data without enableUserData: an album's songs and a search's carry hearts.
+	// An album's songs (AlbumSongs with hearts=true) and a search's carry hearts.
 	sg, _ := c.Song(ctx, id)
 	_, al, err := c.Album(ctx, sg.AlbumID)
 	if err != nil || !slices.ContainsFunc(al, func(x Song) bool { return x.ID == id && x.Favorite }) {
