@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,8 +38,9 @@ func dateServer(hits *atomic.Int32, tls bool) *httptest.Server {
 func TestNowFromDate(t *testing.T) {
 	fakeClock(t)
 	var hits atomic.Int32
-	srv := dateServer(&hits, false)
+	srv := dateServer(&hits, true)
 	defer srv.Close()
+	trustTestCert(t, srv)
 	SetDateURL(srv.URL)
 	got := Now()
 	if got.Year() != 2026 || got.Month() != 10 || got.Day() != 27 {
@@ -88,7 +90,7 @@ func TestClientVerifiesCert(t *testing.T) {
 
 func TestNowFetchFailureFallsBack(t *testing.T) {
 	fakeClock(t)
-	SetDateURL("http://127.0.0.1:1/")
+	SetDateURL("https://127.0.0.1:1/")
 	start := time.Now()
 	got := Now()
 	if time.Since(start) > 3*time.Second {
@@ -102,11 +104,12 @@ func TestNowFetchFailureFallsBack(t *testing.T) {
 func TestNowBackoff(t *testing.T) {
 	fakeClock(t)
 	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.Header()["Date"] = nil // no Date at all
 	}))
 	defer srv.Close()
+	trustTestCert(t, srv)
 	SetDateURL(srv.URL)
 	Now()
 	Now()
@@ -124,6 +127,20 @@ func TestNowBackoff(t *testing.T) {
 func TestPool(t *testing.T) {
 	if len(Pool().Subjects()) < 100 {
 		t.Fatal("pool too small")
+	}
+}
+
+// bundleDate is the day of cacert.pem's "as of" line, never later: a new bundle fails this until
+// bundleDate moves with it.
+func TestBundleDate(t *testing.T) {
+	_, line, ok := strings.Cut(string(bundle), "Certificate data from Mozilla as of: ")
+	line, _, _ = strings.Cut(line, "\n")
+	asOf, err := time.Parse("Mon Jan _2 15:04:05 2006 MST", line)
+	if !ok || err != nil {
+		t.Fatalf("no as-of date in cacert.pem: %q %v", line, err)
+	}
+	if bundleDate.After(asOf) || asOf.Sub(bundleDate) >= 24*time.Hour {
+		t.Fatalf("bundleDate %v, cacert.pem as of %v", bundleDate, asOf)
 	}
 }
 
@@ -157,6 +174,22 @@ func TestDateFetchChecksIPHost(t *testing.T) {
 	}
 }
 
+// The Date is read only over HTTPS: a plain http:// server (the card's .jellyfin/server can say
+// anything) has no certificate to vouch for it, so anyone on the Wi-Fi could set the clock.
+func TestDateFetchHTTPSOnly(t *testing.T) {
+	fakeClock(t)
+	var hits atomic.Int32
+	srv := dateServer(&hits, false)
+	defer srv.Close()
+	SetDateURL(srv.URL)
+	if got := Now(); got.Year() != 2000 || Known() {
+		t.Fatalf("Now() = %v from plain http", got)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("plain http asked: %d", hits.Load())
+	}
+}
+
 // M7: the Date fetch never follows a redirect (to http:// least of all); the 3xx's own Date is used.
 func TestDateFetchNoRedirect(t *testing.T) {
 	fakeClock(t)
@@ -181,12 +214,13 @@ func TestDateFetchNoRedirect(t *testing.T) {
 func TestNowWaitsForFetch(t *testing.T) {
 	fakeClock(t)
 	got := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(got)
 		time.Sleep(300 * time.Millisecond)
 		w.Header().Set("Date", "Tue, 27 Oct 2026 10:00:00 GMT")
 	}))
 	defer srv.Close()
+	trustTestCert(t, srv)
 	SetDateURL(srv.URL)
 	go Now()
 	<-got
@@ -239,7 +273,7 @@ func certDateServer(t *testing.T, cert tls.Certificate, date string) *httptest.S
 }
 
 // With the clock unset, a Date is taken only from a certificate valid at that Date, and never one
-// before the build (any build is 2025 or later).
+// before the CA bundle (any build is later).
 func TestPastDateNeedsCertValidThen(t *testing.T) {
 	fakeClock(t)
 	day := func(y int) time.Time { return time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC) }
@@ -257,5 +291,21 @@ func TestPastDateNeedsCertValidThen(t *testing.T) {
 	SetDateURL(early.URL)
 	if got := Now(); got.Year() != 2000 || Known() {
 		t.Errorf("a Date before the build taken: %v", got)
+	}
+	// An expired certificate (its key may have leaked) can't set the clock back to when it was
+	// valid, even after 2025: no Date before the CA bundle is believed.
+	old := certDateServer(t, testCert(t, day(2025), day(2026)), "Thu, 01 May 2025 00:00:00 GMT")
+	SetDateURL(old.URL)
+	if got := Now(); got.Year() != 2000 || Known() {
+		t.Errorf("a Date before the CA bundle taken: %v", got)
+	}
+}
+
+// A clock set before the CA bundle was made is as good as unset: every build is later.
+func TestClockBeforeBundleUnset(t *testing.T) {
+	fakeClock(t)
+	nowFn = func() time.Time { return time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC) }
+	if Known() {
+		t.Fatal("a clock before the CA bundle is trusted")
 	}
 }

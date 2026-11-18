@@ -1,6 +1,7 @@
 // Package tlsroots gives HTTPS clients an embedded Mozilla CA bundle (the Q2 has none) and a
 // trustworthy clock: the Q2's is often unset (1970/2000), which fails certificate checks, so when
-// the system year is before 2025 the time comes from a server's HTTP Date header instead.
+// the system time is before the bundle's date the time comes from a server's HTTP Date header
+// instead.
 package tlsroots
 
 import (
@@ -19,6 +20,11 @@ import (
 var bundle []byte
 
 const retryAfter = 30 * time.Second
+
+// bundleDate is the day of cacert.pem's "as of" line. Every build is later, so a clock before it is
+// unset, and no server's Date before it is believed: an expired certificate (whose key may have
+// leaked) can't set the clock back to when it was valid. A new cacert.pem moves it (TestBundleDate).
+var bundleDate = time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 
 var (
 	once sync.Once
@@ -56,12 +62,12 @@ func SetDateURL(u string) {
 // DateURL is the URL set by SetDateURL.
 func DateURL() string { mu.Lock(); defer mu.Unlock(); return dateURL }
 
-// Now is the system time when its year is 2025 or later, else the server's time (cached as an offset
+// Now is the system time when it is bundleDate or later, else the server's time (cached as an offset
 // from the system clock). One fetch runs at a time (at most 5 s), and other callers wait for it. For
 // 30 s after a failed fetch it is the system time, never a wait.
 func Now() time.Time {
 	sys := nowFn()
-	if sys.Year() >= 2025 {
+	if !sys.Before(bundleDate) {
 		return sys
 	}
 	mu.Lock()
@@ -100,7 +106,7 @@ func Now() time.Time {
 
 // Known reports whether Now is trustworthy: the system clock is set, or a server's Date was read.
 func Known() bool {
-	if nowFn().Year() >= 2025 {
+	if !nowFn().Before(bundleDate) {
 		return true
 	}
 	mu.Lock()
@@ -108,14 +114,17 @@ func Known() bool {
 	return have
 }
 
-// fetchDate reads u's Date header. The handshake is fully verified (chain to the roots, and u's host
-// name or IP address); only the validity period is judged at the leaf's own NotBefore, as the time
-// is what is being asked. A redirect is not followed: the 3xx carries a Date too, and following it
-// could read the Date from plain http.
+// fetchDate reads u's Date header, over https only. The handshake is fully verified (chain to the
+// roots, and u's host name or IP address); only the validity period is judged at the leaf's own
+// NotBefore, as the time is what is being asked. A redirect is not followed: the 3xx carries a Date
+// too, and following it could read the Date from plain http.
 func fetchDate(u string) (time.Time, error) {
 	pu, err := url.Parse(u)
 	if err != nil {
 		return time.Time{}, err
+	}
+	if pu.Scheme != "https" {
+		return time.Time{}, errors.New("tlsroots: Date URL not https")
 	}
 	c := &http.Client{Timeout: 5 * time.Second, Transport: dateTransport(dateRoots(), pu.Hostname()),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -129,10 +138,9 @@ func fetchDate(u string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	// The handshake was judged at the leaf's NotBefore, so the leaf vouches only for a Date inside its
-	// own validity: an expired certificate (whose key may have leaked) can't set the clock back to when
-	// it was valid. And never before 2025, as every build is later.
-	if d.Year() < 2025 {
-		return time.Time{}, errors.New("tlsroots: server Date before 2025")
+	// own validity, and never one before bundleDate.
+	if d.Before(bundleDate) {
+		return time.Time{}, errors.New("tlsroots: server Date before the CA bundle")
 	}
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		if leaf := resp.TLS.PeerCertificates[0]; d.Before(leaf.NotBefore) || d.After(leaf.NotAfter) {
