@@ -1034,14 +1034,19 @@ var (
 
 // StopReason tells a failure the whole sync shares from one of this song's own (an HTTP error, or
 // jellyfin.CodeGone, not found): ErrOffline (no answer, or a proxy's answer that the
-// server is down, wrapping err), ErrCardFull, or ErrRefused (wrapping err) for an answer about the
-// account: the sign-in (40-44) or downloads turned off for it (50, R39). nil for the song's own.
+// server is down, wrapping err), ErrCardFull, ErrRefused (wrapping err) for an answer about the
+// account: the sign-in (40-44) or downloads turned off for it (50, R39), or err itself for any other
+// card error (read-only, EIO). nil for the song's own.
 func StopReason(err error) error {
 	var ae *jellyfin.APIError
 	var ne net.Error
+	var pe *fs.PathError
+	var le *os.LinkError
 	switch {
 	case errors.Is(err, syscall.ENOSPC):
 		return ErrCardFull
+	case errors.As(err, &pe) || errors.As(err, &le): // before net.Error: an errno is one
+		return err
 	case errors.Is(err, jellyfin.ErrAuth) || errors.As(err, &ae) && ae.Code >= 40 && ae.Code <= 50:
 		return fmt.Errorf("%w: %w", ErrRefused, err)
 	case errors.As(err, &ae):

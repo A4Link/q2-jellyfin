@@ -124,17 +124,18 @@ func (d *daemon) stopMessage(err error) string {
 	var se *json.SyntaxError
 	var te *json.UnmarshalTypeError
 	var pe *fs.PathError
+	var le *os.LinkError
 	switch {
 	case errors.Is(err, syscall.ENOSPC):
 		return "The card is full"
 	case errors.Is(err, syscall.EROFS):
-		return "The card is read-only"
+		return "The card is read-only. Check it in a computer"
 	case errors.Is(err, q2.ErrNoCard):
 		return "Card not available"
 	case errors.As(err, &se) || errors.As(err, &te) || errors.Is(err, io.ErrUnexpectedEOF):
 		return "Couldn't read the sync records on the card"
-	case errors.As(err, &pe):
-		return "Couldn't write to the card"
+	case errors.As(err, &pe) || errors.As(err, &le):
+		return "Couldn't write to the card. Check it in a computer"
 	}
 	return jellyfin.Message(err, d.hostName())
 }

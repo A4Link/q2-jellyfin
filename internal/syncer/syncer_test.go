@@ -1381,6 +1381,14 @@ func TestStopReason(t *testing.T) {
 	if err := StopReason(&jellyfin.APIError{Op: "get", HTTP: 200, Code: 70}); err != nil {
 		t.Error("70 (not found) is the song's own:", err)
 	}
+	for _, card := range []error{ // the card's, not the server's: errnos are net.Errors too
+		&os.PathError{Op: "open", Path: "/mnt/mmc/x.part", Err: syscall.EROFS},
+		&os.LinkError{Op: "rename", Old: "/mnt/mmc/x.part", New: "/mnt/mmc/x.flac", Err: syscall.EIO},
+	} {
+		if err := StopReason(card); err == nil || errors.Is(err, ErrOffline) {
+			t.Error(card, err)
+		}
+	}
 }
 
 // Removals are dropped from the manifest before their files go, so a stop (Pause, Cancel, the card
