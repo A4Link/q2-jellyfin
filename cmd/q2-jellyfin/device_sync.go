@@ -619,9 +619,7 @@ func (d *daemon) failed(cursor string) q2spot.Reply {
 	s := d.runner.Snapshot()
 	var songs []q2spot.Row
 	for _, f := range s.Failures {
-		if f.Op != "cover" {
-			songs = append(songs, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
-		}
+		songs = append(songs, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
 	}
 	rows := []q2spot.Row{act("retry", "Retry Failed", "")}
 	// The runner lists only the first of many; the count goes near the top, within the pages

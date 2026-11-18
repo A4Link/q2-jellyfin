@@ -66,7 +66,7 @@ func WriteLyrics(ctx context.Context, src any, song jellyfin.Song, path string, 
 }
 
 type Failure struct {
-	SongID, Title, Op string // Op: download, cover or rename
+	SongID, Title, Op string // Op: download or rename
 	HTTP, Code        int
 	At                time.Time
 	Msg               string // redacted
@@ -469,8 +469,8 @@ func (r *Runner) Snapshot() Snapshot {
 	return s
 }
 
-// maxFailures is how many song failures a run lists, what Q2 Pod pages through; covers are listed
-// beside them. A server that fails every song would otherwise keep one per song.
+// maxFailures is how many song failures a run lists, what Q2 Pod pages through. A server that
+// fails every song would otherwise keep one per song.
 const maxFailures = 500
 
 func (r *Runner) fail(id, title, op string, err error) {
@@ -480,13 +480,14 @@ func (r *Runner) fail(id, title, op string, err error) {
 		f.HTTP, f.Code = ae.HTTP, ae.Code
 	}
 	r.logf("sync: %s %s failed: %s", op, id, f.Msg)
+	if op == "cover" { // logged only: no page lists a cover
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if op != "cover" {
-		r.failedN++
-		if r.failedN > maxFailures { // counted, not listed
-			return
-		}
+	r.failedN++
+	if r.failedN > maxFailures { // counted, not listed
+		return
 	}
 	r.failures = append(r.failures, f)
 }
@@ -1095,8 +1096,8 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase boo
 }
 
 // remove deletes path through the guard, with its .lrc when lyrics, and, when its album folder is
-// left holding only cover.jpg and a replaced plan's leftover .part and .part.key files, those too,
-// so the guard prunes the folder.
+// left holding only cover.jpg, a replaced plan's leftover .part and .part.key files and a hard
+// kill's .tmp files, those too, so the guard prunes the folder.
 // ponytail: a leftover of a song later in this run, paused earlier, is fetched again from the start.
 func (r *Runner) remove(path string, lyrics bool) error {
 	rm := library.Remove
@@ -1112,7 +1113,7 @@ func (r *Runner) remove(path string, lyrics bool) error {
 		return nil
 	}
 	for _, e := range es {
-		if n := e.Name(); e.IsDir() || n != "cover.jpg" && !strings.HasSuffix(n, ".part") && !strings.HasSuffix(n, ".part.key") {
+		if n := e.Name(); e.IsDir() || n != "cover.jpg" && !strings.HasSuffix(n, ".part") && !strings.HasSuffix(n, ".part.key") && !strings.HasSuffix(n, ".tmp") {
 			return nil // a song, or something else, still lives here
 		}
 	}
@@ -1186,9 +1187,18 @@ func (r *Runner) carryCover(from, to string) {
 	if _, err := os.Stat(dst); err == nil || owned(r.root, dst) != nil {
 		return
 	}
-	if b, err := os.ReadFile(src); err == nil {
-		q2.WriteFile(dst, b)
+	f, err := os.Open(src)
+	if err != nil {
+		return
 	}
+	defer f.Close()
+	q2.WriteWith(dst, func(w io.Writer) error { // streamed, as cover() saves it
+		n, err := io.Copy(w, io.LimitReader(f, maxCover+1))
+		if err == nil && n > maxCover {
+			err = errors.New("cover larger than 16 MiB") // one planted over Wi-Fi Transfer
+		}
+		return err
+	})
 }
 
 // fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but
@@ -1432,8 +1442,8 @@ func (r *Runner) copy(f *os.File, body io.Reader, n int64, yield func() error) (
 	}
 }
 
-// cover writes cover.jpg into w's album folder when it is missing. A failure is recorded but
-// does not fail the song.
+// cover writes cover.jpg into w's album folder when it is missing. A failure is logged but does
+// not fail the song.
 func (r *Runner) cover(ctx context.Context, w plan.Want) {
 	c := filepath.Join(filepath.Dir(w.Path), "cover.jpg")
 	if w.Song.CoverArt == "" {
@@ -1452,14 +1462,18 @@ func (r *Runner) cover(ctx context.Context, w plan.Want) {
 			return err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(io.LimitReader(resp.Body, maxCover+1))
-		if err != nil {
+		big := errors.New("cover larger than 16 MiB")
+		if resp.ContentLength > maxCover {
+			return big
+		}
+		// Streamed: a server that can't resize sends the original, many megabytes.
+		return q2.WriteWith(c, func(f io.Writer) error {
+			n, err := io.Copy(f, io.LimitReader(resp.Body, maxCover+1))
+			if err == nil && n > maxCover {
+				err = big // WriteWith then removes the cut file
+			}
 			return err
-		}
-		if len(b) > maxCover {
-			return errors.New("cover larger than 16 MiB")
-		}
-		return q2.WriteFile(c, b)
+		})
 	}()
 	if err != nil && ctx.Err() == nil {
 		r.fail(w.Song.ID, w.Song.Title, "cover", err)

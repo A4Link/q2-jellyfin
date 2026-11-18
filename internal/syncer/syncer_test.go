@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -439,14 +440,13 @@ func TestRetryFailedWhenPaused(t *testing.T) {
 	}
 }
 
-// A run lists at most maxFailures song failures but counts them all; covers are listed beside them.
+// A run lists at most maxFailures song failures but counts them all.
 func TestFailuresCapped(t *testing.T) {
 	_, r, _ := setup(t)
-	r.fail("al", "Alb", "cover", errors.New("x"))
 	for i := 0; i < maxFailures+2; i++ {
 		r.fail("s", "T", "download", errors.New("x"))
 	}
-	if s := r.Snapshot(); s.Failed != maxFailures+2 || len(s.Failures) != maxFailures+1 {
+	if s := r.Snapshot(); s.Failed != maxFailures+2 || len(s.Failures) != maxFailures {
 		t.Fatalf("failed %d, listed %d", s.Failed, len(s.Failures))
 	}
 }
@@ -1985,7 +1985,7 @@ func TestCoverSizedAndWhole(t *testing.T) {
 	b.Path = library.SongPath(root, b.Song, "original", false)
 	r.Start(plan.Plan{Add: []plan.Want{a, b}})
 	s := wait(t, r)
-	if s.State != "done" || s.Failed != 0 || len(s.Failures) != 1 || s.Failures[0].Op != "cover" {
+	if s.State != "done" || s.Failed != 0 || len(s.Failures) != 0 { // a cover failure is only logged
 		t.Fatalf("%+v", s)
 	}
 	if c, err := os.ReadFile(filepath.Dir(a.Path) + "/cover.jpg"); err != nil || string(c) != "jpeg-al-1" {
@@ -2000,6 +2000,43 @@ func TestCoverSizedAndWhole(t *testing.T) {
 		t.Errorf("sizes %q", f.sizes)
 	}
 }
+
+// A cover is streamed to the card, so one past 16 MiB costs no more RAM than a small one, and is
+// never saved cut short; a Content-Length past 16 MiB is refused before the body is read.
+func TestCoverStreamed(t *testing.T) {
+	for name, n := range map[string]int64{"no length": -1, "length": maxCover + 1} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			var read int64
+			body := func() (io.Reader, int64) { return &counted{io.LimitReader(zeros{}, maxCover+1), &read}, n }
+			r := New(root, crafted{body}, nil)
+			r.Net = NewNetSlot()
+			w := want(root, "a", "original")
+			w.Song.CoverArt = "c"
+			os.MkdirAll(filepath.Dir(w.Path), 0o755)
+			var m0, m1 runtime.MemStats
+			runtime.ReadMemStats(&m0)
+			r.cover(context.Background(), w)
+			runtime.ReadMemStats(&m1)
+			if a := m1.TotalAlloc - m0.TotalAlloc; a > 4<<20 {
+				t.Errorf("allocated %d bytes", a)
+			}
+			if _, err := os.Stat(filepath.Dir(w.Path) + "/cover.jpg"); !os.IsNotExist(err) {
+				t.Error("a cut cover was saved")
+			}
+			if n > 0 && read != 0 {
+				t.Errorf("read %d bytes past a Content-Length over 16 MiB", read)
+			}
+		})
+	}
+}
+
+type counted struct {
+	r io.Reader
+	n *int64
+}
+
+func (c *counted) Read(p []byte) (int, error) { k, err := c.r.Read(p); *c.n += int64(k); return k, err }
 
 // Refresh records the items holding songs that need no transfer, while no sync runs (I12); a run
 // records them too, and a renamed song's new MetaKey.
@@ -2081,6 +2118,45 @@ func TestRenameCarriesCover(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(from)); !os.IsNotExist(err) {
 		t.Error("old album folder left")
+	}
+}
+
+// A cover.jpg over 16 MiB (planted over Wi-Fi Transfer) is not carried: carryCover streams with the
+// same cap as cover().
+func TestRenameSkipsOversizeCover(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Jellyfin/Art/1999 - Alb/01 - r.flac", root+"/Jellyfin/Art/2000 - Alb/01 - r.flac"
+	put(t, from, "r")
+	put(t, filepath.Dir(from)+"/cover.jpg", "")
+	if err := os.Truncate(filepath.Dir(from)+"/cover.jpg", maxCover+1); err != nil {
+		t.Fatal(err)
+	}
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if es, _ := os.ReadDir(filepath.Dir(to)); len(es) != 1 {
+		t.Errorf("over-size cover carried: %v", es)
+	}
+}
+
+// A cover.jpg.tmp left by a hard kill doesn't keep the album folder once its last song goes.
+func TestRemovePrunesLeftoverTmp(t *testing.T) {
+	_, r, root := setup(t)
+	z := &library.Entry{ID: "z", Path: root + "/Jellyfin/Z/z/01 - z.flac", Quality: "original"}
+	dir := filepath.Dir(z.Path)
+	for _, f := range []string{z.Path, dir + "/cover.jpg", dir + "/cover.jpg.tmp"} {
+		put(t, f, "x")
+	}
+	(&library.Manifest{Songs: map[string]*library.Entry{"z": z}}).Save(root, root+"/.jellyfin/manifest.json")
+	r.Start(plan.Plan{Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(root + "/Jellyfin/Z"); !os.IsNotExist(err) {
+		es, _ := os.ReadDir(dir)
+		t.Errorf("album folder left: %v", es)
 	}
 }
 

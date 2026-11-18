@@ -41,6 +41,9 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Changed
 
 - **New connections to the server are quicker to set up:** a connection opened after a minute's pause, or alongside others, resumes the earlier secure session instead of a full handshake, which is slow on the Q2. Browsing after a pause, seeking in a streamed song and loading covers spend less time waiting. The server's certificate is still checked by name and date. With a server that speaks only TLS 1.2, each connection's keys also cross the network inside a session ticket sealed with the server's ticket key, so traffic recorded then, including the password sent at sign-in, can be read if that key ever leaks; TLS 1.3 servers are not affected.
+### Changed
+
+- **A sync's album covers use little memory, whatever their size:** cover.jpg is written to the card as it arrives, instead of read whole first, and copied the same way into an album's new folder when a tag change renames it. A server that can't resize images sends the original, which can be many megabytes. A cover over 16 MiB is still not saved, and one whose size the server gives as over 16 MiB is not fetched. A cover that fails is now only written to the log, not kept in a list no page shows. An album folder left with only its cover and a cover.jpg.tmp (from a power cut during a cover download) is now removed with its last song.
 
 ## [0.8.0] - 2026-11-16
 
