@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3824,5 +3825,42 @@ func TestConcurrentToggles(t *testing.T) {
 	wg.Wait()
 	if it := d.selected(t); len(it) != 2 {
 		t.Fatalf("%+v", it)
+	}
+}
+
+// A page's list stays in memory only while it is open or its item is in Sync: pages opened one
+// after another don't pile up (final audit round 1 #5). An item in Sync keeps its list.
+func TestPagesForgottenOutsideSync(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 4, songsPer: 2}, "", true)
+	d.do("toggle", "album:al3")
+	keys := func() string {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		var ks []string
+		for k := range d.resolved {
+			ks = append(ks, k)
+		}
+		for id := range d.artistAlbums {
+			ks = append(ks, "albums of "+id)
+		}
+		sort.Strings(ks)
+		return strings.Join(ks, " ")
+	}
+	d.do("album", "album:al3")
+	d.do("artist", "artist:ar1")
+	for _, k := range []string{"album:al0", "playlist:pl1", "album:al1"} {
+		op, _, _ := strings.Cut(k, ":")
+		d.do(op, k)
+	}
+	if got := keys(); got != "album:al1 album:al3" { // the open page's and the one in Sync
+		t.Fatalf("in memory: %q", got)
+	}
+	// Entire Library keeps no playlist page it doesn't hold in Sync on its own (final audit round 3 #1)
+	d.do("toggle", "album:al3")
+	d.do("toggle", "library:all")
+	d.do("playlist", "playlist:pl0")
+	d.do("playlist", "playlist:pl1")
+	if got := keys(); got != "playlist:pl1" {
+		t.Fatalf("in memory with Entire Library: %q", got)
 	}
 }

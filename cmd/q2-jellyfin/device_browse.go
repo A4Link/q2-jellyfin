@@ -360,7 +360,11 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 		return d.listErr(err, cursor)
 	}
 	songs, albums := l.songs, l.albums
+	sel, serr := d.selection()
 	d.mu.Lock()
+	if serr == nil {
+		d.forgetUnsynced(sel, key)
+	}
 	if songs != nil {
 		d.resolved[key] = songs
 	}
@@ -394,6 +398,27 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 		rows = append(rows, info("No favourites yet"), info("Tap the heart on a song in Jellyfin"))
 	}
 	return page(rows, cursor)
+}
+
+// forgetUnsynced drops the songs and albums fetched for items outside sel, but key's (the page
+// being drawn) and Entire Library's: each page opened would otherwise stay in memory, and be walked
+// by every view, until the app exits. Such an item then shows the status the card records, as
+// after a restart. d.mu is held.
+func (d *daemon) forgetUnsynced(sel selection.Set, key string) {
+	keep := map[string]bool{key: true}
+	for _, it := range sel.Items {
+		keep[selection.Key(it.Kind, it.ID)] = true
+	}
+	for k := range d.resolved {
+		if kind, _ := parseKey(k); kind != selection.KindLibrary && !keep[k] {
+			delete(d.resolved, k)
+		}
+	}
+	for id := range d.artistAlbums {
+		if !keep[selection.Key(selection.KindArtist, id)] {
+			delete(d.artistAlbums, id)
+		}
+	}
 }
 
 // search lists what the server found, artists then albums then songs.
