@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -360,7 +361,11 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 		return d.listErr(err, cursor)
 	}
 	songs, albums := l.songs, l.albums
+	sel, serr := d.selection()
 	d.mu.Lock()
+	if serr == nil {
+		d.forgetUnsynced(sel, key)
+	}
 	if songs != nil {
 		d.resolved[key] = songs
 	}
@@ -394,6 +399,27 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 		rows = append(rows, info("No favourites yet"), info("Tap the heart on a song in Jellyfin"))
 	}
 	return page(rows, cursor)
+}
+
+// forgetUnsynced drops the songs and albums fetched for items outside sel, but key's (the page
+// being drawn) and Entire Library's: each page opened would otherwise stay in memory, and be walked
+// by every view, until the app exits. Such an item then shows the status the card records, as
+// after a restart. d.mu is held.
+func (d *daemon) forgetUnsynced(sel selection.Set, key string) {
+	keep := map[string]bool{key: true}
+	for _, it := range sel.Items {
+		keep[selection.Key(it.Kind, it.ID)] = true
+	}
+	for k := range d.resolved {
+		if kind, _ := parseKey(k); kind != selection.KindLibrary && !keep[k] {
+			delete(d.resolved, k)
+		}
+	}
+	for id := range d.artistAlbums {
+		if !keep[selection.Key(selection.KindArtist, id)] {
+			delete(d.artistAlbums, id)
+		}
+	}
 }
 
 // search lists what the server found, artists then albums then songs.
@@ -510,16 +536,46 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 		d.artistAlbums[id] = als
 		d.mu.Unlock()
 		name = a.Name
-		for _, al := range als { // the album from the list: only its songs to fetch (audit 2026-11-16 #15)
-			s, err := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
-			var ae *jellyfin.APIError
-			if errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
-				continue // that album deleted since the list: the artist is still there
+		// The albums from the list: only their songs to fetch (audit 2026-11-16 #15), 4 at a time.
+		// As resolveLibrary's run: the slot is taken before the goroutine starts, and the first
+		// failure (in time, so a cancelled album never hides it) stops the rest.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		got := make([][]jellyfin.Song, len(als))
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var first error
+		sem := make(chan struct{}, 4) // as resolveItems
+		for i, al := range als {
+			sem <- struct{}{}
+			if ctx.Err() != nil {
+				break
 			}
-			if err != nil {
-				return nil, "", err
-			}
-			oneArtist(al, s)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				s, e := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
+				var ae *jellyfin.APIError
+				if errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
+					return // that album deleted since the list: the artist is still there
+				}
+				if e != nil {
+					mu.Lock()
+					first = cmp.Or(first, e)
+					mu.Unlock()
+					cancel()
+					return
+				}
+				oneArtist(al, s)
+				got[i] = s
+			}()
+		}
+		wg.Wait()
+		if err := cmp.Or(first, ctx.Err()); err != nil {
+			return nil, "", err
+		}
+		for _, s := range got {
 			songs = append(songs, s...)
 		}
 	case selection.KindSong:

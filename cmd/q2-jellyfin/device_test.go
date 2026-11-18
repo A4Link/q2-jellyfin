@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,11 @@ type nav struct {
 	listErr          int           // getAlbumList2 fails with this code from offset 50 on
 	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
 	holdAlbum        chan struct{} // getAlbum waits for it
+	pairSongs        chan struct{} // when set, an album's songs request waits up to 2 s to meet another
+	overlapped       atomic.Bool   // two album songs requests met (pairSongs)
+	failSongs        string        // this album's songs request answers 500; the others' wait up to 2 s for the client to give up
+	artistAlbums     int           // the artist's album list holds al0..al<N-1>; 0 means 2
+	albumSongsReqs   atomic.Int32  // album songs requests served
 	favs             int           // the first favs songs of al0 are the user's favourites
 	albumGaveUp      atomic.Int32  // getAlbum requests the client cancelled while waiting
 	images           atomic.Int32  // cover requests served (albums al* have one; anything else 404s)
@@ -386,13 +392,37 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				page(nil)
 			}
 		case q.Get("parentId") != "" && q.Get("parentId") != "music": // an album's songs
+			n.albumSongsReqs.Add(1)
+			if n.failSongs != "" {
+				if q.Get("parentId") == n.failSongs {
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(2 * time.Second):
+				}
+			}
+			if n.pairSongs != nil { // wait up to 2 s for another album's songs request
+				select {
+				case n.pairSongs <- struct{}{}:
+					n.overlapped.Store(true)
+				case <-n.pairSongs:
+					n.overlapped.Store(true)
+				case <-time.After(2 * time.Second):
+				}
+			}
 			if q.Get("parentId") == n.goneID || n.allGone {
 				fail(70)
 				return
 			}
 			page(n.songs(albumOf(q.Get("parentId"))))
 		case q.Get("albumArtistIds") != "":
-			page([]map[string]any{n.album(0), n.album(1)})
+			var als []map[string]any
+			for i := range cmp.Or(n.artistAlbums, 2) {
+				als = append(als, n.album(i))
+			}
+			page(als)
 		case kind == "Audio": // every song, a page at a time
 			n.songListReqs.Add(1)
 			if n.onSongList != nil {
@@ -1852,7 +1882,7 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
 		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
 	} {
-		if r := previewRows(p, 512<<20, 10); !strings.Contains(strings.Join(titles(r), "|"), want) {
+		if r := previewRows(p, 0, 512<<20, 10, nil); !strings.Contains(strings.Join(titles(r), "|"), want) {
 			t.Errorf("want %q: %q", want, titles(r))
 		}
 	}
@@ -1868,7 +1898,7 @@ func TestPreviewWarnsMostRemoved(t *testing.T) {
 		for range c.remove {
 			p.Remove = append(p.Remove, &library.Entry{Size: 1000})
 		}
-		got := strings.Contains(strings.Join(titles(previewRows(p, 512<<20, c.onCard)), "|"), warn)
+		got := strings.Contains(strings.Join(titles(previewRows(p, 0, 512<<20, c.onCard, nil)), "|"), warn)
 		if want := c.remove*2 > c.onCard; got != want {
 			t.Errorf("%d of %d removed: warning %v", c.remove, c.onCard, got)
 		}
@@ -1979,15 +2009,18 @@ func TestPausedRefusedSaysWhy(t *testing.T) {
 
 // An artist in Sync fetches each album's songs, not each album again: the artist's album list has
 // them already (audit 2026-11-16 #15). Songs keep the albums' order, and a compilation's songs
-// still take the album's artist (M41).
+// still take the album's artist (M41). The albums are asked for 4 at a time, not one after another.
 func TestArtistSongsOneRequestPerAlbum(t *testing.T) {
-	n := &nav{albums: 2, songsPer: 2, various: true}
+	n := &nav{albums: 2, songsPer: 2, various: true, pairSongs: make(chan struct{})}
 	d := newTestDaemon(t, n, "", true)
 	d.do("toggle", "artist:ar1")
 	n.reqs.Store(0)
 	d.preview(t)
 	if a, all := n.albumReqs.Load(), n.reqs.Load(); a != 0 || all != 4 {
 		t.Fatalf("%d album requests, %d in all", a, all)
+	}
+	if !n.overlapped.Load() {
+		t.Error("the albums' songs were asked for one after another")
 	}
 	d.mu.Lock()
 	songs := d.resolved["artist:ar1"]
@@ -1999,6 +2032,21 @@ func TestArtistSongsOneRequestPerAlbum(t *testing.T) {
 	want := "al0.0 Various Artists,al0.1 Various Artists,al1.0 Various Artists,al1.1 Various Artists"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("%q", got)
+	}
+}
+
+// One album's failure stops an artist's other album requests: the check fails with it at once, not
+// after every album has been asked for (or timed out).
+func TestArtistSongsFailureStopsTheRest(t *testing.T) {
+	n := &nav{albums: 8, songsPer: 1, artistAlbums: 8, failSongs: "al0"}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "artist:ar1")
+	r := d.preview(t)
+	if row, _ := find(r, "Check Again"); row.URI != "check" || !strings.Contains(fmt.Sprintf("%+v", r.Rows), "500") {
+		t.Fatalf("failed preview %+v", r.Rows)
+	}
+	if got := n.albumSongsReqs.Load(); got >= 8 {
+		t.Errorf("%d album songs requests after the first failed", got)
 	}
 }
 
@@ -3824,5 +3872,42 @@ func TestConcurrentToggles(t *testing.T) {
 	wg.Wait()
 	if it := d.selected(t); len(it) != 2 {
 		t.Fatalf("%+v", it)
+	}
+}
+
+// A page's list stays in memory only while it is open or its item is in Sync: pages opened one
+// after another don't pile up (final audit round 1 #5). An item in Sync keeps its list.
+func TestPagesForgottenOutsideSync(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 4, songsPer: 2}, "", true)
+	d.do("toggle", "album:al3")
+	keys := func() string {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		var ks []string
+		for k := range d.resolved {
+			ks = append(ks, k)
+		}
+		for id := range d.artistAlbums {
+			ks = append(ks, "albums of "+id)
+		}
+		sort.Strings(ks)
+		return strings.Join(ks, " ")
+	}
+	d.do("album", "album:al3")
+	d.do("artist", "artist:ar1")
+	for _, k := range []string{"album:al0", "playlist:pl1", "album:al1"} {
+		op, _, _ := strings.Cut(k, ":")
+		d.do(op, k)
+	}
+	if got := keys(); got != "album:al1 album:al3" { // the open page's and the one in Sync
+		t.Fatalf("in memory: %q", got)
+	}
+	// Entire Library keeps no playlist page it doesn't hold in Sync on its own (final audit round 3 #1)
+	d.do("toggle", "album:al3")
+	d.do("toggle", "library:all")
+	d.do("playlist", "playlist:pl0")
+	d.do("playlist", "playlist:pl1")
+	if got := keys(); got != "playlist:pl1" {
+		t.Fatalf("in memory with Entire Library: %q", got)
 	}
 }

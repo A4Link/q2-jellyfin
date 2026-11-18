@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
@@ -258,6 +259,74 @@ func TestSpaceRowsNoNextSize(t *testing.T) {
 	for _, r := range spaceRows(&syncer.SpaceLowError{Left: 1500 << 20, Reserve: 2 << 30}) {
 		if r.Subtitle != "" {
 			t.Errorf("row %q has subtitle %q", r.Title, r.Subtitle)
+		}
+	}
+}
+
+// Short of space, the preview and the pause name the songs an earlier version cached, which a
+// sync no longer takes room from: Clear Playback Cache frees them. With the cache empty, no row.
+func TestSpaceLowNamesCache(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, favs: 3}, "", true) // three 1000-byte songs
+	cardOf(d, 2500)                                                        // room for two
+	d.do("toggle", favKey)
+	cacheRow := func(r q2spot.Reply) string {
+		for _, row := range r.Rows {
+			if strings.HasPrefix(row.Title, "Clear Playback Cache") {
+				return row.Title + " · " + row.Subtitle
+			}
+		}
+		return ""
+	}
+	want := "Clear Playback Cache frees " + size(4000) + " · In Quality and Storage"
+	p := putCache(t, d, "s-original.flac", 4000)
+	if got := cacheRow(d.preview(t)); got != want {
+		t.Errorf("preview: %q", got)
+	}
+	d.do("start")
+	eventually(t, "the stop", func() bool { return d.runner.Snapshot().State == "paused" })
+	if got := cacheRow(d.do("sync")); got != want {
+		t.Errorf("paused: %q", got)
+	}
+	os.Remove(p)
+	if got := cacheRow(d.do("sync")); got != "" {
+		t.Errorf("paused, cache empty: %q", got)
+	}
+}
+
+// After Clear Playback Cache, the Sync page works out whether the sync fits from the free space as
+// it is now, not as the preview found it (final audit round 2 #2).
+func TestPreviewFitsAfterCacheCleared(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3}, "", true)
+	putCache(t, d, "s-original.flac", 4000)
+	d.free = func(string) int64 {
+		if d.cacheSize() > 0 {
+			return 512e6 // no room above Space to Keep Free
+		}
+		return 1 << 40
+	}
+	d.do("toggle", "album:al0")
+	const short = "Not all of it fits on the card"
+	if got := strings.Join(titles(d.preview(t)), "|"); !strings.Contains(got, short) {
+		t.Fatalf("before: %q", got)
+	}
+	d.do("clearcache")
+	d.do("clearcache")
+	if got := strings.Join(titles(d.do("sync")), "|"); strings.Contains(got, short) {
+		t.Errorf("after: %q", got)
+	}
+}
+
+// A sync paused or stopped on a full card names the cache too, as one short of space does (final
+// audit round 2 #5).
+func TestCardFullNamesCache(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	putCache(t, d, "s-original.flac", 4000)
+	full := &fs.PathError{Op: "write", Path: "Jellyfin/x", Err: syscall.ENOSPC}
+	for _, r := range []q2spot.Reply{d.syncRows(syncer.Snapshot{State: "paused", Err: syncer.ErrCardFull}),
+		d.stoppedRows(syncer.Snapshot{State: "error", Err: full})} {
+		if got := strings.Join(titles(r), "|"); !strings.Contains(got, "The card is full") ||
+			!strings.Contains(got, "Clear Playback Cache frees "+size(4000)) {
+			t.Errorf("%q", got)
 		}
 	}
 }
