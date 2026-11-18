@@ -1376,6 +1376,43 @@ func TestInterruptedRemovalsRecorded(t *testing.T) {
 	}
 }
 
+// A Pause part-way through a batch of removals stops the deletes at once (USB storage gives the
+// app 3 s, not a batch of 1,000), and the files not deleted are recorded again in the manifest the
+// stop saves: no file is left on the card unrecorded.
+func TestRemovalsStopMidBatch(t *testing.T) {
+	_, r, root := setup(t)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	var rm []*library.Entry
+	for _, id := range []string{"x", "y", "z"} {
+		e := &library.Entry{ID: id, Path: root + "/Jellyfin/Z/z/" + id + ".flac", Quality: "original"}
+		put(t, e.Path, id)
+		m.Songs[id], rm = e, append(rm, e)
+	}
+	m.Save(root, root+"/.jellyfin/manifest.json")
+	removes := 0
+	r.onOp = func(op, _ string) {
+		if op == "remove" {
+			removes++
+			r.mu.Lock()
+			r.stopAs = "paused"
+			r.cancel() // Pause, from inside the run
+			r.mu.Unlock()
+		}
+	}
+	r.Start(plan.Plan{Remove: rm, Playlists: map[string][]string{}})
+	wait(t, r)
+	if removes != 1 {
+		t.Fatalf("%d files deleted after the Pause, want 1", removes)
+	}
+	songs := manifest(t, root).Songs
+	for _, e := range rm {
+		_, err := os.Stat(e.Path)
+		if gone, kept := err != nil, songs[e.ID] != nil; gone == kept {
+			t.Errorf("%s: deleted %v, recorded %v", e.ID, gone, kept)
+		}
+	}
+}
+
 // The playlist phase stops at once when the card goes (USB storage gives the app 3 s) and never
 // writes the manifest onto the Q2's own storage once the card is gone (M15).
 func TestCardGoneDuringPlaylists(t *testing.T) {
