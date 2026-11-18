@@ -47,6 +47,9 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 ### Changed
 
 - **A sync rewrites only the playlist files that changed:** a playlist whose song list is the same as the file on the card is no longer written again at the end of each sync, which saves time and card wear with many playlists in Sync.
+### Changed
+
+- **Play asks the server for fewer lyrics on Q2 Pod 1.7.3 and later:** a Play fetches the lyrics of the song started and the 19 after it, not of every song in the queue (up to 500, one after another). A song further on has its lyrics once a later Play reaches it. Past 100 songs' lyrics kept between Plays, only the oldest are dropped, not all of them, so a big queue no longer fetches them all again at every Play. The app keeps at most 64 KB of each song's lyrics, the most the Q2 shows.
 
 ## [0.8.0] - 2026-11-16
 
