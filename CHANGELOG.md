@@ -4,6 +4,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-18
+
 ### Security
 
 - **A server can no longer fill the card by sending more than a song's size:** a download of a song whose size is known now stops at twice that size and 8 MiB, also when the server's Content-Length says more, and the song fails. Before, a long Content-Length was taken as it was, so a hostile server could write past Space to Keep Free until the card was full.
@@ -188,7 +190,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - q2-subsonic's phone sign-in page (a port on the Wi-Fi with a QR code and PIN): the app opens no port; everything is typed on the Q2.
 - q2-subsonic's one-time `Navidrome/` folder migration: this app never touches another app's files.
 
-[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.0...HEAD
+[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.1...HEAD
+[0.8.1]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.0...q2-v0.8.1
 [0.8.0]: https://github.com/A4Link/q2-jellyfin/compare/v0.7.0...q2-v0.8.0
 [0.7.0]: https://github.com/A4Link/q2-jellyfin/commits/v0.7.0
 [0.6.2]: https://github.com/A4Link/q2-jellyfin/commits/q2-v0.6.2
