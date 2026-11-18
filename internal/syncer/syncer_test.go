@@ -36,6 +36,7 @@ import (
 type fake struct {
 	mu      sync.Mutex
 	status  map[string]int  // id -> forced HTTP status
+	once    map[string]int  // id -> HTTP status of the next answer only
 	drop    map[string]bool // id -> cut the next response at 50 %
 	noRange bool            // answer 200 with the whole file even when asked for a Range
 	block   map[string]chan struct{}
@@ -84,7 +85,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.hits[id]++
 	f.ranges[id] = append(f.ranges[id], r.Header.Get("Range"))
 	st, drop, block, slow := f.status[id], f.drop[id], f.block[id], f.slow[id]
+	if o := f.once[id]; o != 0 {
+		st = o
+	}
 	delete(f.drop, id)
+	delete(f.once, id)
 	noRange := f.noRange
 	f.mu.Unlock()
 	if strings.HasSuffix(r.URL.Path, "/Images/Primary") {
@@ -129,7 +134,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func setup(t *testing.T) (*fake, *Runner, string) {
 	t.Helper()
-	f := &fake{status: map[string]int{}, drop: map[string]bool{}, block: map[string]chan struct{}{}, slow: map[string]bool{},
+	f := &fake{status: map[string]int{}, once: map[string]int{}, drop: map[string]bool{}, block: map[string]chan struct{}{}, slow: map[string]bool{},
 		ranges: map[string][]string{}, hits: map[string]int{}}
 	srv := httptest.NewTLSServer(f)
 	t.Cleanup(srv.Close)
@@ -1914,6 +1919,53 @@ func TestResumeRefusesOtherVersion(t *testing.T) {
 		t.Errorf("ranges %q", rg)
 	}
 	sameFile(t, a.Path, "a")
+	noParts(t, root)
+}
+
+// A failed try after the server's file changed size doesn't put the new key on the old bytes: the
+// next try fetches the song whole, never v1's head plus v2's tail.
+func TestFailedTryKeepsOtherVersionOut(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	put(t, a.Path+".part", "OLD VERSION")
+	put(t, a.Path+".part.key", "original 4000")
+	f.once["a"] = 503
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if _, rg := f.seen("a"); len(rg) != 2 || rg[0] != "" || rg[1] != "" {
+		t.Errorf("ranges %q", rg)
+	}
+	sameFile(t, a.Path, "a")
+	noParts(t, root)
+}
+
+// A song the server refuses leaves no .part.key and no album folder on the card.
+func TestRefusedSongLeavesNothing(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.status["a"] = 404
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	noParts(t, root)
+	if _, err := os.Stat(root + "/Jellyfin"); !os.IsNotExist(err) {
+		t.Error("folder left:", err)
+	}
+}
+
+// A transcode cut part-way leaves no .part: it is never resumed.
+func TestCutTranscodeLeavesNoPart(t *testing.T) {
+	f, r, root := setup(t)
+	r.Backoff = r.Backoff[:1]
+	b := want(root, "bb", "mp3-320")
+	f.drop["bb"] = true
+	r.Start(plan.Plan{Add: []plan.Want{b}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
 	noParts(t, root)
 }
 
