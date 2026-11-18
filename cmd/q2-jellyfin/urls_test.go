@@ -17,13 +17,11 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/library"
 )
 
-// urlSrc is fakeSrc with player URLs.
+// urlSrc is fakeSrc with player URLs: the relay's (relay.go).
 type urlSrc struct{ *fakeSrc }
 
-func (urlSrc) PlayerURL(id, q string) string {
-	return "https://srv/Audio/" + id + "/" + q + "?ApiKey=k"
-}
-func (urlSrc) PlayerCoverURL(id string) string { return "https://srv/Items/" + id + "/cover?ApiKey=k" }
+func (urlSrc) PlayerURL(id, q string) string   { return src{}.PlayerURL(id, q) }
+func (urlSrc) PlayerCoverURL(id string) string { return src{}.PlayerCoverURL(id) }
 
 // With "urls", Play writes the Q2URLS/1 queue and names it in .play; nothing downloads; a song on
 // the card stays its card path; tabs in titles become spaces.
@@ -52,7 +50,7 @@ func TestURLQueue(t *testing.T) {
 	if got := strings.Split(lines[1], "\t")[0]; got != e.root+"/Jellyfin/s0.flac" {
 		t.Errorf("synced song: %q", got)
 	}
-	if want := "https://srv/Audio/s1/original?ApiKey=k\tTwo Words\t\t\thttps://srv/Items/al9/cover?ApiKey=k\t61"; lines[2] != want {
+	if want := "http://127.0.0.1:2317/song/s1?q=original\tTwo Words\t\t\thttp://127.0.0.1:2317/cover/al9\t61"; lines[2] != want {
 		t.Errorf("song 1:\n%q\n%q", lines[2], want)
 	}
 	if len(e.src.urls) != 0 {
@@ -86,7 +84,7 @@ func TestURLQueueKeepsLossy(t *testing.T) {
 			want[1] = "opus-128"
 		}
 		for i, w := range want {
-			if got := strings.Split(lines[i+1], "\t")[0]; got != "https://srv/Audio/s"+strconv.Itoa(i)+"/"+w+"?ApiKey=k" {
+			if got := strings.Split(lines[i+1], "\t")[0]; got != "http://127.0.0.1:2317/song/s"+strconv.Itoa(i)+"?q="+w {
 				t.Errorf("Always Re-encode %v, song %d: %q, want %s", re, i, got, w)
 			}
 		}
@@ -193,7 +191,7 @@ func TestURLQueueStartsPartway(t *testing.T) {
 		t.Fatalf("%q, %d lines", lines[0], len(lines))
 	}
 	for i, id := range map[int]string{1: "s150", 101: "s250", 150: "s299"} {
-		if !strings.HasPrefix(lines[i], "https://srv/Audio/"+id+"/") {
+		if !strings.HasPrefix(lines[i], "http://127.0.0.1:2317/song/"+id+"?") {
 			t.Errorf("line %d %q, want %s", i, lines[i], id)
 		}
 	}
@@ -222,8 +220,8 @@ func TestURLQueueFitsFirmware(t *testing.T) {
 		if want := fmt.Sprintf("#Q2URLS/1\tstart=%d", c.start); lines[0] != want {
 			t.Fatalf("%q, want %q", lines[0], want)
 		}
-		if !strings.HasPrefix(lines[1], fmt.Sprintf("https://srv/Audio/s%d/", c.lo)) ||
-			!strings.HasPrefix(lines[1+c.start], fmt.Sprintf("https://srv/Audio/s%d/", c.from)) {
+		if !strings.HasPrefix(lines[1], fmt.Sprintf("http://127.0.0.1:2317/song/s%d?", c.lo)) ||
+			!strings.HasPrefix(lines[1+c.start], fmt.Sprintf("http://127.0.0.1:2317/song/s%d?", c.from)) {
 			t.Fatalf("first %.30q, started %.30q", lines[1], lines[1+c.start])
 		}
 		last := len(lines) - 2

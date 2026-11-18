@@ -22,6 +22,7 @@ import (
 // hands the firmware a queue of stream URLs, which it plays through stock's Tidal player. That
 // player streams the song itself: it waits for slow data (Now Playing's spinner) rather than
 // ending the song, and seeks with HTTP ranges. Songs on the card stay card paths in the same queue.
+// The URLs are the app's own loopback relay's (relay.go), so the queue holds no token.
 //
 // The queue file, /tmp/q2-jellyfin.urls (Q2URLS/1), written whole and named in .play:
 //
