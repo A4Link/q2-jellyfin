@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,6 +294,22 @@ func TestCachedForMatchesStat(t *testing.T) {
 		if c, size := e.s.syncCopy(w, os.Stat); keep[c] != (size > 0) {
 			t.Errorf("%s: kept %v, Stat finds %d bytes", w.Song.ID, keep[c], size)
 		}
+	}
+}
+
+// An empty cache folder takes no song: Start Sync builds no cache path for any (round 2 speed 5).
+func TestCachedForEmptyFolder(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	ws := make([]plan.Want, 1000)
+	for i := range ws {
+		ws[i] = plan.Want{Song: jellyfin.Song{ID: fmt.Sprint(i), Size: 100}, Quality: "original", Bytes: 100,
+			Path: filepath.Join(e.root, "Jellyfin", "x", fmt.Sprint(i)+".flac")}
+	}
+	var keep map[string]bool
+	var n int64
+	allocs := testing.AllocsPerRun(1, func() { keep, n = e.s.cachedFor(ws[:500], ws[500:]) })
+	if len(keep) != 0 || n != 0 || allocs > 50 {
+		t.Fatalf("keep %v, %d bytes, %v allocations", keep, n, allocs)
 	}
 }
 

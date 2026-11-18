@@ -59,6 +59,7 @@ type nav struct {
 	artistReqs       atomic.Int32  // /Artists/AlbumArtists calls served
 	artistItemReqs   atomic.Int32  // /Items/ar<id> calls served (cl.Artist)
 	songListReqs     atomic.Int32  // every-song listing pages served (cl.AllSongs)
+	onSongList       func()        // optional: called as each every-song listing page is asked for
 	searchReqs       atomic.Int32  // search requests served (a searchTerm), artists' and items'
 	lyrics           atomic.Bool   // songs have lyrics on the server
 	lyricsHold       chan struct{} // lyrics requests wait for it
@@ -368,6 +369,9 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			page([]map[string]any{n.album(0), n.album(1)})
 		case kind == "Audio": // every song, a page at a time
 			n.songListReqs.Add(1)
+			if n.onSongList != nil {
+				n.onSongList()
+			}
 			if n.failID != "" {
 				fail(70)
 				return
@@ -1153,6 +1157,48 @@ func TestReplyWithin8s(t *testing.T) {
 	wg.Wait()
 }
 
+// The manifest is read under its own lock: a decode doesn't hold up d.mu's users, and sendLibrary
+// can read it with d.mu held.
+func TestManifestReadOutsideMu(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	read := make(chan struct{})
+	d.mu.Lock()
+	go func() { d.manifest(); close(read) }()
+	select {
+	case <-read:
+		d.mu.Unlock()
+	case <-time.After(5 * time.Second):
+		d.mu.Unlock()
+		t.Fatal("manifest waited for d.mu")
+	}
+}
+
+// While a sync runs, On This Q2's subtitle adds up the manifest already read, not each save of the
+// run read again beside it; once the run ends it reads the card's.
+func TestOnQ2SubtitleKeepsCopyDuringSync(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	held := func() *library.Manifest { d.manMu.Lock(); defer d.manMu.Unlock(); return d.man }
+	m0 := d.manifest()
+	saved := &library.Manifest{Songs: map[string]*library.Entry{"x": {ID: "x", Path: filepath.Join(d.card, "Jellyfin", "x.flac"), Size: 7e6}}}
+	if err := saved.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.onQ2Subtitle(selection.Set{}, nil); !strings.HasSuffix(got, " · 0 MB") || held() != m0 {
+		t.Errorf("read again during the sync: %q", got)
+	}
+	close(n.block)
+	eventually(t, "the sync to finish", func() bool { return !d.runner.Busy() })
+	d.onQ2Subtitle(selection.Set{}, nil)
+	if held() == m0 {
+		t.Error("not read again after the sync")
+	}
+}
+
 func TestStateHoldDuringSync(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
 	d := newTestDaemon(t, n, "", true)
@@ -1422,6 +1468,18 @@ func TestControlOpsReplyFast(t *testing.T) {
 	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
 }
 
+// A later page builds no view for a Sync Now row it never shows (round 2 speed 7).
+func TestSyncNowRowLaterPageNoView(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	if _, ok := d.syncNowRow(); !ok {
+		t.Fatal("no Sync Now row")
+	}
+	if n := testing.AllocsPerRun(5, func() { d.withSyncNow(q2spot.Reply{}, "50") }); n != 0 && !raceOn {
+		t.Fatalf("%v allocations", n)
+	}
+}
+
 func TestSyncNowRowWhenWaiting(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
 	d.do("toggle", "album:al0")
@@ -1537,6 +1595,15 @@ func TestEntireLibraryRow(t *testing.T) {
 	}
 	if got := libRow().Subtitle; got != "Off" {
 		t.Fatalf("after removal %q", got)
+	}
+}
+
+func TestEntireLibraryRowShowsZeroCounts(t *testing.T) {
+	d := newTestDaemon(t, &nav{empty: true}, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	if row, _ := find(d.do("sync"), "Sync Entire Library"); row.Subtitle != "On · 0 albums · 0 playlists" {
+		t.Fatalf("after resolve %q", row.Subtitle)
 	}
 }
 
@@ -2201,6 +2268,67 @@ func TestLibraryExistsRenamesThenClash(t *testing.T) {
 	}
 }
 
+// An answer with nothing new to record is taken from the manifest copy pages share: the file isn't
+// loaded again under d.mu (round 2 speed 3). The file here is unreadable but the same size and
+// time as the copy, so only a load would see it.
+func TestLibraryAnswerSkipsLoad(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.do("sync")
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	seq2, lines := d.libReq(t)
+	if seq2 == seq || len(lines) != 2 || !strings.HasPrefix(lines[1], "import ") {
+		t.Fatalf("request %s %q", seq2, lines)
+	}
+	if _, err := d.manifestErr(); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(d.card, ".jellyfin", "manifest.json")
+	st, _ := os.Stat(p)
+	os.WriteFile(p, []byte(strings.Repeat("x", int(st.Size()))), 0o644)
+	os.Chtimes(p, st.ModTime(), st.ModTime())
+	d.answer(seq2 + " ok")
+	r := d.do("sync")
+	if _, ok := find(r, "Library updated"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+}
+
+// An answer that comes while a sync's OnDone runs waits for the first tick after it: the tick would
+// load the whole manifest under d.mu beside syncDone's own read (round 5 speed 1). The request
+// wanted meanwhile is sent once the answer is taken.
+func TestLibraryAnswerWaitsForOnDone(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.do("sync")
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	seq2, lines := d.libReq(t)
+	if seq2 == seq || len(lines) != 2 || !strings.HasPrefix(lines[1], "import ") {
+		t.Fatalf("request %s %q", seq2, lines)
+	}
+	hold, in := make(chan struct{}), make(chan struct{})
+	d.runner.OnDone = func(plan.Plan) { close(in); <-hold; d.syncDone(plan.Plan{PlaylistsStale: true}) }
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	<-in
+	d.answer(seq2 + " ok")
+	poll := func() (int64, bool) { d.mu.Lock(); defer d.mu.Unlock(); d.libPoll(); return d.libTaken, d.libAgain }
+	if taken, _ := poll(); strconv.FormatInt(taken, 10) == seq2 {
+		t.Fatal("answer taken during OnDone")
+	}
+	close(hold)
+	eventually(t, "OnDone to return", func() bool { return !d.runner.Busy() })
+	if taken, again := poll(); strconv.FormatInt(taken, 10) != seq2 || again {
+		t.Fatalf("answer not taken after OnDone: taken %d, again %v", taken, again)
+	}
+	if seq3, _ := d.libReq(t); seq3 == seq2 {
+		t.Fatal("no new request after the answer")
+	}
+}
+
 // One request at a time: one wanted while another awaits its answer is sent once that comes, so
 // no answer (and no import to record) is lost.
 func TestLibraryOneRequestAtATime(t *testing.T) {
@@ -2466,11 +2594,15 @@ func TestLibraryResentInBackground(t *testing.T) {
 	if err := syscall.Mkfifo(mf, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// feed writes the manifest once libStart opens it; non-blocking, so it fails, not hangs, if never read.
+	// feed writes the manifest once libStart opens it, a plain file taking the FIFO's place first for
+	// sendLibrary's read after it (the FIFO's time changed); non-blocking, so it fails, not hangs, if
+	// never read.
 	feed := func() error {
 		for end := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 			f, err := os.OpenFile(mf, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 			if err == nil {
+				os.Remove(mf)
+				os.WriteFile(mf, b, 0o644)
 				_, err = f.Write(b)
 				f.Close()
 				return err
@@ -2492,8 +2624,6 @@ func TestLibraryResentInBackground(t *testing.T) {
 		t.Fatal(err)
 	}
 	d2.bg.Wait()
-	os.Remove(mf)
-	os.WriteFile(mf, b, 0o644)
 	if _, err := os.Stat(filepath.Join(tmp, "q2-jellyfin.library")); err != nil {
 		t.Fatal("the lost request is not sent again")
 	}
@@ -3489,6 +3619,62 @@ func TestEntireLibraryOneListing(t *testing.T) {
 		if want := fmt.Sprintf("al%d.%d", i/5, i%5); s.ID != want {
 			t.Fatalf("song %d is %s, want %s", i, s.ID, want)
 		}
+	}
+}
+
+// A check drops the last Entire Library list before listing the songs again: a big one would be
+// live beside the new one for the whole download (round 6 speed 0). The row keeps its counts.
+func TestEntireLibraryListDroppedDuringCheck(t *testing.T) {
+	var d *tdaemon
+	var armed atomic.Bool
+	listing, release := make(chan bool), make(chan struct{})
+	n := &nav{albums: 3, songsPer: 2, playlists: 2, onSongList: func() {
+		if !armed.Load() {
+			return
+		}
+		d.mu.Lock()
+		_, kept := d.resolved["library:all"]
+		d.mu.Unlock()
+		listing <- kept
+		<-release
+	}}
+	d = newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	armed.Store(true)
+	d.do("check")
+	d.do("sync") // the new check
+	if <-listing {
+		t.Error("the last list kept during the check")
+	}
+	row, _ := find(d.do("sync"), "Sync Entire Library")
+	armed.Store(false)
+	close(release)
+	if row.Subtitle != "On · 3 albums · 2 playlists" {
+		t.Errorf("row during the check %q", row.Subtitle)
+	}
+	d.preview(t)
+	d.mu.Lock()
+	songs := d.resolved["library:all"]
+	d.mu.Unlock()
+	if len(songs) != 6 {
+		t.Errorf("%d songs after the check", len(songs))
+	}
+}
+
+// Entire Library switched off leaves no list once Sync is opened (round 6 speed 0).
+func TestEntireLibraryOffDropsList(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	d.do("toggle", "library:all")
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.mu.Lock()
+	_, kept := d.resolved["library:all"]
+	d.mu.Unlock()
+	if kept {
+		t.Fatal("the list kept after Entire Library was switched off")
 	}
 }
 

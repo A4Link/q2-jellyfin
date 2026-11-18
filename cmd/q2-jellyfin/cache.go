@@ -248,9 +248,12 @@ func (s *streamer) keepForSync(keep map[string]bool) {
 // cachedFor is the cached files a sync of ws will take (forSync), and the bytes the plan counted
 // for those songs: a rename on the card, they need no room. The cache folder is read once: a Stat
 // per song scans the FAT folder for each, most of them for a name that isn't there, and a first
-// sync can plan 20,000 (audit 2026-11-16 #26).
-func (s *streamer) cachedFor(ws []plan.Want) (map[string]bool, int64) {
+// sync can plan 20,000 (audit 2026-11-16 #26). An empty folder (Q2 Pod 1.7.3 and later) takes none.
+func (s *streamer) cachedFor(wss ...[]plan.Want) (map[string]bool, int64) {
 	ents, _ := os.ReadDir(s.cacheDir())
+	if len(ents) == 0 {
+		return nil, 0
+	}
 	in := map[string]fs.DirEntry{}
 	for _, e := range ents {
 		in[e.Name()] = e
@@ -262,10 +265,12 @@ func (s *streamer) cachedFor(ws []plan.Want) (map[string]bool, int64) {
 		return nil, fs.ErrNotExist
 	}
 	keep, n := map[string]bool{}, int64(0)
-	for _, w := range ws {
-		if c, size := s.syncCopy(w, stat); size > 0 {
-			keep[c] = true
-			n += w.Bytes
+	for _, ws := range wss {
+		for _, w := range ws {
+			if c, size := s.syncCopy(w, stat); size > 0 {
+				keep[c] = true
+				n += w.Bytes
+			}
 		}
 	}
 	return keep, n

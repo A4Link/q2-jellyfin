@@ -2215,6 +2215,36 @@ func TestMoving(t *testing.T) {
 	r.Cancel()
 }
 
+// A run that ends with no failure drops its plan; one with failures keeps it for Retry Failed until
+// Forget (a new preview), and a paused run keeps it for Resume through Forget.
+func TestEndedRunDropsPlan(t *testing.T) {
+	f, r, root := setup(t)
+	held := func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.plan != nil || r.moving != nil }
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original")}, Remove: []*library.Entry{{ID: "d"}}})
+	if s := wait(t, r); s.State != "done" || held() {
+		t.Fatalf("%+v, plan held %v", s, held())
+	}
+	f.mu.Lock()
+	f.status["x"] = 404
+	f.block["b"] = make(chan struct{})
+	f.mu.Unlock()
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "x", "original")}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 || !held() {
+		t.Fatalf("%+v, plan held %v", s, held())
+	}
+	r.Forget()
+	if held() {
+		t.Fatal("Forget kept the plan")
+	}
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "b", "original")}})
+	r.Pause()
+	r.Forget()
+	if s := r.Snapshot(); s.State != "paused" || !held() {
+		t.Fatalf("%+v, plan held %v", s, held())
+	}
+	r.Cancel()
+}
+
 // The runner is Busy until OnDone has returned, so the app never exits between a sync's end and
 // its library request (I15).
 func TestBusyUntilOnDone(t *testing.T) {
@@ -2227,6 +2257,85 @@ func TestBusyUntilOnDone(t *testing.T) {
 	close(out)
 	if !busy {
 		t.Fatal("not busy in OnDone")
+	}
+}
+
+// An edit loads and saves the manifest without r.mu: Snapshot, Busy and Moving answer while it
+// works, Imported's edit is ErrBusy rather than wait, and a run started meanwhile loads the
+// manifest once it is saved: both land.
+func TestEditHoldsOnlyTheFile(t *testing.T) {
+	_, r, root := setup(t)
+	var tried atomic.Bool
+	r.onOp = func(op, path string) { tried.Store(true) }
+	entry := func(id string) func(m *library.Manifest) (bool, error) {
+		return func(m *library.Manifest) (bool, error) {
+			m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(root, id+".flac")}
+			return true, nil
+		}
+	}
+	in, out, edited := make(chan struct{}), make(chan struct{}), make(chan error)
+	go func() {
+		edited <- r.edit(true, func(m *library.Manifest) (bool, error) {
+			close(in)
+			<-out
+			return entry("z")(m)
+		})
+	}()
+	<-in
+	answered := make(chan struct{})
+	go func() { r.Snapshot(); r.Busy(); r.Moving("a"); close(answered) }()
+	select {
+	case <-answered:
+	case <-time.After(5 * time.Second):
+		close(out)
+		t.Fatal("Snapshot waited for the edit")
+	}
+	if err := r.edit(false, entry("x")); !errors.Is(err, ErrBusy) {
+		t.Fatal("Imported's edit during another:", err)
+	}
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original")}})
+	time.Sleep(100 * time.Millisecond)
+	ran := tried.Load()
+	close(out)
+	if ran {
+		t.Fatal("the run didn't wait for the edit")
+	}
+	if err := <-edited; err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if m := manifest(t, root); m.Songs["z"] == nil || m.Songs["a"] == nil {
+		t.Fatalf("the edit or the run lost: %+v", m)
+	}
+}
+
+// Edits wait for each other, and both land.
+func TestEditsWaitForEachOther(t *testing.T) {
+	_, r, root := setup(t)
+	in, out, first, second := make(chan struct{}), make(chan struct{}), make(chan error), make(chan error)
+	add := func(id string) func(m *library.Manifest) (bool, error) {
+		return func(m *library.Manifest) (bool, error) {
+			m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(root, id+".flac")}
+			return true, nil
+		}
+	}
+	go func() {
+		first <- r.edit(true, func(m *library.Manifest) (bool, error) { close(in); <-out; return add("z")(m) })
+	}()
+	<-in
+	go func() { second <- r.edit(true, add("y")) }()
+	time.Sleep(50 * time.Millisecond)
+	close(out)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatal("the second edit:", err)
+	}
+	if m := manifest(t, root); m.Songs["z"] == nil || m.Songs["y"] == nil {
+		t.Fatalf("an edit lost: %+v", m.Songs)
 	}
 }
 
