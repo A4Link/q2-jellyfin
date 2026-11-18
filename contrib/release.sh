@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Cut release q2-vX.Y from master: CHANGELOG.md's Unreleased entries become "## [X.Y] - <today>", the
-# link references and cmd/q2-jellyfin/main.go's version follow, and the commit "release: q2-vX.Y" gets
-# the annotated tag q2-vX.Y. Pushing the tag publishes the release (.github/workflows/release.yml).
-#   contrib/release.sh X.Y [--dry-run] [--push]
+# Cut release q2-vX.Y.Z from master: CHANGELOG.md's Unreleased entries become "## [X.Y.Z] - <today>",
+# the link references and cmd/q2-jellyfin/main.go's version follow, and the commit "release: q2-vX.Y.Z"
+# gets the annotated tag q2-vX.Y.Z. Pushing the tag publishes the release (.github/workflows/release.yml).
+#   contrib/release.sh X.Y.Z [--dry-run] [--push]
 # --dry-run runs every check and test and prints the notes and the diff, but changes nothing.
 # --push pushes master and the tag at the end.
 set -euo pipefail
@@ -17,7 +17,7 @@ for a in "$@"; do
     *) [ -z "$v" ] || die "one version only"; v=$a ;;
     esac
 done
-[[ $v =~ ^[0-9]+\.[0-9]+$ ]] || die "usage: contrib/release.sh X.Y [--dry-run] [--push]"
+[[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "usage: contrib/release.sh X.Y.Z [--dry-run] [--push]"
 tag=q2-v$v today=$(date +%F)
 
 [ "$(git branch --show-current)" = master ] || die "not on master"
@@ -47,7 +47,7 @@ awk -v v="$v" -v d="$today" '
 ' CHANGELOG.md >"$tmp/CHANGELOG.md"
 sed "s/^const version = \"q2-v[0-9.]*\"\$/const version = \"$tag\"/" cmd/q2-jellyfin/main.go >"$tmp/main.go"
 grep -q "^## \[$v\] - $today\$" "$tmp/CHANGELOG.md" && grep -q "^\[$v\]: .*\.\.\.$tag\$" "$tmp/CHANGELOG.md" ||
-    die "CHANGELOG.md needs a '## [Unreleased]' heading and an '[Unreleased]: …/compare/q2-vA.B...HEAD' link"
+    die "CHANGELOG.md needs a '## [Unreleased]' heading and an '[Unreleased]: …/compare/q2-vA.B.C...HEAD' link"
 grep -q "^const version = \"$tag\"\$" "$tmp/main.go" || die "no 'const version = \"q2-v…\"' in cmd/q2-jellyfin/main.go"
 
 echo "== Release notes for $tag"
