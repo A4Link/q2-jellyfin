@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -126,10 +127,10 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	h.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		req.Header.Del("Referer")
 		// plain http only on the plain server itself: never from https, never to another host
-		if req.URL.Scheme != "https" && (via[0].URL.Scheme != "http" || req.URL.Host != via[0].URL.Host) {
+		if req.URL.Scheme != "https" && (via[0].URL.Scheme != "http" || hostPort(req.URL) != hostPort(via[0].URL)) {
 			return ErrRedirect
 		}
-		if req.URL.Host != via[0].URL.Host {
+		if hostPort(req.URL) != hostPort(via[0].URL) {
 			req.Header.Del("Authorization") // never hand the token to another host
 		}
 		if len(via) >= 10 {
@@ -138,6 +139,18 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 		return nil
 	}
 	return &Client{c: c, base: u, hc: &h}, nil
+}
+
+// hostPort is u's host and port, the scheme's default port when none is written: a self-redirect
+// may leave out the :80 typed.
+func hostPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return net.JoinHostPort(u.Hostname(), p)
+	}
+	if u.Scheme == "https" {
+		return net.JoinHostPort(u.Hostname(), "443")
+	}
+	return net.JoinHostPort(u.Hostname(), "80")
 }
 
 // authHeader is Jellyfin's client identification, with the token once signed in.

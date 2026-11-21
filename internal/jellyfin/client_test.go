@@ -1510,3 +1510,36 @@ func TestRedirectPlainHTTP(t *testing.T) {
 		t.Errorf("https to http: %v", err)
 	}
 }
+
+// Review 0.8.2 #2: a self-redirect written without the default port (nginx's) is the server
+// itself, typed with :80 or https's :443; another host or port still isn't.
+func TestRedirectDefaultPort(t *testing.T) {
+	for server, cases := range map[string]map[string]bool{
+		"http://192.168.1.10:80": {
+			"http://192.168.1.10/x":      true,
+			"http://192.168.1.10:80/x":   true,
+			"http://192.168.1.10:8096/x": false,
+			"http://192.168.1.11/x":      false,
+		},
+		"https://music.example": {
+			"https://music.example:443/x":  true,
+			"https://music.example:8443/x": false,
+		},
+	} {
+		c, err := New(Creds{Server: server}, http.DefaultClient)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for to, same := range cases {
+			u, _ := url.Parse(to)
+			req := &http.Request{URL: u, Header: http.Header{"Authorization": {"t"}}}
+			err := c.hc.CheckRedirect(req, []*http.Request{{URL: c.base}})
+			if u.Scheme == "http" && (err == nil) != same {
+				t.Errorf("%s to %s: %v", server, to, err)
+			}
+			if err == nil && (req.Header.Get("Authorization") != "") != same {
+				t.Errorf("%s to %s: token kept %v", server, to, !same)
+			}
+		}
+	}
+}

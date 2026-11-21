@@ -8,10 +8,24 @@ import (
 	"testing"
 )
 
+// sockDir is a new empty directory under /tmp for a test's Unix sockets, and TMPDIR (where
+// wpaStatus binds its reply socket) for the test; removed after it. A socket's path holds at most
+// 108 bytes, which t.TempDir() under a long TMPDIR goes past.
+func sockDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "qj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	t.Setenv("TMPDIR", d)
+	return d
+}
+
 // The network is read from wpa_supplicant's STATUS (connected only) and the kernel's tables: the
 // default route's gateway (little-endian hex) and its complete ARP entry.
 func TestCurrentNetwork(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	RouteFile, ARPFile, WPADir = filepath.Join(dir, "route"), filepath.Join(dir, "arp"), filepath.Join(dir, "wpa")
 	t.Cleanup(func() {
 		RouteFile, ARPFile, WPADir = "/proc/net/route", "/proc/net/arp", "/var/run/wpa_supplicant"
@@ -95,5 +109,27 @@ func TestNetworkUnsure(t *testing.T) {
 		if home.Unsure(now) != want {
 			t.Errorf("%+v: %v", now, !want)
 		}
+	}
+}
+
+// Review 0.8.2 #3: a control socket nobody listens on (wpa_supplicant stopped) leaves no reply
+// socket behind: the dial binds it before it fails.
+func TestWPAStaleSocket(t *testing.T) {
+	dir := sockDir(t)
+	WPADir = filepath.Join(dir, "wpa")
+	t.Cleanup(func() { WPADir = "/var/run/wpa_supplicant" })
+	os.Mkdir(WPADir, 0o755)
+	l, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: filepath.Join(WPADir, "wlan0"), Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close() // its file stays
+	for range 3 {
+		if s := wifiSSID(); s != "" {
+			t.Fatal(s)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "q2-jellyfin-wpa-*")); len(left) != 0 {
+		t.Fatalf("left %q", left)
 	}
 }

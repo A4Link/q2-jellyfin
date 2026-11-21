@@ -191,21 +191,29 @@ func hostOf(server string) string {
 // refused. The error's text never repeats what was typed, which may hold a user:password@.
 func (d *daemon) serverAddress(typed string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(typed), "/")
-	if !strings.Contains(s, "://") {
+	bare := !strings.Contains(s, "://")
+	if bare {
 		s = "https://" + s
-		if u, err := url.Parse("http" + s[5:]); err == nil && jellyfin.PlainOK(u) {
-			if ap, ok := addrPort(u.String()); ok && d.allowList().inRange(ap) {
-				s = u.String()
-			}
-		}
-	}
-	if u, err := url.Parse(s); err == nil && u.Port() == "" && d.wantsPort(u, typed) {
-		return "", errors.New(addPort)
-	}
-	if u, err := url.Parse(s); err == nil && u.Scheme == "http" && jellyfin.PlainOK(u) && d.allowList().off() {
-		return "", errors.New(plainOff)
 	}
 	u, err := url.Parse(s)
+	var ip netip.Addr
+	if err == nil {
+		ip, _ = netip.ParseAddr(u.Hostname())
+	}
+	if ip.Is4() && (bare || u.Scheme == "http") {
+		a := d.allowList() // read only for plain http: a card used with HTTPS only gets no allowFile
+		h := *u
+		h.Scheme = "http"
+		if ap, e := netip.ParseAddrPort(h.Host); bare && jellyfin.PlainOK(&h) && e == nil && a.inRange(ap) {
+			u, s = &h, h.String()
+		}
+		if u.Port() == "" && (u.Scheme == "http" || bare && a.inRangeAddr(ip)) { // plain http needs its port
+			return "", errors.New(addPort)
+		}
+		if u.Scheme == "http" && jellyfin.PlainOK(u) && a.off() {
+			return "", errors.New(a.offMsg())
+		}
+	}
 	switch {
 	case err != nil || u.Hostname() == "" || strings.ContainsAny(s, " \t"):
 		return "", errors.New("That isn't a server address")
@@ -273,16 +281,6 @@ func (d *daemon) changeServer(text string, signOut bool) error {
 }
 
 const addPort = "Add the port, e.g. 192.168.1.10:8096"
-
-// wantsPort reports whether u, an address with no port, is an IPv4 address meant for plain http:
-// http:// typed in full, or typed bare in a range of the allow list. Plain http needs its port.
-func (d *daemon) wantsPort(u *url.URL, typed string) bool {
-	ip, err := netip.ParseAddr(u.Hostname())
-	if err != nil || !ip.Is4() {
-		return false
-	}
-	return u.Scheme == "http" || !strings.Contains(typed, "://") && d.allowList().inRangeAddr(ip)
-}
 
 // typedServerField is an address typed in a field row (Q2 Pod's field cap), on the first page
 // (in "menu") or the Server page. One that works shows the sign-in page in the page's place (it is
@@ -391,7 +389,7 @@ func (d *daemon) checkServer(server string, in time.Duration) error {
 		if err = cl.CheckServer(ctx); errors.Is(err, jellyfin.ErrNoHTTPS) && ipv4Host(server) && !d.allowList().off() {
 			err = errors.New(noHTTPSIP) // typed bare outside the allow list's ranges: http:// in full works
 		} else if errors.Is(err, jellyfin.ErrNoHTTPS) && ipv4Host(server) {
-			err = errors.New("No HTTPS on this port. " + plainOff) // http:// would be refused too
+			err = errors.New("No HTTPS on this port. " + d.allowList().offMsg()) // http:// would be refused too
 		} else if err != nil {
 			err = errors.New(jellyfin.Message(err, hostPort(server))) // the port typed may be the wrong one
 		}

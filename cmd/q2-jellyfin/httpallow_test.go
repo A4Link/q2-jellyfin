@@ -3,12 +3,14 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/A4Link/q2-jellyfin/internal/applog"
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/q2"
@@ -150,7 +152,7 @@ func TestPlainHTTPAnswerFromEarlierRun(t *testing.T) {
 	d1 := privateHTTPDaemon(t, &authServer{})
 	d1.caps.Field = true
 	d1.do("menu")
-	yes := d1.do("setserver", "menu", "192.168.111.111:8096").Rows[2].Context
+	yes := d1.do("setserver", "menu", "192.168.111.111:8096").Rows[3].Context
 	d2 := privateHTTPDaemon(t, &authServer{}) // the app started again
 	d2.caps.Field = true
 	d2.do("menu")
@@ -198,7 +200,7 @@ func TestPlainHTTPAskedAfterSignOut(t *testing.T) {
 	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" {
 		t.Fatalf("%q", titles(r))
 	}
-	r = d.do("account", r.Rows[2].Context)
+	r = d.do("account", r.Rows[3].Context)
 	if d.loginServer() != "http://192.168.111.111:8096" || titles(r)[0] != "Server Address:" {
 		t.Fatalf("%q, kept %q", titles(r), d.loginServer())
 	}
@@ -278,5 +280,176 @@ func TestServerFieldTypoKeptInBox(t *testing.T) {
 		if strings.Contains(row.Position, "p@") {
 			t.Fatalf("%+v", row)
 		}
+	}
+}
+
+// Review 0.8.2 #1: an allow list saved with a byte-order mark (Notepad's "UTF-8 with BOM") and
+// CRLF keeps its first line.
+func TestAllowListBOM(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	os.WriteFile(filepath.Join(d.dir, allowFile), []byte("\xef\xbb\xbf192.168.0.0/16\r\n"), 0o644)
+	d.allow = nil
+	if a := d.allowList(); len(a.ranges) != 1 || a.ranges[0].String() != "192.168.0.0/16" || a.off() {
+		t.Fatalf("%+v", a)
+	}
+}
+
+// Review 0.8.2 #5: the allow list is read again when the file changes while the app runs: a line
+// changed on a computer stops HTTP to the old server; a server said Yes to stays allowed. The edit
+// keeps the size, so its time alone tells.
+func TestAllowListEditedWhileRunning(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.do("menu")
+	if err := d.allowServer("http://192.168.1.10:8096"); err != nil || !d.allowed("http://192.168.1.10:8096") {
+		t.Fatalf("not allowed after Yes: %v", err)
+	}
+	p := filepath.Join(d.dir, allowFile)
+	b, _ := os.ReadFile(p)
+	os.WriteFile(p, []byte(strings.Replace(string(b), "\n192.168.1.10:8096\n", "\n192.168.1.11:8096\n", 1)), 0o644)
+	os.Chtimes(p, time.Now(), time.Now().Add(time.Minute)) // FAT's times are to 2 s
+	if d.allowed("http://192.168.1.10:8096") || !d.allowed("http://192.168.1.11:8096") {
+		t.Fatal("the edit wasn't read")
+	}
+}
+
+// Review 0.8.2 #5: a failed read (plain HTTP off) isn't kept: once the file reads, it is used.
+func TestAllowListReadFailed(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	p := filepath.Join(d.dir, allowFile)
+	os.Remove(p)
+	os.MkdirAll(p, 0o755) // a directory: the read fails
+	d.allow = nil
+	if !d.allowList().off() {
+		t.Fatal("a failed read allows")
+	}
+	os.Remove(p)
+	os.WriteFile(p, []byte("192.168.0.0/16\n"), 0o644)
+	if d.allowList().off() {
+		t.Fatal("the failed read was kept")
+	}
+}
+
+// Review 0.8.2 pass 2: an allow list with lines but no address the app can read (saved as UTF-16,
+// or a typo in its only line) says so, not that plain HTTP was turned off; one with only comments
+// still says it is off. Plain HTTP is off either way.
+func TestAllowListUnreadable(t *testing.T) {
+	utf16 := []byte{0xff, 0xfe}
+	for _, c := range "192.168.0.0/16\r\n" {
+		utf16 = append(utf16, byte(c), 0)
+	}
+	for file, want := range map[string]string{
+		string(utf16):      "http-allow.txt has no address the app can read",
+		"192.168.0.0/33\n": "http-allow.txt has no address the app can read",
+		"# nothing\n":      "Plain HTTP is turned off in http-allow.txt",
+	} {
+		d := privateHTTPDaemon(t, &authServer{})
+		os.WriteFile(filepath.Join(d.dir, allowFile), []byte(file), 0o644)
+		d.allow = nil
+		d.do("menu")
+		if r := d.do("search", "192.168.111.111:8096"); r.Rows[0].Title != "No HTTPS on this port. "+want {
+			t.Errorf("%q: %q", file, titles(r))
+		}
+		if _, err := d.serverAddress("http://192.168.111.111:8096"); err == nil || err.Error() != want {
+			t.Errorf("%q: http:// %v", file, err)
+		}
+	}
+}
+
+// Review 0.8.3 p2: a missing allow list that can't be written back (a full card, a read-only
+// FAT) is tried once: the defaults stay in effect and the failure is logged once, not on every
+// check.
+func TestAllowListMissingUnwritable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	d := newTestDaemon(t, &nav{}, "", false)
+	os.MkdirAll(d.dir, 0o755)
+	lp := filepath.Join(t.TempDir(), "log.txt")
+	d.log = applog.Open(lp, 1<<20)
+	os.Remove(filepath.Join(d.dir, allowFile))
+	d.allow = nil
+	os.Chmod(d.dir, 0o555)
+	t.Cleanup(func() { os.Chmod(d.dir, 0o755) })
+	for range 3 {
+		if err := d.onHomeNetwork("http://192.168.1.10:8096"); err != jellyfin.ErrNotAllowed {
+			t.Fatalf("refused with %v", err)
+		}
+		if a := d.allowList(); a.off() || !a.inRangeAddr(netip.MustParseAddr("192.168.1.10")) {
+			t.Fatalf("not the defaults: %+v", a)
+		}
+	}
+	b, _ := os.ReadFile(lp)
+	if n := strings.Count(string(b), "can't write the defaults"); n != 1 {
+		t.Fatalf("logged %d times", n)
+	}
+}
+
+// Review 0.8.3 p3: an allow list deleted again after the defaults were written back is written
+// again, and a Yes keeps the default ranges: a bare IP and port in them still means http://.
+// It covers allowList's re-read (allowList writes the file back before allowServer reads it);
+// allowServer's own missing-file branch is covered by TestAllowListUnwritableThenYes.
+func TestAllowListDeletedTwice(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	os.MkdirAll(d.dir, 0o755)
+	p := filepath.Join(d.dir, allowFile)
+	for range 2 {
+		os.Remove(p)
+		d.allowList()
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("not written back: %v", err)
+		}
+	}
+	os.Remove(p)
+	if err := d.allowServer("http://192.168.1.10:8096"); err != nil {
+		t.Fatal(err)
+	}
+	if a := d.allowList(); !a.inRangeAddr(netip.MustParseAddr("192.168.1.20")) || !a.has("http://192.168.1.10:8096") {
+		t.Fatalf("%+v", a)
+	}
+}
+
+// Review 0.8.3 p3: a Yes after a missing allow list couldn't be written back, once the card is
+// writable again, writes the defaults with the server.
+func TestAllowListUnwritableThenYes(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	d := newTestDaemon(t, &nav{}, "", false)
+	os.MkdirAll(d.dir, 0o755)
+	os.Remove(filepath.Join(d.dir, allowFile))
+	d.allow = nil
+	os.Chmod(d.dir, 0o555)
+	t.Cleanup(func() { os.Chmod(d.dir, 0o755) })
+	d.allowList() // the defaults can't be written
+	os.Chmod(d.dir, 0o755)
+	if err := d.allowServer("http://192.168.1.10:8096"); err != nil {
+		t.Fatal(err)
+	}
+	if a := d.allowList(); !a.inRangeAddr(netip.MustParseAddr("192.168.1.20")) || !a.has("http://192.168.1.10:8096") {
+		t.Fatalf("%+v", a)
+	}
+}
+
+// Review 0.8.3 p4: a Yes while the allow list is there but can't be read (a card read error)
+// leaves it untouched and reports the failure: the ranges and earlier servers aren't replaced
+// by the one server line.
+func TestAllowListUnreadableThenYes(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads a file with no permissions")
+	}
+	d := newTestDaemon(t, &nav{}, "", false)
+	os.MkdirAll(d.dir, 0o755)
+	p := filepath.Join(d.dir, allowFile)
+	want := "10.0.0.0/8\n192.168.0.0/16\n192.168.1.50:8096\n"
+	os.WriteFile(p, []byte(want), 0o644)
+	d.allowList()
+	os.Chmod(p, 0o000)
+	t.Cleanup(func() { os.Chmod(p, 0o644) })
+	if err := d.allowServer("http://192.168.1.10:8096"); err == nil {
+		t.Error("no error")
+	}
+	os.Chmod(p, 0o644)
+	if b, _ := os.ReadFile(p); string(b) != want {
+		t.Fatalf("file now %q", b)
 	}
 }
