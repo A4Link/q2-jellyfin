@@ -4,6 +4,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-21
+
 ### Changed
 
 - **The server's address can be corrected instead of typed again:** on a Q2 Pod that lists `fieldtext` in `/tmp/q2-addon.caps`, pressing **Server Address:** opens the keyboard with the address already in it, on the sign-in list, the Server page and a failed address's page. Older Q2 Pod opens an empty box, as before. Only the address is put there, never a password.
@@ -202,7 +204,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 - q2-subsonic's phone sign-in page (a port on the Wi-Fi with a QR code and PIN): the app opens no port; everything is typed on the Q2.
 - q2-subsonic's one-time `Navidrome/` folder migration: this app never touches another app's files.
 
-[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.1...HEAD
+[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.2...HEAD
+[0.8.2]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.1...q2-v0.8.2
 [0.8.1]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.0...q2-v0.8.1
 [0.8.0]: https://github.com/A4Link/q2-jellyfin/compare/v0.7.0...q2-v0.8.0
 [0.7.0]: https://github.com/A4Link/q2-jellyfin/commits/v0.7.0

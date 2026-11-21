@@ -19,7 +19,7 @@ import (
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 )
 
-const version = "q2-v0.8.1"
+const version = "q2-v0.8.2"
 
 func main() {
 	dir := flag.String("dir", "/mnt/mmc/.jellyfin", "the add-on's folder on the card")
