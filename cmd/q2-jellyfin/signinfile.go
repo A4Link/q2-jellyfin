@@ -115,7 +115,10 @@ func (d *daemon) signInFromFile() {
 	}
 	var server string
 	if err == nil {
-		server, err = serverAddress(f.server)
+		server, err = d.serverAddress(f.server)
+	}
+	if err == nil && plainHTTP(server) && !d.allowed(server) { // HTTP is said Yes to on the Q2 only
+		err = errors.New("type this address on the Q2 first, to allow HTTP to it")
 	}
 	if err != nil {
 		d.fileOutcome(signInFile + ": " + err.Error())
@@ -128,26 +131,33 @@ func (d *daemon) signInFromFile() {
 
 // signInWith signs in as a typed password or API key does (typed), the server checked first. Only a
 // sign-in that worked replaces the one on the Q2 (signed out first, as the Server page does), so a
-// file with a typo or a wrong password changes nothing (audit 2026-11-10 #6). Signed out, a server
-// found to be Jellyfin is kept even when the sign-in fails, for the sign-ins on the Q2.
+// file with a typo or a wrong password changes nothing (audit 2026-11-10 #6). The server is kept
+// once the sign-in works, signed in or out; signed out, a server found to be Jellyfin is kept even
+// when the sign-in fails, for the sign-ins on the Q2.
 func (d *daemon) signInWith(server string, f fileSignIn) {
 	c := jellyfin.Creds{Server: server, User: f.user, Password: f.password}
 	if f.hasKey {
 		c = jellyfin.Creds{Server: server, User: f.user, Token: f.key, Kind: jellyfin.KindAPIKey}
 	}
 	err := d.checkServer(server, loginIn)
+	if err == nil && plainHTTP(server) && !d.knownHere(server) { // never kept from a file: typed on the Q2
+		err = errors.New("type this address on the Q2 first, on this Wi-Fi")
+	}
+	signedOut := d.client() == nil
+	if err == nil && signedOut { // kept first: a plain server's network with it (homenet.go)
+		err = d.setServer(server)
+	}
 	if err == nil {
 		c, err = d.trySignIn(c, loginIn) // login.go
-		if d.client() == nil {
-			if serr := d.setServer(server); err == nil {
-				err = serr
-			}
-		} else { // still signed in (the sign-in failed): the clock's fallback back on its server
+		if !signedOut {                  // still signed in (the sign-in failed): the clock's fallback back on its server
 			d.mu.Lock()
 			cur := d.server
 			d.mu.Unlock()
 			tlsroots.SetDateURL(cur)
 		}
+	}
+	if err == nil && !signedOut { // trySignIn signed out the old one: the file's server is kept now, as 0.8.1 did
+		err = d.setServer(server)
 	}
 	if err == nil {
 		err = d.signedIn(c)
@@ -156,7 +166,11 @@ func (d *daemon) signInWith(server string, f fileSignIn) {
 		d.fileOutcome(signInFile + ": " + jellyfin.Message(err, hostOf(server)))
 		return
 	}
-	d.fileOutcome("Signed in as " + c.User + " (from " + signInFile + ")")
+	out := "Signed in as " + c.User + " (from " + signInFile + ")"
+	if plainHTTP(server) { // the password already went: say so, as the sign-in pages warn before
+		out += ". Over HTTP: not encrypted"
+	}
+	d.fileOutcome(out)
 }
 
 // fileOutcome is the sign-in file's outcome, for the root signed out (msg) or in (file).

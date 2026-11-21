@@ -18,6 +18,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"sort"
@@ -97,13 +98,23 @@ func (c *Client) setStatus(op string, code int) {
 	}
 }
 
-// New refuses anything but an https server address.
+// PlainOK reports whether u may be plain http at all: an IPv4 address written as one, with its
+// port, that is a host's (not this Q2's loopback, where its own relay listens, nor "this host",
+// multicast or broadcast). No name is looked up, so the address checked is the one connected to.
+// Which of them the user allows is the app's (cmd/q2-jellyfin httpallow.go).
+func PlainOK(u *url.URL) bool {
+	ip, err := netip.ParseAddr(u.Hostname())
+	return err == nil && ip.Is4() && u.Port() != "" && !ip.IsLoopback() && !ip.IsUnspecified() &&
+		!ip.IsMulticast() && ip.As4()[0] != 0 && ip.As4()[0] < 240
+}
+
+// New refuses anything but an https server address, or a plain http one PlainOK allows.
 func New(c Creds, hc *http.Client) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(c.Server), "/"))
 	if err != nil || u.Host == "" {
 		return nil, &APIError{Op: "new", Msg: "bad server address", kind: ErrUnreachable}
 	}
-	if u.Scheme != "https" {
+	if u.Scheme != "https" && !(u.Scheme == "http" && PlainOK(u)) {
 		return nil, ErrInsecure
 	}
 	if c.DeviceID == "" {
@@ -114,8 +125,9 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	h := *hc
 	h.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		req.Header.Del("Referer")
-		if req.URL.Scheme != "https" {
-			return ErrInsecure
+		// plain http only on the plain server itself: never from https, never to another host
+		if req.URL.Scheme != "https" && (via[0].URL.Scheme != "http" || req.URL.Host != via[0].URL.Host) {
+			return ErrRedirect
 		}
 		if req.URL.Host != via[0].URL.Host {
 			req.Header.Del("Authorization") // never hand the token to another host
@@ -868,8 +880,8 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 }
 
 // RoundTrip sends req, for one of the URLs above, as the client's own requests go: with the
-// sign-in in the Authorization header, over a verified connection, following a redirect itself
-// (https only, the token never to another host). It makes the client the app's relay's transport
+// sign-in in the Authorization header, over a verified connection (or plain http to a private
+// address, PlainOK), following a redirect itself (as New allows, the token never to another host). It makes the client the app's relay's transport
 // (an http.RoundTripper), for Q2 Pod's player, which sends no headers and checks no certificate.
 // The answer, or a server that couldn't be reached, sets the last result and, but for a 2xx or a
 // 416 (a seek past the end), is logged, as do() does: the player shows nothing when a song fails.

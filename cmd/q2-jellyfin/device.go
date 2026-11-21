@@ -286,8 +286,19 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		d.armed = armed{} // any other press drops Clear Playback Cache's or Sign Out's first press
 	}
 	d.mu.Unlock()
+	// Signed out, Sign Out's page (Account) is the sign-in list, as the first page is: its Yes/No
+	// and Try Again too (httpask.go, typedServerField)
+	if req.Op == "account" && d.client() == nil {
+		req.Op = "menu"
+	}
+	if r, ok := d.answerHTTP(req); ok { // httpask.go: Yes or No to plain HTTP
+		return r
+	}
 	switch req.Op {
 	case "menu": // the main list, or Jellyfin opened: each section from its start again (sectionCursor)
+		if s := d.retryServer(req.Arg(0)); s != "" { // a failed address's Try Again (login.go)
+			return d.typedServerField("menu", s)
+		}
 		d.mu.Lock()
 		d.windowAt = nil
 		d.mu.Unlock()
@@ -323,6 +334,9 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		}
 		return d.typePage(req.Op)
 	case "server":
+		if s := d.retryServer(req.Arg(0)); s != "" {
+			return d.typedServerField("server", s)
+		}
 		return d.serverPage()
 	case "setserver": // a field row's text (Q2 Pod's field cap): the page it is on, its argument
 		return d.typedServerField(req.Arg(0), req.Arg(1))
@@ -339,9 +353,6 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	if cl == nil {
 		if req.Op == "search" { // text typed in Q2 Pod's box for a sign-in field (login.go)
 			return d.typed(req.Arg(0))
-		}
-		if req.Op == "account" { // Sign Out's page, once it has toasted: the sign-in, live for Quick Connect
-			return q2spot.Reply{Message: "refresh", Rows: d.signedOutRows()}
 		}
 		return q2spot.Fail(q2spot.Login, "Sign in first")
 	}

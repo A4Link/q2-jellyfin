@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +92,12 @@ type login struct {
 	formUser, formPw string
 	formMsg          string // why the last Sign In failed, the page's next answer (once)
 
+	ask  asked // the plain http question waiting for its answer (httpask.go)
+	askN int   // the last question's number, from a random one (newDaemon)
+
+	tried  string // the address a field row's check failed on, for Try Again (typedServerField)
+	triedN int    // its Try Again's number, from a random one (newDaemon): only that page's Try Again checks it
+
 	qcCode   string             // the Quick Connect code on screen, "" when none is waiting
 	qcCancel context.CancelFunc // ends the poll
 	poll     time.Duration      // qcPoll unless a test sets it
@@ -110,8 +118,12 @@ func (d *daemon) loadServer() {
 	}
 }
 
-// setServer keeps the address of a server already checked to be Jellyfin.
+// setServer keeps the address of a server already checked to be Jellyfin, and for a plain http
+// one the network it is on now, a network its secrets go to (homenet.go).
 func (d *daemon) setServer(server string) error {
+	if err := d.addHome(server); err != nil {
+		return err
+	}
 	if err := q2.WriteFile(filepath.Join(d.dir, serverFile), []byte(server+"\n")); err != nil {
 		return err
 	}
@@ -143,6 +155,28 @@ func (d *daemon) qcWaiting() bool {
 	return d.login.qcCode != ""
 }
 
+const noHTTPSIP = "No HTTPS on this port. Type http:// first"
+
+const plainOff = "Plain HTTP is turned off in http-allow.txt"
+
+// ipv4Host reports whether server's host is an IPv4 address.
+func ipv4Host(server string) bool {
+	u, err := url.Parse(server)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(u.Hostname())
+	return err == nil && ip.Is4()
+}
+
+// hostPort is server's host and port as typed (no user:password@), or hostOf's fallback.
+func hostPort(server string) string {
+	if u, err := url.Parse(server); err == nil && u.Host != "" {
+		return strings.ToLower(u.Host)
+	}
+	return hostOf(server)
+}
+
 func hostOf(server string) string {
 	if u, err := url.Parse(server); err == nil && u.Hostname() != "" {
 		return u.Hostname()
@@ -150,19 +184,32 @@ func hostOf(server string) string {
 	return "the server"
 }
 
-// serverAddress turns what was typed into the server's https:// address: a bare host (with an
-// optional port and path) gets https://; http:// and anything without a host are refused. The
-// error's text never repeats what was typed, which may hold a user:password@.
-func serverAddress(typed string) (string, error) {
+// serverAddress turns what was typed into the server's address: a bare host (with an optional port
+// and path) gets https://, but an IP and port in a range of the allow list gets http://
+// (httpallow.go); an http:// typed in full may be any IPv4 address and port (jellyfin.PlainOK),
+// unless the allow list turns plain http off; any other http:// and anything without a host are
+// refused. The error's text never repeats what was typed, which may hold a user:password@.
+func (d *daemon) serverAddress(typed string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(typed), "/")
 	if !strings.Contains(s, "://") {
 		s = "https://" + s
+		if u, err := url.Parse("http" + s[5:]); err == nil && jellyfin.PlainOK(u) {
+			if ap, ok := addrPort(u.String()); ok && d.allowList().inRange(ap) {
+				s = u.String()
+			}
+		}
+	}
+	if u, err := url.Parse(s); err == nil && u.Port() == "" && d.wantsPort(u, typed) {
+		return "", errors.New(addPort)
+	}
+	if u, err := url.Parse(s); err == nil && u.Scheme == "http" && jellyfin.PlainOK(u) && d.allowList().off() {
+		return "", errors.New(plainOff)
 	}
 	u, err := url.Parse(s)
 	switch {
-	case err != nil || u.Host == "" || strings.ContainsAny(s, " \t"):
+	case err != nil || u.Hostname() == "" || strings.ContainsAny(s, " \t"):
 		return "", errors.New("That isn't a server address")
-	case u.Scheme != "https":
+	case u.Scheme != "https" && !(u.Scheme == "http" && jellyfin.PlainOK(u)):
 		return "", errors.New("HTTPS is required. Use an https:// address")
 	case u.User != nil:
 		return "", errors.New("Leave the user name and password out of the address")
@@ -178,7 +225,9 @@ func serverAddress(typed string) (string, error) {
 // A failed address offers no box to type another: Q2 Pod keeps a page per text typed, so Return
 // goes back to the page with the box however many tries were made.
 func (d *daemon) setTypedServer(text string, signOut bool) q2spot.Reply {
-	if err := d.changeServer(text, signOut); errors.Is(err, errSameServer) {
+	if err := d.changeServer(text, signOut); errors.Is(err, errAskHTTP) {
+		return d.askPage()
+	} else if errors.Is(err, errSameServer) {
 		return q2spot.Reply{Rows: []q2spot.Row{info(err.Error())}}
 	} else if err != nil {
 		return q2spot.Reply{Rows: []q2spot.Row{info(err.Error()), info("Press Return to try another address")}}
@@ -192,17 +241,24 @@ var errSameServer = errors.New("That's the server you're on")
 
 // changeServer is setTypedServer's work; the error is for the screen.
 func (d *daemon) changeServer(text string, signOut bool) error {
-	server, err := serverAddress(text)
+	server, err := d.serverAddress(text)
+	same, plain := false, plainHTTP(server)
 	if err == nil && signOut {
 		d.mu.Lock()
-		same := shownServer(server) == shownServer(d.server)
+		same = shownServer(server) == shownServer(d.server)
 		d.mu.Unlock()
-		if same {
-			return errSameServer
+		if same && (!plain || d.knownHere(server) && d.allowed(server)) {
+			return errSameServer // a plain one off the allow list is asked about again
 		}
 	}
 	if err == nil {
 		err = d.checkServer(server, d.answerIn*7/8)
+	}
+	if err == nil && plain && d.freshNetwork().Gateway == "" { // a Wi-Fi name alone is anyone's;
+		err = errNetworkUnsure // read after the check (which may take seconds), before any sign-out
+	}
+	if err == nil && plain && (same || !d.allowed(server) || !d.knownHere(server)) {
+		return d.askHTTP(server, signOut, same) // httpask.go: Yes adds it, then carries on here
 	}
 	if err == nil && signOut && d.signOut() != nil {
 		err = errors.New(signOutFailed)
@@ -210,42 +266,137 @@ func (d *daemon) changeServer(text string, signOut bool) error {
 	if err == nil {
 		err = d.setServer(server)
 	}
-	if err != nil && !signOut { // still signed in, the root never shows it
+	if err != nil && !signOut && !errors.Is(err, errAskHTTP) { // still signed in, the root never shows it
 		d.setLoginMsg(err.Error())
 	}
 	return err
 }
 
+const addPort = "Add the port, e.g. 192.168.1.10:8096"
+
+// wantsPort reports whether u, an address with no port, is an IPv4 address meant for plain http:
+// http:// typed in full, or typed bare in a range of the allow list. Plain http needs its port.
+func (d *daemon) wantsPort(u *url.URL, typed string) bool {
+	ip, err := netip.ParseAddr(u.Hostname())
+	if err != nil || !ip.Is4() {
+		return false
+	}
+	return u.Scheme == "http" || !strings.Contains(typed, "://") && d.allowList().inRangeAddr(ip)
+}
+
 // typedServerField is an address typed in a field row (Q2 Pod's field cap), on the first page
-// (in "menu") or the Server page: the page as it now stands, or a failure, which Q2 Pod shows as
-// the page's error page (the reason, Retry and Cancel), its Retry asking for the page again.
+// (in "menu") or the Server page. One that works shows the sign-in page in the page's place (it is
+// signed out by then). An address that isn't right shows why, with the box to fix it (holding the
+// text on fieldtext); only the same server, a failed sign-out, or text with '@' is Q2 Pod's error
+// page (the reason, Retry and Cancel), whose Retry asks for the page again, to type another. A server
+// that fails its check is kept (tried) for this page's Try Again, which checks it again: Q2 Pod's
+// own Retry never sends a field's text again, as it may be a password; an address isn't secret.
 func (d *daemon) typedServerField(in, text string) q2spot.Reply {
 	if r, off := d.noWiFi(false); off {
 		return r
 	}
-	if err := d.changeServer(text, d.client() != nil); err != nil {
+	server, err := d.serverAddress(text)
+	if err == nil {
+		err = d.changeServer(server, d.client() != nil)
+	}
+	if err == nil || errors.Is(err, errAskHTTP) || server == "" || errors.Is(err, errSameServer) || err.Error() == signOutFailed {
+		d.setTried("") // Q2 Pod's Retry asks for the page again: the page as it stands (review #9)
+	}
+	switch {
+	case err == nil:
+		return q2spot.Reply{Message: "refresh", Rows: d.signedOutRows()}
+	case errors.Is(err, errAskHTTP):
+		return d.askPage() // httpask.go: its Yes carries on as here
+	case server == "" && !strings.Contains(text, "@"): // not an address: fix it, not start again
+		sub := "Press to type it again" // the box opens empty: the whole address
+		if d.caps.FieldText {
+			sub = "Press to fix it" // the box holds what was typed
+		}
+		if err.Error() == addPort {
+			sub = "Press to type it again with the port"
+			if d.caps.FieldText {
+				sub = "Press to add the port"
+			}
+		}
+		return q2spot.Reply{Rows: []q2spot.Row{info(err.Error()), d.addressField(in, sub, strings.TrimSpace(text))}}
+	case server == "" || errors.Is(err, errSameServer) || err.Error() == signOutFailed:
 		return q2spot.Fail(q2spot.Error, err.Error())
 	}
-	if in == "server" {
-		return d.serverPage()
+	n := d.setTried(server)
+	box, sub := shownServer(server), "Press to type another address"
+	if err.Error() == noHTTPSIP { // the box opens with the http:// the message asks for (review loop r2)
+		box = "http://" + strings.TrimPrefix(box, "https://")
+		if d.caps.FieldText {
+			sub = "Press, then OK: http:// is in"
+		}
 	}
-	return d.menu()
+	return q2spot.Reply{Rows: []q2spot.Row{info(err.Error()),
+		// Q2 Pod asks for this page again with retryArg:n last (a page row, caps word window)
+		{Kind: "page", URI: retryArg, Context: retryArg + ":" + strconv.Itoa(n), Title: "Try Again", Subtitle: shownServer(server)},
+		d.addressField(in, sub, box)}}
 }
 
-// checkServer checks server (an https:// address) is Jellyfin within in, sending no credentials;
-// the error is for the screen. A server that fails gives the clock's fallback back to the last one.
+// addressField is a Server Address: field row on page in, sub beneath it; its box opens holding
+// address to edit where Q2 Pod can (caps word fieldtext), and empty elsewhere. An address only:
+// never a password, which no row puts there.
+func (d *daemon) addressField(in, sub, address string) q2spot.Row {
+	row := q2spot.Row{Kind: "field", URI: "setserver", Context: in, Title: "Server Address:", Subtitle: sub}
+	if d.caps.FieldText {
+		row.Position = address
+	}
+	return row
+}
+
+// retryArg, with its page's number, is the last argument of a page asked again by Try Again.
+const retryArg = "retry"
+
+// setTried keeps the address whose check failed, for its page's Try Again, and returns that page's
+// number; "" forgets it.
+func (d *daemon) setTried(server string) int {
+	d.login.mu.Lock()
+	defer d.login.mu.Unlock()
+	d.login.tried = server
+	if server != "" {
+		d.login.triedN++
+	}
+	return d.login.triedN
+}
+
+// retryServer is the address Try Again checks again when a page is asked for with arg, or "". Q2
+// Pod keeps arg for every later request of that page (Back, a refresh), so only the newest failed
+// page's number counts (review #1): any other page asked with an older one is the page as usual.
+func (d *daemon) retryServer(arg string) string {
+	verb, n, _ := strings.Cut(arg, ":")
+	d.login.mu.Lock()
+	defer d.login.mu.Unlock()
+	if verb != retryArg || d.login.tried == "" || n != strconv.Itoa(d.login.triedN) {
+		return ""
+	}
+	return d.login.tried
+}
+
+// checkServer checks server (an https:// address, or a private network's http:// one) is
+// Jellyfin within in, sending no credentials; the error is for the screen. A server that fails
+// gives the clock's fallback back to the last one; a plain http:// one never touches it.
 func (d *daemon) checkServer(server string, in time.Duration) error {
+	plain := plainHTTP(server) // no certificate to check, and tlsroots takes a Date over https only
 	prev := tlsroots.DateURL()
-	tlsroots.SetDateURL(server) // the certificate check needs a real clock (an unset Q2's isn't)
+	if !plain {
+		tlsroots.SetDateURL(server) // the certificate check needs a real clock (an unset Q2's isn't)
+	}
 	cl, err := d.clientFor(jellyfin.Creds{Server: server})
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), in)
 		defer cancel()
-		if err = cl.CheckServer(ctx); err != nil {
-			err = errors.New(jellyfin.Message(err, hostOf(server)))
+		if err = cl.CheckServer(ctx); errors.Is(err, jellyfin.ErrNoHTTPS) && ipv4Host(server) && !d.allowList().off() {
+			err = errors.New(noHTTPSIP) // typed bare outside the allow list's ranges: http:// in full works
+		} else if errors.Is(err, jellyfin.ErrNoHTTPS) && ipv4Host(server) {
+			err = errors.New("No HTTPS on this port. " + plainOff) // http:// would be refused too
+		} else if err != nil {
+			err = errors.New(jellyfin.Message(err, hostPort(server))) // the port typed may be the wrong one
 		}
 	}
-	if err != nil {
+	if err != nil && !plain {
 		tlsroots.SetDateURL(prev)
 	}
 	return err
@@ -270,7 +421,8 @@ func (d *daemon) signedIn(c jellyfin.Creds) error {
 	d.dropAlbumsFetch()
 	d.mu.Unlock()
 	d.login.mu.Lock()
-	d.login.pending, d.login.msg, d.login.file = "", "Signed in as "+c.User, ""
+	d.login.pending, d.login.msg, d.login.file, d.login.user = "", "Signed in as "+c.User, "", c.User
+	d.login.tried = ""                                             // a Try Again from before checks nothing now (review #1)
 	d.login.formUser, d.login.formPw, d.login.formMsg = "", "", "" // whichever way it signed in (clearForm)
 	d.login.mu.Unlock()
 	return nil
@@ -284,6 +436,11 @@ func (d *daemon) startQC() q2spot.Reply {
 	server := d.loginServer()
 	if server == "" {
 		return q2spot.Fail(q2spot.Error, "Set the server first")
+	}
+	if plainHTTP(server) { // its token would be refused here at once (homenet.go)
+		if err := d.onHomeNetwork(server); err != nil {
+			return q2spot.Fail(q2spot.Error, jellyfin.Message(err, hostOf(server)))
+		}
 	}
 	d.cancelQC()
 	cl, err := d.clientFor(jellyfin.Creds{Server: d.loginServer()})
@@ -386,7 +543,7 @@ func (d *daemon) typePage(op string) q2spot.Reply {
 			q2spot.Row{Kind: "search", Title: "Type the User Name"})}
 	}
 	d.login.pending = fieldUser
-	return q2spot.Reply{Rows: []q2spot.Row{info("Your password goes only to " + hostOf(d.login.server) + ", over HTTPS"),
+	return q2spot.Reply{Rows: []q2spot.Row{info(passwordGoes(d.login.server)),
 		q2spot.Row{Kind: "search", Title: "Type Your User Name"}}}
 }
 
@@ -423,7 +580,7 @@ func (d *daemon) typed(text string) q2spot.Reply {
 	case fieldServer:
 		return d.setTypedServer(text, false)
 	case fieldUser, fieldKeyUser:
-		if s, err := serverAddress(text); err == nil && shownServer(s) == shownServer(server) {
+		if s, err := d.serverAddress(text); err == nil && shownServer(s) == shownServer(server) {
 			return q2spot.Reply{Rows: d.signedOutRows()} // Return asked for the server's page again
 		}
 		next, title := fieldPassword, "Type Your Password"
@@ -431,6 +588,7 @@ func (d *daemon) typed(text string) q2spot.Reply {
 		if field == fieldKeyUser {
 			next, title, rows = fieldKey, "Type the API Key", append(keyWarning(), info("User: "+text))
 		}
+		rows = append(rows, plainWarning(server)...)
 		d.login.mu.Lock()
 		d.login.user, d.login.pending = text, next
 		d.login.mu.Unlock()
@@ -501,7 +659,13 @@ func (d *daemon) trySignIn(c jellyfin.Creds, in time.Duration) (jellyfin.Creds, 
 
 // pwForm is the password page as it stands.
 func (d *daemon) pwForm() q2spot.Reply {
+	signedOut := d.client() == nil
 	d.login.mu.Lock()
+	if signedOut && d.login.formUser == "" { // the last user name known, as typed or signed in
+		d.mu.Lock()
+		d.login.formUser = cmp.Or(d.login.user, d.user) // d.user: a sign-in loaded at start (review #8)
+		d.mu.Unlock()
+	}
 	user, pw, msg := d.login.formUser, d.login.formPw, d.login.formMsg
 	d.login.formMsg = ""
 	server := d.login.server
@@ -524,8 +688,33 @@ func (d *daemon) pwForm() q2spot.Reply {
 		{Kind: "field", URI: "pwfield", Context: "user", Title: "Username:", Subtitle: cmp.Or(user, typeHint)},
 		{Kind: "field", URI: "pwfield", Context: "password", Title: "Password:", Subtitle: cmp.Or(pw, typeHint)},
 		act("pwsignin", "Sign In", ""),
-		info("Your password goes only to " + hostOf(server) + ", over HTTPS"),
-		info("It shows on screen as you type it")}, now...)}
+		info(passwordGoes(server)),
+		info("It shows on screen as you type it")}, append(plainWarning(server), now...)...)}
+}
+
+// passwordGoes is what a password page says about where the password goes, and how.
+func passwordGoes(server string) string {
+	over := "HTTPS"
+	if plainHTTP(server) {
+		over = "HTTP"
+	}
+	return "Your password goes only to " + hostOf(server) + ", over " + over
+}
+
+// plainHTTP reports whether server is a plain http:// address (a private network's, serverAddress).
+func plainHTTP(server string) bool {
+	u, err := url.Parse(server)
+	return err == nil && u.Scheme == "http"
+}
+
+// plainWarning is the row under every page that sends the server a password, or shows its token
+// in use, while the server is plain http: nothing is encrypted on the network.
+func plainWarning(server string) []q2spot.Row {
+	if !plainHTTP(server) {
+		return nil
+	}
+	return []q2spot.Row{{Kind: "info", Title: "Warning: HTTP, not encrypted",
+		Subtitle: "Others on this network can read your password and sign-in"}}
 }
 
 // pwField keeps a text typed in the password page's row in (user or password).
@@ -591,7 +780,7 @@ func (d *daemon) typedSignedIn(text string) q2spot.Reply {
 		return d.typed(text)
 	}
 	text = strings.TrimSpace(text)
-	if s, err := serverAddress(text); text == user || err == nil && shownServer(s) == shownServer(server) {
+	if s, err := d.serverAddress(text); text == user || err == nil && shownServer(s) == shownServer(server) {
 		return d.home()
 	}
 	return q2spot.Fail(q2spot.Error, loginSuccess)
@@ -620,13 +809,17 @@ func (d *daemon) signedOutRows() []q2spot.Row {
 			{Kind: "info", Title: "Approve it in a Jellyfin app:", Subtitle: "User Menu → Quick Connect"},
 			act("qccancel", "Cancel Quick Connect", "")}
 	}
-	rows := []q2spot.Row{list("server", "Change Server", hostOf(server), ""),
+	change := list("server", "Change Server", shownServer(server), "")
+	if d.caps.Field { // typed here, the reply is this page as it then stands (typedServerField)
+		change = d.addressField("menu", shownServer(server), shownServer(server))
+	}
+	rows := []q2spot.Row{change,
 		{Kind: "action", URI: "qc", Title: "Sign In with Quick Connect", Subtitle: msg},
 		list("pwlogin", "Sign In with Password", "", "")}
 	if apiKeySignIn {
 		rows = append(rows, list("keylogin", "Sign In with an API Key", "Admin-level: not recommended", ""))
 	}
-	return rows
+	return append(rows, plainWarning(server)...)
 }
 
 // serverRow opens the Server page, the signed-in server's address beneath.
@@ -642,16 +835,19 @@ func (d *daemon) serverRow() q2spot.Row {
 // out as the root's box does. It is the page's only row, what a new address does beneath it: Q2 Pod
 // makes a first search row the title bar's search icon unless it is the only one.
 func (d *daemon) serverPage() q2spot.Reply {
+	signedOut := d.client() == nil // first: it loads the sign-in, and with it d.server
 	server, note := d.serverRow().Subtitle, "A new address signs you out"
-	if d.client() == nil {
+	if signedOut && d.caps.Field { // the sign-in page holds the address (signedOutRows)
+		return q2spot.Reply{Message: "refresh", Rows: d.signedOutRows()}
+	}
+	if signedOut {
 		server, note = shownServer(d.loginServer()), "Press to type another address"
 		d.login.mu.Lock()
 		d.login.pending = fieldServer
 		d.login.mu.Unlock()
 	}
 	if d.caps.Field { // Q2 Pod sends a text typed in it to setserver: the reply is this page's (login.go)
-		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "field", URI: "setserver", Context: "server", Title: "Server Address:",
-			Subtitle: server}, info(note)}}
+		return q2spot.Reply{Rows: []q2spot.Row{d.addressField("server", server, server), info(note)}}
 	}
 	return q2spot.Reply{Rows: []q2spot.Row{{Kind: "search", Title: server, Subtitle: note}}}
 }
@@ -669,9 +865,10 @@ func shownServer(server string) string {
 
 func (d *daemon) account(cl *jellyfin.Client) q2spot.Reply {
 	d.mu.Lock()
-	user := d.user
+	user, server := d.user, d.server
 	d.mu.Unlock()
 	rows := []q2spot.Row{d.serverRow(), {Kind: "search", Title: "Signed in as:", Subtitle: user}}
+	rows = append(rows, plainWarning(server)...)
 	if d.caps.Field { // the password page (login.go pwForm), what was typed there forgotten
 		rows[1] = list("pwlogin", "Signed in as:", user, "")
 		d.clearForm()
@@ -691,4 +888,4 @@ func (d *daemon) account(cl *jellyfin.Client) q2spot.Reply {
 const typeHint = "Press to type"
 
 // serverHint is under a box for the server's address: Q2 Pod's box can't start with text in it.
-const serverHint = "https:// is added for you, e.g. music.example.com"
+const serverHint = "e.g. music.example.com or 192.168.1.10:8096"

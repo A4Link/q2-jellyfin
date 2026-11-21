@@ -268,3 +268,16 @@ func TestCapsNow(t *testing.T) {
 		}
 	}
 }
+
+// The word fieldtext; field alone doesn't turn it on.
+func TestCapsFieldText(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "caps")
+	os.WriteFile(p, []byte("field more\n"), 0o644)
+	if ReadCaps(p).FieldText {
+		t.Fatal("field alone")
+	}
+	os.WriteFile(p, []byte("field fieldtext\n"), 0o644)
+	if !ReadCaps(p).FieldText {
+		t.Fatal("fieldtext")
+	}
+}

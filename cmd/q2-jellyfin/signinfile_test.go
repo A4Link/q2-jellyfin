@@ -12,6 +12,7 @@ import (
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/tlsroots"
 )
 
 // TestMain keeps the credentials' key (C3) in a temp folder: no test writes the machine's /mnt/data.
@@ -206,10 +207,16 @@ func TestSignInFileWhileSignedIn(t *testing.T) {
 	if c, _ := creds.Load(d.dir); c.Server == srv {
 		t.Fatal("already on the file's server")
 	}
+	t.Cleanup(func() { tlsroots.SetDateURL("") })
+	os.WriteFile(filepath.Join(d.dir, serverFile), []byte("https://old.example\n"), 0o644)
+	d.loadServer()
 	p := writeSignIn(t, d, "server="+srv+"\nuser=u\npassword="+typedPassword+"\n")
 	d.do("menu")
 	fileGone(t, p)
 	d.bg.Wait()
+	if b, _ := os.ReadFile(filepath.Join(d.dir, serverFile)); strings.TrimSpace(string(b)) != srv || d.loginServer() != srv {
+		t.Fatalf("server kept %q, login %q", b, d.loginServer()) // the file's server is kept, signed in too
+	}
 	if c, ok := creds.Load(d.dir); !ok || c.Server != srv || c.User != "u" {
 		t.Fatalf("%+v %v", c, ok)
 	}
@@ -289,5 +296,28 @@ func TestSignInFileUndeletable(t *testing.T) {
 	d.do("menu") // not read again
 	if d.login.msg != "" {
 		t.Fatalf("read again: %q", d.login.msg)
+	}
+}
+
+// A sign-in file for a plain server signs in, and its outcome says it went over HTTP: the password
+// was sent before any page could warn.
+func TestSignInFilePlainHTTP(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	writeSignIn(t, d, "server=192.168.111.111:8096\nuser=u\npassword="+typedPassword+"\n")
+	d.do("menu") // not said Yes to on the Q2: refused, nothing sent
+	d.bg.Wait()
+	if _, ok := creds.Load(d.dir); ok || d.login.msg != "Jellyfin sign-in.txt: type this address on the Q2 first, to allow HTTP to it" {
+		t.Fatalf("%q", d.login.msg)
+	}
+	allowPlain(t, d, "192.168.111.111:8096") // said Yes to on the Q2, on this Wi-Fi
+	writeSignIn(t, d, "server=192.168.111.111:8096\nuser=u\npassword="+typedPassword+"\n")
+	d.do("menu")
+	d.bg.Wait()
+	if c, ok := creds.Load(d.dir); !ok || c.Server != "http://192.168.111.111:8096" || c.Token != "tok" {
+		t.Fatalf("%+v %v", c, ok)
+	}
+	d.do("swipe") // off: the outcome ends the main list
+	if _, ok := find(d.do("menu"), "Signed in as u (from Jellyfin sign-in.txt). Over HTTP: not encrypted"); !ok {
+		t.Fatalf("menu %q", titles(d.do("menu")))
 	}
 }
