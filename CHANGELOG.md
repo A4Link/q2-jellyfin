@@ -4,6 +4,8 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-21
+
 ### Highlights
 
 - **Plain HTTP at home is safer:** Quick Connect stops when the Q2 leaves the server's home Wi-Fi, a sign-in redirected to another address never sends your password there, and the first question for an HTTP server says *Say Yes only at home*.
@@ -291,7 +293,8 @@ Plays and hearts
 - q2-subsonic's phone sign-in page (a port on the Wi-Fi with a QR code and PIN): the app opens no port; everything is typed on the Q2.
 - q2-subsonic's one-time `Navidrome/` folder migration: this app never touches another app's files.
 
-[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.2...HEAD
+[Unreleased]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.3...HEAD
+[0.8.3]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.2...q2-v0.8.3
 [0.8.2]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.1...q2-v0.8.2
 [0.8.1]: https://github.com/A4Link/q2-jellyfin/compare/q2-v0.8.0...q2-v0.8.1
 [0.8.0]: https://github.com/A4Link/q2-jellyfin/compare/v0.7.0...q2-v0.8.0
