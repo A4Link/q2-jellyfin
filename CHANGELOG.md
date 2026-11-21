@@ -4,75 +4,92 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Highlights
+
+- **Plain HTTP at home is safer:** Quick Connect stops when the Q2 leaves the server's home Wi-Fi, a sign-in redirected to another address never sends your password there, and the first question for an HTTP server says *Say Yes only at home*.
+- **Your card and your settings are safer:** a resumed download, or one whose size the server doesn't give, is never saved cut, mixed or past Space to Keep Free; a damaged `settings.json` no longer re-syncs every song at Original or turns Report Plays back on; files saved as "UTF-8 with BOM" by Windows editors are read.
+- **Browse statuses and Sync Now follow what the sync will do:** *On Q2* means nothing is left to fetch, replace or remove; otherwise the row says *Waiting to sync*. Under Entire Library, albums and artists now show a status too.
+- **Sync Entire Library includes songs with no album**, and a paused or stopped sync offers **Update Your Library**.
+- **The song you press is the song that plays**, and plays are lost or counted twice in fewer cases.
+- **Clearer messages** for a disabled account, a proxy in front of the server, Quick Connect turned off, and a sign-in file saved as UTF-16.
+
+### Security
+
+- **Quick Connect to a plain HTTP server stops when the Q2 leaves the server's home Wi-Fi:** it was checked only when the code was asked for, so a Q2 that moved to another Wi-Fi while the code waited kept sending the code's secret there, and could keep a sign-in from whatever answered. Now the wait ends with *Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there*, and nothing more is sent. A moment when the Wi-Fi can't be told yet only waits a little; an approval already given still signs in.
+- **A sign-in redirected to another server address no longer sends your password there:** the sign-in says *The server redirected to another address. Check the address and port*; type the new address instead. Browsing and downloads still follow a redirect, without your token.
+- **The first question for a plain HTTP server says *Say Yes only at home* too**, as the question on a new Wi-Fi does: its Yes also keeps the Wi-Fi the Q2 is on as the server's home network, so answering it at a friend's or a café's sends the sign-in on that Wi-Fi later.
+- **Report Plays to Server: Off stays off when `settings.json` on the card is damaged** (cut short by a power loss, say). A damaged file was read as the defaults, so your plays were sent to the server against your choice. While the file can't be read, no plays are sent.
+- **A server that pages for ever, or ignores where a page should start, no longer uses up the Q2's memory:** a list stops at 100,000 items, all its music libraries together, with *Library too large for the Q2* (on its first page when the server says the list is longer), a page that doesn't say where it starts is taken only as the first, and a page bigger than asked is cut to what was asked.
+
+### Changed
+
+- **Browse statuses and Sync Now come from what the sync will do:** the same rules the Sync page plans with, over the songs already fetched and those the card records. *On Q2* now means the sync fetches, replaces and removes nothing for the item. So an item or song row says *Waiting to sync*, with **Sync Now**, where it said *On Q2* or *X of Y songs on Q2*: while the sync still has songs to fetch for it (a sync stopped part way, a song added to a playlist on the server); when a song of it was removed on the server, or its original re-ripped (a new size), held or not, under Entire Library too; when the sync will remove or replace a song of it (its album taken out of Sync, say); and when another chosen item wants its songs at a better quality, held or not (that item says it too), also when that item is an artist just added. A song another chosen item keeps stays *On Q2*, also one just added that wasn't checked yet. After a restart, until Sync checks it, a partly synced item still says *X of Y songs on Q2*.
+- **A held item with nothing on the card says *Held*,** as Sync Jobs does, not *Waiting to sync*: a held item adds no songs. So does a held song's row. Once another chosen item adds its songs (its album, its artist), it says *Waiting to sync*, and *Held · Waiting to sync* in Sync Jobs.
+- **Sync Now shows only when the sync has something to do:** an item taken out of Sync whose songs another chosen item keeps no longer shows it, and an album, playlist or artist in Sync that was deleted on the server shows it once Sync is opened, as the sync removes its songs (Sync Jobs still says *No longer on the server*).
+- **Under Entire Library, albums and artists show a status:** *Included via Entire Library* while none of it is on the Q2 and Sync hasn't checked the library yet (after a restart, until Sync is opened); *On Q2* (or *X of Y songs on Q2*) for what is on the card; *Waiting to sync* once Sync has checked and songs are missing, a new album say. They showed none. Under a held Entire Library, an item's page and Add to Sync say *Entire Library is held: resume it in Sync Jobs*: they said *Included via Entire Library*, though a held library adds nothing new, so a new album never arrived.
+- **A song of a held album, or an album of a held artist, that isn't all on the Q2 is added on its own** when pressed. It said *Included via* the album or artist, though a held item adds nothing, so the song could never sync. An album whose songs are all on the Q2 is still *Included via* its held artist, and stays as it is.
+- **Sync Entire Library includes songs with no album** (loose tracks), in an *Unknown Album* folder under their artist. They used to be left out without a word.
+- **A `Jellyfin sign-in.txt` saved as UTF-16 ("Unicode")** says *Jellyfin sign-in.txt: save it as UTF-8, not UTF-16 ("Unicode")*, not *a line isn't server=, user=, password= or apikey=* though every line looked right. The file is still deleted, as before.
+- **An `http-allow.txt` with lines but no address the app can read** (a typo, or saved as UTF-16 "Unicode") says *http-allow.txt has no address the app can read*, not *Plain HTTP is turned off in http-allow.txt*. Plain HTTP stays off until it's fixed.
+- **README:** Tailscale's 100.64.0.0/10 gets the ordinary HTTP warning, as the home ranges do, because the Q2 reaches it through your own router. "Update and remove" says what to delete after a reinstall, so playlists don't come back as "<name> (Jellyfin)" and old songs don't stay on the card. Known limitations has a line on a cover missing for one draw.
+
 ### Fixed
 
-- **An `http-allow.txt` saved as "UTF-8 with BOM" keeps its first line:** some Windows editors put an invisible mark at the start of the file, and the address on the first line was skipped, so plain HTTP could turn off or a server you said Yes to was refused.
-- **A plain HTTP server typed with `:80` may redirect to itself without the port**, as nginx does; it was refused with *The server redirected to another address*.
-- **Edits to `http-allow.txt` take effect without restarting the app**, and a file that couldn't be read is read again when it can be. They used to wait until the app restarted.
-- **No file is left in `/tmp` on each Wi-Fi check while wpa_supplicant isn't running.**
-- **Music on a Windows network share (`\\nas\music`) is music:** a Windows Jellyfin server whose library is on a share listed its playlists as empty, and a synced song from it read as deleted on the server.
+Sign-in and the server
+
 - **A disabled or locked-out account, or one not allowed from this network,** says *The server refused this account (disabled, locked, or not allowed from here). Ask its admin* at sign-in, not *Wrong username or password*; at Quick Connect, not *Sign in again: Settings → Account → Sign Out*.
 - **A proxy in front of the server that refuses the server check** (basic auth, Authelia, Cloudflare Access) says *The server answered HTTP 401* (or 403), not *Sign in again: Settings → Account → Sign Out* before any sign-in.
 - **Quick Connect turned off on the server while its code is on screen** (or a proxy refusing the wait) says *Quick Connect is off on this server. Sign in with a password instead*, not *Sign in again: Settings → Account → Sign Out*.
-- **A server that pages for ever, or ignores where a page should start, no longer uses up the Q2's memory:** a list stops at 100,000 items, all its music libraries together, with *Library too large for the Q2* (on its first page when the server says the list is longer), a page that doesn't say where it starts is taken only as the first, and a page bigger than asked is cut to what was asked.
+- **Music on a Windows network share (`\\nas\music`) is music:** a Windows Jellyfin server whose library is on a share listed its playlists as empty, and a synced song from it read as deleted on the server.
+- **A server that sends its answer very slowly** (a byte every few seconds) no longer keeps a page on *Loading* for ever: a request to the server stops after 2 minutes (a page, a sign-in, a play report). Song and cover downloads keep their own rule (30 seconds with no data).
+- **A plain HTTP server typed with `:80` may redirect to itself without the port**, as nginx does; it was refused with *The server redirected to another address*.
+- **An `http-allow.txt` saved as "UTF-8 with BOM" keeps its first line:** some Windows editors put an invisible mark at the start of the file, and the address on the first line was skipped, so plain HTTP could turn off or a server you said Yes to was refused.
+- **Edits to `http-allow.txt` take effect without restarting the app**, and a file that couldn't be read is read again when it can be. They used to wait until the app restarted.
 - **Saying Yes to a server after `http-allow.txt` was deleted keeps the home ranges.** The file could be left holding only that server, so a bare address such as `192.168.1.10:8096` stopped meaning `http://`. A Yes while the file can't be read leaves it as it is and says *Couldn't write http-allow.txt*.
-- **Quick Connect to a plain HTTP server stops when the Q2 leaves the server's home Wi-Fi:** it was checked only when the code was asked for, so a Q2 that moved to another Wi-Fi while the code waited kept sending the code's secret there, and could keep a sign-in from whatever answered. Now the wait ends with *Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there*, and nothing more is sent. A moment when the Wi-Fi can't be told yet only waits a little; an approval already given still signs in.
-- **A sign-in redirected to another server address no longer sends your password there:** the sign-in says *The server redirected to another address. Check the address and port*; type the new address instead. Browsing and downloads still follow a redirect, without your token.
-- **A server that sends a list very slowly** (a byte every few seconds) no longer keeps a page on *Loading* for ever: a list request stops after 2 minutes. Downloads keep their own rule (30 seconds with no data).
+
+Sync
+
+- **A `settings.json` saved as "UTF-8 with BOM" keeps your settings,** and one that can't be read (cut short by a power loss, say) makes the Sync page say *Couldn't read the settings on the card: choose a Sync Quality*. Both used to read as Sync Quality Original, so the preview planned to replace every Opus song on the card, and **Sync Favourites** started that by itself. Until a Sync Quality is chosen (which writes the file again), any other setting's press says the same and changes nothing; it used to save the defaults over the file, losing your Sync Quality and Always Re-encode. Choosing one says *· other settings were reset*: the others go back to their defaults, as they couldn't be read.
+- **A `selection.json` saved as "UTF-8 with BOM" keeps what's in Sync.** It read as *Selection file is damaged*, and the only way on, **Reset Selection**, emptied Sync.
+- **An album put back in Sync while a sync that removes it runs (or is paused) stays on the card.** The sync is checked again, and the answer says *· checking the sync again* (or *· press Start Sync to continue* when paused). It used to delete the album at the end, and the next sync fetched it all again. A sync that removes nothing runs on: what you add or take out waits for the next sync.
 - **A resumed download is never saved as a cut or mixed-up song:** when the server's answer to a resume ends before the end of the song, or belongs to another version of the file (re-ripped or replaced since the download started), the part already on the card is dropped and the song is downloaded again from the start. A song whose size the server doesn't give is always downloaded again from the start, since the app can't tell which version its part holds, and when its download fails, its part is deleted rather than left taking room on the card. Before, it could be saved part one version, part another, or cut short.
 - **A song whose size the server doesn't give no longer takes the card below Space to Keep Free:** it fails with *the card is nearly full* once it would, and what it wrote is deleted. Songs taken out of Sync are still removed to make room, so the next sync brings it. Before, it was downloaded whole, and could fill the card.
 - **Under Entire Library, one song that keeps failing no longer stops removals for good:** a song that fails in a way that looks server-wide (a timeout, a cut download, a 502) holds back the deletions only when no song arrives after it. Before, it held them back on every sync, so songs and playlists removed on the server stayed on the card.
+- **A sync that pauses or stops early offers Update Your Library**, so the songs it fetched show up in the Q2's library without waiting for a later sync to finish. It stays a press: an update stops playback.
+- **A synced playlist's `.m3u` deleted from the card is written again** by the next sync. The preview used to say *Everything is up to date*.
+- **An album whose songs a proxy answers with "not found" (HTTP 404) fails the Sync preview** instead of listing its songs under Removed. Jellyfin itself never answers that way for an album's songs, so the 404 comes from a reverse proxy, for example while the server restarts.
+- **A long sync that pauses or stops by itself, with no button pressed for 30 minutes, no longer closes the app at that moment** in rare cases: its *Sync stopped* page and Failed Songs stay 30 minutes, as after a press.
+- **Details on a stopped sync opens when the error names two long folder paths** (a failed rename), even paths full of % signs, and its Error row ends with the reason (*read-only file system*); the press did nothing, or the reason was cut off.
+- **Last synced shows the date, not *today*, for a sync later than the Q2's clock** (the clock went back after the battery ran out).
+- **A size just under 1 GB reads *1.0 GB*,** not *1000 MB*.
+
+Playing and browsing
+
 - **The song you press is the song that plays**, also on a page left open for a while whose list changed on the server since (a playlist reordered, say). Another song at that place in the list used to play; a song no longer in the list says *The list has changed*.
 - **A title, artist or album with a control character in it (a damaged tag) no longer plays the wrong song from a list:** such a character cut Q2 Pod's queue short there, and another song played instead of the one pressed.
 - **A list's cover is never drawn with part of it missing** when a page is asked for again while its covers are still coming.
 - **Clear Playback Cache removes everything in the playback cache**, also half-downloaded, temporary and lyrics files an older version or a crash left there. They used to stay, and weren't counted in the size it shows.
-- **A `settings.json` saved as "UTF-8 with BOM" keeps your settings,** and one that can't be read (cut short by a power loss, say) makes the Sync page say *Couldn't read the settings on the card: choose a Sync Quality*. Both used to read as Sync Quality Original, so the preview planned to replace every Opus song on the card, and **Sync Favourites** started that by itself. Until a Sync Quality is chosen (which writes the file again), any other setting's press says the same and changes nothing; it used to save the defaults over the file, losing your Sync Quality and Always Re-encode.
-- **A size just under 1 GB reads *1.0 GB*,** not *1000 MB*.
-- **A `selection.json` saved as "UTF-8 with BOM" keeps what's in Sync.** It read as *Selection file is damaged*, and the only way on, **Reset Selection**, emptied Sync.
-- **An album whose songs a proxy answers with "not found" (HTTP 404) fails the Sync preview** instead of listing its songs under Removed. Jellyfin itself never answers that way for an album's songs, so the 404 comes from a reverse proxy, for example while the server restarts.
-- **A synced playlist's `.m3u` deleted from the card is written again** by the next sync. The preview used to say *Everything is up to date*.
-- **An album put back in Sync while a sync that removes it runs (or is paused) stays on the card.** The sync is checked again, and the answer says *· checking the sync again* (or *· press Start Sync to continue* when paused). It used to delete the album at the end, and the next sync fetched it all again. A sync that removes nothing runs on: what you add or take out waits for the next sync.
-- **Sync Entire Library includes songs with no album** (loose tracks), in an *Unknown Album* folder under their artist. They used to be left out without a word.
-- **A sync that pauses or stops early offers Update Your Library**, so the songs it fetched show up in the Q2's library without waiting for a later sync to finish. It stays a press: an update stops playback.
-- **Choosing a Sync Quality while `settings.json` can't be read says *· other settings were reset*:** the others go back to their defaults, as they couldn't be read.
+- **Going back to a search after the Server, Account or password page searches again** (Q2 Pod with `field`). The search text was taken as a server address, or a user name.
+- **Albums on Random no longer opens on an old error:** a fetch that failed after you left Albums is not shown at a visit more than 5 minutes later; the albums are fetched again.
+- **Previous page back to the first page of a long album, artist, playlist, Favourites or search shows Sync Now again**, as the page did when first opened.
+
+Settings
+
+- **A sort or Swipe Between Sections that can't be saved** (card full, or taken by USB storage) **says *Couldn't save the setting***, as every other setting does. A sort's press did nothing; Swipe said *Swipe off: close and reopen Jellyfin*, and reopening changed nothing.
+- **Settings shows no user under Account after Sign Out.** It kept showing the user signed out.
+- **Settings names the user under Account when it is the first page after the app restarted** (Back from Quality and Storage once the app had closed). The Account row was empty.
+- **With Swipe Between Sections on, Settings shows the notices after the app restarted** (*A favourite wasn't saved on the server*, the sign-in file's message). They showed nowhere until Jellyfin was reopened.
+- **After a crash the app is started again at least every minute:** the wait doubled from 5 s to 80 s, not to a minute.
+
+Plays and hearts
+
 - **Songs played from the card after Report Plays is turned on, or after signing in, reach the server** even if the app wasn't on Wi-Fi to send at that moment, or the Q2's clock wasn't set yet. They used to be skipped.
-- **Plays are no longer counted twice on the server** when the answer to a streamed song's start is lost (even when the app was opened partway through the song), when the app is closed or the Q2 turned off partway through sending a long backlog (at most the last batch, up to 20, can be counted again), or when a streamed song is 30 seconds or shorter. A streamed song played again more than a minute later, whose second start was lost, is still counted twice, as it should be.
-- **Report Plays to Server: Off stays off when `settings.json` on the card is damaged** (cut short by a power loss, say). A damaged file was read as the defaults, so your plays were sent to the server against your choice. While the file can't be read, no plays are sent.
+- **Fewer plays are counted twice on the server.** A play is no longer counted twice when the answer to a streamed song's start is lost (even when the app was opened partway through the song), or when a streamed song is 30 seconds or shorter. If the app is closed or the Q2 turned off while it sends a long backlog, at most the last 20 plays sent can be counted again (it could be the whole backlog). A song you really play twice is still counted twice.
 - **A full card no longer counts the waiting plays again at every send:** the app couldn't write down that they went, so each send sent them again. They now wait until there is room on the card, and go once.
 - **One song the server refuses with "forbidden" no longer holds back every later play and heart.** When the server refuses the whole account for a while (an access schedule, remote access turned off), the plays and hearts wait and go once it lets you in again.
 - **Signing out while plays are being read from the card doesn't pass them on to the next account**, and turning Report Plays off at that moment forgets them, as it should.
 - **A song that finishes syncing just as you press Play is counted once**, not never or twice.
-- **Swipe Between Sections says *Couldn't save the setting* when the card can't be written**, as every other setting does. It said *Swipe off: close and reopen Jellyfin*, and reopening changed nothing.
-- **After a crash the app is started again at least every minute:** the wait doubled from 5 s to 80 s, not to a minute.
-- **Previous page back to the first page of a long album, artist, playlist, Favourites or search shows Sync Now again**, as the page did when first opened.
-- **Settings shows no user under Account after Sign Out.** It kept showing the user signed out.
-- **Settings names the user under Account when it is the first page after the app restarted** (Back from Quality and Storage once the app had closed). The Account row was empty.
-- **A long sync that pauses or stops by itself, with no button pressed for 30 minutes, no longer closes the app at that moment** in rare cases: its *Sync stopped* page and Failed Songs stay 30 minutes, as after a press.
-- **Details on a stopped sync opens when the error names two long folder paths** (a failed rename), even paths full of % signs, and its Error row ends with the reason (*read-only file system*); the press did nothing, or the reason was cut off.
-- **Last synced shows the date, not *today*, for a sync later than the Q2's clock** (the clock went back after the battery ran out).
-- **With Swipe Between Sections on, Settings shows the notices after the app restarted** (*A favourite wasn't saved on the server*, the sign-in file's message). They showed nowhere until Jellyfin was reopened.
-
-### Changed
-
-- **A `Jellyfin sign-in.txt` saved as UTF-16 ("Unicode")** says *Jellyfin sign-in.txt: save it as UTF-8, not UTF-16 ("Unicode")*, not *a line isn't server=, user=, password= or apikey=* though every line looked right. The file is still deleted, as before.
-- **An item that lost a song on the server, or whose original was re-ripped (a new size), says *Waiting to sync*** with **Sync Now**, as the sync removes or replaces the song, held or not, under Entire Library too, and after a restart with a playlist or Favourites in Sync not checked yet. It said *On Q2*.
-- **Song rows say *Waiting to sync* while the sync will remove or replace the song** (its album taken out of Sync, say); a song another chosen item keeps stays *On Q2*, also one just added that wasn't checked yet. They said *On Q2*.
-- **A held item whose songs another chosen item wants at a better quality says *Waiting to sync*,** with **Sync Now**, and so does that item: the sync replaces those songs, also when that item is an artist just added. Both said *On Q2*.
-- **A held item with nothing on the card says *Held*,** as Sync Jobs does, not *Waiting to sync*: a held item adds no songs. So does a held song's row. Once another chosen item adds its songs (its album, its artist), it says *Waiting to sync*, and *Held · Waiting to sync* in Sync Jobs.
-- **A chosen item the sync still has songs to fetch for says *Waiting to sync*** with **Sync Now** (a sync stopped part way, a song added to a playlist on the server). It said *X of Y songs on Q2*; after a restart, until Sync checks it, it still does.
-- **An item taken out of Sync whose songs another chosen item keeps no longer shows Sync Now:** the sync has nothing to do for it.
-- **An album, playlist or artist in Sync that was deleted on the server shows Sync Now** once Sync is opened, as the sync removes its songs. Sync Jobs still says *No longer on the server*.
-- **Under Entire Library, albums and artists show a status:** *Included via Entire Library* while what is on the Q2 for it isn't known (after a restart, until Sync is opened), else *On Q2*, or *Waiting to sync* for a new album. They showed none.
-- **Under a held Entire Library, an item's page and Add to Sync say *Entire Library is held: resume it in Sync Jobs*.** They said *Included via Entire Library*, though a held library adds nothing new, so a new album never arrived.
-- **A song of a held album, or an album of a held artist, that isn't all on the Q2 is added on its own** when pressed. It said *Included via* the album or artist, though a held item adds nothing, so the song could never sync. An album whose songs are all on the Q2 is still *Included via* its held artist, and stays as it is.
-- **Going back to a search after the Server, Account or password page searches again** (Q2 Pod with `field`). The search text was taken as a server address, or a user name.
-- **A sort that can't be saved** (card full, or taken by USB storage) **says *Couldn't save the setting***. The press did nothing.
-- **Albums on Random no longer opens on an old error:** a fetch that failed after you left Albums is not shown at a visit more than 5 minutes later; the albums are fetched again.
-- **Browse statuses and Sync Now come from what the sync will do:** the same rules the Sync page plans with, over the songs already fetched and those the card records. *On Q2* means the sync fetches, replaces and removes nothing for the item.
-- **An `http-allow.txt` with lines but no address the app can read** (a typo, or saved as UTF-16 "Unicode") says *http-allow.txt has no address the app can read*, not *Plain HTTP is turned off in http-allow.txt*. Plain HTTP stays off until it's fixed.
-- **The first question for a plain HTTP server says *Say Yes only at home* too**, as the question on a new Wi-Fi does: its Yes also keeps the Wi-Fi the Q2 is on as the server's home network, so answering it at a friend's or a café's sends the sign-in on that Wi-Fi later.
-- **README:** Tailscale's 100.64.0.0/10 gets the ordinary HTTP warning, as the home ranges do, because the Q2 reaches it through your own router; the README said only the home ranges did.
-- **README:** "Update and remove" says what to delete after a reinstall, so playlists don't come back as "<name> (Jellyfin)" and old songs don't stay on the card.
+- **No file is left in `/tmp` on each Wi-Fi check while wpa_supplicant isn't running.**
 
 ## [0.8.2] - 2026-11-21
 
