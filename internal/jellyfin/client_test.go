@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1466,5 +1467,46 @@ func TestStatusMeaningPerRequest(t *testing.T) {
 		if got := strings.Join(on, " "); got != s.on {
 			t.Errorf("%s: %s on %q, want %q", s.path, s.kind, got, s.on)
 		}
+	}
+}
+
+// Plain http is taken only for a host's IPv4 address with its port (which ones, the app decides).
+func TestNewPlainHTTPAddressOnly(t *testing.T) {
+	for _, s := range []string{"http://10.0.0.5:8096", "http://172.32.0.1:8096", "http://192.168.111.111:8096"} {
+		if _, err := New(Creds{Server: s}, http.DefaultClient); err != nil {
+			t.Errorf("%s: %v", s, err)
+		}
+	}
+	for _, s := range []string{"http://192.168.1.10", "http://music.example:8096", "http://127.0.0.1:8096", "http://0.0.0.0:80", "http://239.1.1.1:80"} {
+		if _, err := New(Creds{Server: s}, http.DefaultClient); !errors.Is(err, ErrInsecure) {
+			t.Errorf("%s: %v", s, err)
+		}
+	}
+}
+
+// A plain http server may redirect only to itself over http (or anywhere over https); an https
+// server never to http.
+func TestRedirectPlainHTTP(t *testing.T) {
+	c, err := New(Creds{Server: "http://192.168.1.10:8096"}, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := &http.Request{URL: &url.URL{Scheme: "http", Host: "192.168.1.10:8096"}}
+	for to, ok := range map[string]bool{
+		"http://192.168.1.10:8096/x": true,
+		"https://music.example/x":    true,
+		"http://192.168.1.11:8096/x": false,
+		"http://192.168.1.10:8097/x": false,
+	} {
+		u, _ := url.Parse(to)
+		if err := c.hc.CheckRedirect(&http.Request{URL: u, Header: http.Header{}}, []*http.Request{from}); (err == nil) != ok {
+			t.Errorf("%s: %v", to, err)
+		}
+	}
+	s, _ := New(Creds{Server: "https://music.example"}, http.DefaultClient)
+	u, _ := url.Parse("http://music.example/x")
+	from = &http.Request{URL: &url.URL{Scheme: "https", Host: "music.example"}}
+	if err := s.hc.CheckRedirect(&http.Request{URL: u, Header: http.Header{}}, []*http.Request{from}); !errors.Is(err, ErrRedirect) {
+		t.Errorf("https to http: %v", err)
 	}
 }

@@ -26,6 +26,9 @@ type Caps struct {
 	// Now: a URL queue whose header holds now=1 is told what plays, in /tmp/q2-<id>.now (Q2 Pod,
 	// patch/addon.c now_poll, docs/librespot.md), so every streamed song can be reported.
 	Now bool
+	// FieldText: a field row's position is the text its box opens with, to edit rather than type
+	// again (Q2 Pod, patch/addon.c search_box). Without it position is a held Play/Pause's op.
+	FieldText bool
 }
 
 // ReadCaps reads the firmware capabilities from path. A missing file gives all false.
@@ -51,6 +54,8 @@ func ReadCaps(path string) Caps {
 			caps.Fav = true
 		case "now":
 			caps.Now = true
+		case "fieldtext":
+			caps.FieldText = true
 		}
 	}
 	return caps

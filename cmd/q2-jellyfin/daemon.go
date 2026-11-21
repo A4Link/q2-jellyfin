@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -114,8 +115,15 @@ type daemon struct {
 	stream         *streamer
 	newClient      func(jellyfin.Creds) (*jellyfin.Client, error)
 	free           func(path string) int64
-	localIP        func() string // the Q2's Wi-Fi address, "" without Wi-Fi (q2.LocalIP)
-	wifiOff        func() bool   // the user's Wi-Fi switch is off (q2.WiFiSwitchedOff)
+	localIP        func() string     // the Q2's Wi-Fi address, "" without Wi-Fi (q2.LocalIP)
+	netNow         func() q2.Network // the network the Q2 is on (q2.CurrentNetwork), for a plain http server (homenet.go)
+	netMu          sync.Mutex
+	net            q2.Network // netNow's last read, at netAt
+	netAt          time.Time
+	netRefused     bool // the last secret's request was refused (homenet.go logRefusal)
+	allowMu        sync.Mutex
+	allow          *allowList  // http-allow.txt as last read, nil to read it again (httpallow.go)
+	wifiOff        func() bool // the user's Wi-Fi switch is off (q2.WiFiSwitchedOff)
 	answerIn       time.Duration
 	selMu          sync.Mutex // held from loading selection.json to saving it, so no edit is lost
 
@@ -174,14 +182,18 @@ func newDaemon(dir, card, tmp string) *daemon {
 	lg := applog.Open(filepath.Join(dir, "log.txt"), 1<<20)
 	creds.Logf = lg.Printf // why a saved sign-in can't be read, on the card
 	d := &daemon{dir: dir, card: card, tmp: tmp, log: lg,
-		caps:  fw.ReadCaps(filepath.Join(tmp, "q2-addon.caps")),
-		state: &stateKeys{st: &q2.State{Path: filepath.Join(tmp, "q2-jellyfin.state")}},
-		newClient: func(c jellyfin.Creds) (*jellyfin.Client, error) {
-			return jellyfin.New(c, tlsroots.Client(15*time.Second))
-		},
-		free: freeBytes, localIP: q2.LocalIP, wifiOff: q2.WiFiSwitchedOff, answerIn: answerIn, lyricsTried: map[string]bool{},
+		caps:   fw.ReadCaps(filepath.Join(tmp, "q2-addon.caps")),
+		state:  &stateKeys{st: &q2.State{Path: filepath.Join(tmp, "q2-jellyfin.state")}},
+		netNow: q2.CurrentNetwork,
+		free:   freeBytes, localIP: q2.LocalIP, wifiOff: q2.WiFiSwitchedOff, answerIn: answerIn, lyricsTried: map[string]bool{},
 		lastReq: time.Now(), resolved: map[string][]jellyfin.Song{}, artistAlbums: map[string][]jellyfin.Album{}}
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) {
+		return jellyfin.New(c, d.homeOnly(c, tlsroots.Client(15*time.Second))) // homenet.go
+	}
 	d.rep.box = outbox{path: filepath.Join(dir, "outbox.json"), logf: lg.Printf}
+	// Q2 Pod keeps a level's allow:/deny:/retry: across an app restart: an earlier run's never
+	// matches this run's (httpask.go). Not from the clock: an unset Q2's repeats after a boot.
+	d.login.askN, d.login.triedN = rand.IntN(1<<30), rand.IntN(1<<30)
 	d.loadServer()
 	d.runner = syncer.New(card, src{d}, lg)
 	d.runner.OnDone = d.syncDone

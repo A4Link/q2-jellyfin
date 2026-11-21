@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
+	"github.com/A4Link/q2-jellyfin/internal/q2"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
 	"github.com/A4Link/q2-jellyfin/internal/tlsroots"
 )
@@ -129,7 +133,7 @@ func TestLoginRootOrder(t *testing.T) {
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("root %q", got)
 	}
-	if row := r.Rows[0]; row.Kind != "list" || row.URI != "server" || row.Subtitle != "127.0.0.1" {
+	if row := r.Rows[0]; row.Kind != "list" || row.URI != "server" || row.Subtitle != d.loginServer() { // the full address
 		t.Fatalf("Change Server %+v", row)
 	}
 	if b, _ := os.ReadFile(filepath.Join(d.dir, serverFile)); !strings.HasPrefix(string(b), "https://") {
@@ -377,7 +381,7 @@ func TestServerTypedOnQ2(t *testing.T) {
 	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, srv.Client()) }
 	r := d.do("menu")
 	if row := r.Rows[len(r.Rows)-1]; len(r.Rows) != 2 || row.Kind != "search" || row.Title != "Type Your Server Address" ||
-		row.Subtitle != "https:// is added for you, e.g. music.example.com" {
+		row.Subtitle != "e.g. music.example.com or 192.168.1.10:8096" {
 		t.Fatalf("root %+v", r.Rows)
 	}
 	host := strings.TrimPrefix(srv.URL, "https://")
@@ -387,7 +391,7 @@ func TestServerTypedOnQ2(t *testing.T) {
 	if got := strings.Join(titles(r), "|"); got != want {
 		t.Fatalf("%q", got)
 	}
-	if row := r.Rows[0]; row.Kind != "list" || row.URI != "server" || row.Subtitle != "127.0.0.1" {
+	if row := r.Rows[0]; row.Kind != "list" || row.URI != "server" || row.Subtitle != d.loginServer() { // the full address
 		t.Fatalf("Change Server %+v", row)
 	}
 	if d.loginServer() != srv.URL {
@@ -470,6 +474,23 @@ func TestChangeServerFailKeepsDateURL(t *testing.T) {
 	pressSignOut(d)
 	if r := d.do("menu"); r.Rows[len(r.Rows)-1].Subtitle != serverHint {
 		t.Fatalf("stale message %+v", r.Rows)
+	}
+}
+
+// A plain server's check never moves the clock's fallback: a question answered No leaves it where
+// it was (tlsroots takes a Date over https only).
+func TestPlainHTTPCheckKeepsDateURL(t *testing.T) {
+	t.Cleanup(func() { tlsroots.SetDateURL("") })
+	d := privateHTTPDaemon(t, &authServer{})
+	tlsroots.SetDateURL("https://music.example")
+	d.do("menu")
+	r := d.do("search", "192.168.111.111:8096") // it passed the check: the question waits
+	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" {
+		t.Fatalf("%q", titles(r))
+	}
+	d.do("menu", r.Rows[3].Context) // No
+	if tlsroots.DateURL() != "https://music.example" {
+		t.Fatalf("date URL %q", tlsroots.DateURL())
 	}
 }
 
@@ -953,9 +974,9 @@ func TestSignedInClearsForm(t *testing.T) {
 	}
 }
 
-// With field rows, the server's address is a field row on the first page and on the Server page:
-// an address that works shows the page as it now stands; one that doesn't is Q2 Pod's error page
-// (the reason, Retry and Cancel).
+// With field rows, the server's address is a field row on the first page, and signed out the
+// sign-in page holds it, the Server page being that page too: an address that works shows the
+// sign-in page; one that isn't right says why, with the Server Address: box to type it again.
 func TestServerField(t *testing.T) {
 	a := &authServer{}
 	srv := httptest.NewTLSServer(a)
@@ -967,22 +988,558 @@ func TestServerField(t *testing.T) {
 		row.Title != "Server Address:" || row.Subtitle != serverHint {
 		t.Fatalf("root %+v", r.Rows)
 	}
-	if r := d.do("setserver", "menu", "http://music.example"); r.Status == "" || r.Status == q2spot.OK ||
-		r.Message != "HTTPS is required. Use an https:// address" {
+	if r := d.do("setserver", "menu", "http://music.example"); r.Rows[0].Title != "HTTPS is required. Use an https:// address" ||
+		r.Rows[1].Kind != "field" || r.Rows[1].Title != "Server Address:" || r.Rows[1].Position != "" {
 		t.Fatalf("%+v", r)
 	}
 	r = d.do("setserver", "menu", strings.TrimPrefix(srv.URL, "https://"))
-	if got := strings.Join(titles(r), "|"); got != "Change Server|Sign In with Quick Connect|Sign In with Password" {
+	if got := strings.Join(titles(r), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password" {
 		t.Fatalf("%q", got)
 	}
 	r = d.do("server")
-	if row := r.Rows[0]; row.Kind != "field" || row.URI != "setserver" || row.Context != "server" || row.Subtitle != srv.URL {
+	if row := r.Rows[0]; row.Kind != "field" || row.URI != "setserver" || row.Subtitle != srv.URL || len(r.Rows) != 3 {
 		t.Fatalf("Server page %+v", r.Rows)
 	}
-	if r := d.do("setserver", "server", "http://elsewhere.example"); r.Message != "HTTPS is required. Use an https:// address" {
+	if r := d.do("setserver", "server", "http://elsewhere.example"); r.Rows[0].Title != "HTTPS is required. Use an https:// address" ||
+		r.Rows[1].Kind != "field" || r.Rows[1].Title != "Server Address:" || r.Rows[1].Position != "" {
 		t.Fatalf("%+v", r)
 	}
 	if r := d.do("setserver", "server", srv.URL); r.Rows[0].Kind != "field" || r.Rows[0].Subtitle != srv.URL {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A private network's IP and port, typed bare, is kept as plain http:// and is checked, signed in
+// to and used as any server; every page that sends the password or uses the sign-in warns it isn't
+// encrypted. The test server is reached at a private address by a dialer that connects to it.
+func TestPrivateHTTPServer(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.do("menu")
+	r := allowPlain(t, d, "192.168.111.111:8096")
+	want := "Change Server|Sign In with Quick Connect|Sign In with Password|Warning: HTTP, not encrypted"
+	if got := strings.Join(titles(r), "|"); got != want {
+		t.Fatalf("%q", got)
+	}
+	if d.loginServer() != "http://192.168.111.111:8096" {
+		t.Fatalf("kept %q", d.loginServer())
+	}
+	d.do("pwlogin")
+	r = d.do("search", "u")
+	if _, ok := find(r, "Warning: HTTP, not encrypted"); !ok {
+		t.Fatalf("password page %q", titles(r))
+	}
+	loginSuccessPage(t, d.do("search", typedPassword))
+	if c, ok := creds.Load(d.dir); !ok || c.Token != "tok" {
+		t.Fatalf("%+v", c)
+	}
+	if _, ok := find(d.do("account"), "Warning: HTTP, not encrypted"); !ok {
+		t.Fatal("Account has no warning")
+	}
+}
+
+// The password page (field cap) says HTTP and warns for a plain server, and says HTTPS otherwise.
+func TestPasswordFormPlainHTTP(t *testing.T) {
+	d, _ := fieldDaemon(t)
+	if _, ok := find(d.do("pwlogin"), "Warning: HTTP, not encrypted"); ok {
+		t.Fatal("warned for an https server")
+	}
+	d.login.server = "http://10.1.2.3:8096"
+	r := d.do("pwlogin")
+	if _, ok := find(r, "Your password goes only to 10.1.2.3, over HTTP"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+	if _, ok := find(r, "Warning: HTTP, not encrypted"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+}
+
+// privateHTTPDaemon is a signed-out daemon whose clients reach h over plain http at any address:
+// every connection goes to h's test server, so a private address can stand for it. Its clients
+// check the network as the app's do (homeOnly); the Q2 is on homeNet.
+func privateHTTPDaemon(t *testing.T, h http.Handler) *tdaemon {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", srv.Listener.Addr().String())
+	}}}
+	d := newTestDaemon(t, &nav{}, "", false)
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, d.homeOnly(c, hc)) }
+	d.netNow = func() q2.Network { return homeNet }
+	return d
+}
+
+var homeNet = q2.Network{SSID: "HomeNet", Gateway: "aa:bb:cc:dd:ee:ff"}
+
+// A plain server's redirect to another address is refused with its own message, not taken for
+// the address check's "HTTPS is required" (a wrong port answered by another service did this).
+func TestPrivateHTTPRedirectRefused(t *testing.T) {
+	d := privateHTTPDaemon(t, http.RedirectHandler("http://192.168.1.99:8096/web/", http.StatusFound))
+	d.do("menu")
+	r := d.do("search", "192.168.111.111:8096")
+	if r.Rows[0].Title != "The server redirected to another address. Check the address and port" {
+		t.Fatalf("%q", titles(r))
+	}
+}
+
+// The password page that asks for the user name first (no field cap) says HTTP for a plain server.
+func TestPasswordTypedPlainHTTP(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	if _, ok := find(d.do("pwlogin"), "Your password goes only to 192.168.111.111, over HTTP"); !ok {
+		t.Fatalf("%q", titles(d.do("pwlogin")))
+	}
+}
+
+// An https server's client is never wrapped, nor a plain one's without a secret.
+func TestHomeOnlyScope(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	hc := &http.Client{}
+	if d.homeOnly(jellyfin.Creds{Server: "https://music.example", Token: "tok"}, hc) != hc ||
+		d.homeOnly(jellyfin.Creds{Server: "http://192.168.1.10:8096"}, hc) != hc {
+		t.Fatal("wrapped")
+	}
+	if d.homeOnly(jellyfin.Creds{Server: "http://192.168.1.10:8096", Password: "p"}, hc) == hc {
+		t.Fatal("a password not checked")
+	}
+}
+
+// allowPlain types addr in the T9 box (signed out), answers Yes on the plain http question that
+// comes in the page's place (Q2 Pod asks the page again with the Yes row's context last), and
+// returns that answer's page.
+func allowPlain(t *testing.T, d *tdaemon, addr string) q2spot.Reply {
+	t.Helper()
+	r := d.do("search", addr)
+	yes, ok := find(r, "Yes, allow HTTP")
+	if !ok {
+		if yes, ok = find(r, "Yes, this is my home Wi-Fi"); !ok {
+			t.Fatalf("no question: %q", titles(r))
+		}
+	}
+	if yes.Kind != "page" || !strings.HasPrefix(yes.Context, "allow:") {
+		t.Fatalf("Yes %+v", yes)
+	}
+	return d.do("search", addr, yes.Context)
+}
+
+// U54: a bare IP and port in a range of the allow list means http://; outside it, https://. An
+// http:// typed in full may be any IPv4 address and port, never a name, loopback or an odd
+// spelling. An allow list with no address turns plain http off.
+func TestServerAddressPlainHTTP(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	for typed, want := range map[string]string{
+		"192.168.111.111:8096":        "http://192.168.111.111:8096",
+		"10.0.0.5:8096":               "http://10.0.0.5:8096",
+		"192.168.1.10:30013":          "http://192.168.1.10:30013", // any port: a range covers them all
+		"172.31.255.255:8096":         "http://172.31.255.255:8096",
+		"192.168.1.10:8096/jellyfin":  "http://192.168.1.10:8096/jellyfin",
+		"http://192.168.1.10:8096/jf": "http://192.168.1.10:8096/jf",
+		"http://172.32.0.1:8096":      "http://172.32.0.1:8096", // in full: anywhere, asked first
+		"https://192.168.1.10:8920":   "https://192.168.1.10:8920",
+		"8.8.8.8":                     "https://8.8.8.8",         // no port, outside the ranges: https as ever
+		"172.32.0.1:8096":             "https://172.32.0.1:8096", // bare, outside the ranges
+		"100.100.1.2:8096":            "https://100.100.1.2:8096",
+		"music.example:8096":          "https://music.example:8096",
+	} {
+		if got, err := d.serverAddress(typed); err != nil || got != want {
+			t.Errorf("%q: %q, %v", typed, got, err)
+		}
+	}
+	for _, typed := range []string{"http://192.168.1.10", "192.168.1.10", "192.168.1.10/jellyfin"} { // r2 #3
+		if _, err := d.serverAddress(typed); err == nil || err.Error() != "Add the port, e.g. 192.168.1.10:8096" {
+			t.Errorf("%q: %v", typed, err)
+		}
+	}
+	for _, typed := range []string{":8096", "https://:8096"} { // no host name: not the Q2 itself
+		if _, err := d.serverAddress(typed); err == nil || err.Error() != "That isn't a server address" {
+			t.Errorf("%q: %v", typed, err)
+		}
+	}
+	for _, typed := range []string{"http://music.example:8096", "http://192.168.001.010:8096",
+		"http://[::ffff:192.168.1.1]:8096", "http://localhost:8096", "http://127.0.0.1:8096", "http://0.0.0.0:8096",
+		"http://224.0.0.1:8096", "http://255.255.255.255:8096"} {
+		if _, err := d.serverAddress(typed); err == nil || err.Error() != "HTTPS is required. Use an https:// address" {
+			t.Errorf("%q: %v", typed, err)
+		}
+	}
+	if _, err := d.serverAddress("http://u:p@192.168.1.10:8096"); err == nil || err.Error() != "Leave the user name and password out of the address" {
+		t.Errorf("user:password@ %v", err)
+	}
+	// edited on a computer: Tailscale's range added; then no address at all: plain http off
+	os.WriteFile(filepath.Join(d.dir, allowFile), []byte("# mine\n100.64.0.0/10\n"), 0o644)
+	d.allow = nil
+	if got, _ := d.serverAddress("100.100.1.2:8096"); got != "http://100.100.1.2:8096" {
+		t.Errorf("Tailscale: %q", got)
+	}
+	if got, _ := d.serverAddress("192.168.1.10:8096"); got != "https://192.168.1.10:8096" {
+		t.Errorf("not listed: %q", got)
+	}
+	os.WriteFile(filepath.Join(d.dir, allowFile), []byte("# nothing\n"), 0o644)
+	d.allow = nil
+	if _, err := d.serverAddress("http://192.168.1.10:8096"); err == nil || err.Error() != "Plain HTTP is turned off in http-allow.txt" {
+		t.Errorf("off: %v", err)
+	}
+}
+
+// U54: the allow list is written with the defaults when missing, and again when deleted.
+func TestAllowListDefaults(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	p := filepath.Join(d.dir, allowFile)
+	os.Remove(p)
+	d.allow = nil
+	a := d.allowList()
+	b, _ := os.ReadFile(p)
+	if string(b) != allowDefaults || len(a.ranges) != 3 || len(a.servers) != 0 || a.off() {
+		t.Fatalf("%q %+v", b, a)
+	}
+}
+
+// U54: each new plain server is asked about once: served over HTTP, the risk, Yes or No. No keeps
+// nothing and adds nothing; Yes adds its IP and port to the allow list and keeps it, and typed
+// again it isn't asked. A public address gets the stronger warning. An answer kept by an earlier
+// page (Q2 Pod keeps a level's arguments) never answers a later question.
+func TestPlainHTTPAsked(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.do("menu")
+	r := d.do("search", "192.168.111.111:8096")
+	if got := strings.Join(titles(r), "|"); got != "192.168.111.111:8096 is served over HTTP|Not encrypted|Yes, allow HTTP|No" {
+		t.Fatalf("%q", got)
+	}
+	if d.loginServer() != "" {
+		t.Fatal("kept before Yes")
+	}
+	no := r.Rows[3] // find matches by prefix: "Not encrypted" starts with "No"
+	if no.URI != "deny" {
+		t.Fatalf("No %+v", no)
+	}
+	r = d.do("search", "192.168.111.111:8096", no.Context)
+	if r.Rows[0].Title != "Not used: 192.168.111.111" || d.loginServer() != "" || d.allowed("http://192.168.111.111:8096") {
+		t.Fatalf("%q", titles(r))
+	}
+	d.do("search", "192.168.111.111:8096")
+	r = d.do("search", "192.168.111.111:8096", no.Context) // the first question's No: asked anew
+	yes, ok := find(r, "Yes, allow HTTP")
+	if !ok || d.loginServer() != "" {
+		t.Fatalf("the first question's No answered the second: %q", titles(r))
+	}
+	r = d.do("search", "192.168.111.111:8096", yes.Context)
+	if r.Rows[0].Title != "Change Server" || d.loginServer() != "http://192.168.111.111:8096" {
+		t.Fatalf("%q, kept %q", titles(r), d.loginServer())
+	}
+	if b, _ := os.ReadFile(filepath.Join(d.dir, allowFile)); !strings.HasSuffix(string(b), "\n192.168.111.111:8096\n") {
+		t.Fatalf("allow list %q", b)
+	}
+	if r := d.do("search", "192.168.111.111:8096", yes.Context); r.Rows[0].Title == "Not used: 192.168.111.111" {
+		t.Fatal("answered twice")
+	}
+	if r := d.do("search", "192.168.111.111:8096"); r.Rows[0].Title != "Change Server" { // said Yes to: not asked
+		t.Fatalf("asked again %q", titles(r))
+	}
+	r = d.do("search", "http://203.0.113.9:8096")
+	if r.Rows[1].Title != "On the internet, NOT encrypted" {
+		t.Fatalf("public %q", titles(r))
+	}
+}
+
+// Review 2026-11-20 #2: the check fails closed: no network file (or one for another server, or a
+// broken one) sends nothing; an address isn't kept while the gateway's MAC can't be read (#5),
+// and a Wi-Fi name alone never matches. #3: a kept part that can't be read now is "can't reach",
+// not another network. #4: Quick Connect is refused on another network. #6 and #7: typed again
+// on a new Wi-Fi of the same home, signed in, the Q2 asks first and keeps both, signed in still.
+func TestHomeNetworkOnly(t *testing.T) {
+	a := &authServer{}
+	d := privateHTTPDaemon(t, a)
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	d.do("pwlogin")
+	d.do("search", "u")
+	loginSuccessPage(t, d.do("search", typedPassword))
+	ctx := context.Background()
+	if err := d.client().Logout(ctx); err != nil {
+		t.Fatal(err)
+	}
+	at := func(n q2.Network) {
+		d.netNow = func() q2.Network { return n }
+		d.netAt = time.Time{}
+	}
+	hotel := q2.Network{SSID: "HomeNet", Gateway: "11:22:33:44:55:66"}
+	at(hotel)
+	before := a.requests.Load()
+	err := d.client().Logout(ctx)
+	if !errors.Is(err, jellyfin.ErrOtherNetwork) || a.requests.Load() != before {
+		t.Fatalf("%v, %d requests sent", err, a.requests.Load()-before)
+	}
+	if m := jellyfin.Message(err, "x"); m != "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there" {
+		t.Fatal(m)
+	}
+	at(q2.Network{SSID: "HomeNet"}) // the gateway's ARP answer late: not another network
+	if err := d.client().Logout(ctx); errors.Is(err, jellyfin.ErrOtherNetwork) || err == nil {
+		t.Fatalf("unsure: %v", err)
+	}
+	if !errors.Is(d.homeOnly(jellyfin.Creds{Server: "http://192.168.111.111:8096", Token: "t"}, &http.Client{}).Transport.(homeGate).ok(), errNetworkUnsure) {
+		t.Fatal("unsure isn't errNetworkUnsure")
+	}
+	// #6: the same home's 5 GHz name, typed again signed in: asked, kept, both work, still signed in
+	fiveG := q2.Network{SSID: "HomeNet-5G", Gateway: "aa:bb:cc:dd:ee:ff"}
+	at(fiveG)
+	r := d.do("server")
+	r = d.do("search", "192.168.111.111:8096")
+	yes, ok := find(r, "Yes, this is my home Wi-Fi")
+	if !ok || r.Rows[0].Title != "This Wi-Fi isn't saved for 192.168.111.111:8096" {
+		t.Fatalf("%q", titles(r))
+	}
+	d.do("search", "192.168.111.111:8096", yes.Context)
+	if d.client() == nil {
+		t.Fatal("signed out")
+	}
+	for _, n := range []q2.Network{homeNet, fiveG} {
+		at(n)
+		if err := d.client().Logout(ctx); err != nil {
+			t.Fatalf("%+v: %v", n, err)
+		}
+	}
+	// #4: Quick Connect, signed out: refused at the hotel, a code at home (the record still there)
+	d.signOut()
+	d.do("menu")
+	at(hotel)
+	if r := d.do("qc"); r.Message != "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there" {
+		t.Fatalf("qc at the hotel %+v", r)
+	}
+	at(homeNet)
+	r = d.do("qc")
+	d.do("qccancel") // before any Fatal: its poll would outlive the test
+	if r.Status != "" && r.Status != q2spot.OK || !strings.Contains(r.Message, "123456") {
+		t.Fatalf("qc at home %+v", r)
+	}
+	// #2: no network file sends nothing, even on a network that was home
+	os.Remove(filepath.Join(d.dir, networkFile))
+	if err := d.onHomeNetwork("http://192.168.111.111:8096"); !errors.Is(err, jellyfin.ErrOtherNetwork) {
+		t.Fatalf("no file: %v", err)
+	}
+}
+
+// Review 2026-11-20 #5: an address isn't kept while the gateway's MAC can't be read: the Wi-Fi's
+// name alone is anyone's to copy. A kept Wi-Fi name alone matches nothing anyway.
+func TestHomeNetworkNeedsGateway(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.netNow = func() q2.Network { return q2.Network{SSID: "HomeNet"} }
+	d.do("menu")
+	r := d.do("search", "192.168.111.111:8096")
+	if r.Rows[0].Title != "Can't check this Wi-Fi yet. Try again in a moment" || d.loginServer() != "" {
+		t.Fatalf("%q, kept %q", titles(r), d.loginServer())
+	}
+}
+
+// U54: taken off the allow list on a computer, a server said Yes to gets no secret.
+func TestHomeNetworkNotAllowed(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	os.WriteFile(filepath.Join(d.dir, allowFile), []byte(allowDefaults), 0o644)
+	d.allow = nil
+	err := d.onHomeNetwork("http://192.168.111.111:8096")
+	if !errors.Is(err, jellyfin.ErrNotAllowed) || jellyfin.Message(err, "x") != "Not on http-allow.txt: nothing sent" {
+		t.Fatal(err)
+	}
+}
+
+// A typed address whose server fails its check (field rows) gets the app's own page, not Q2 Pod's
+// error page, whose Retry never sends the text again: Try Again (a page row) asks for the page
+// again with retryArg, which checks the same address again; once it works the page is the sign-in
+// page, and the page asked again with retryArg after that (Q2 Pod keeps it) is the page as usual.
+func TestServerFieldTryAgain(t *testing.T) {
+	var down atomic.Bool
+	down.Store(true)
+	a := &authServer{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "", http.StatusServiceUnavailable)
+			return
+		}
+		a.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	d := newTestDaemon(t, &nav{}, "field", false)
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, srv.Client()) }
+	d.do("menu")
+	r := d.do("setserver", "menu", srv.URL)
+	if got := strings.Join(titles(r), "|"); r.Status != "" && r.Status != q2spot.OK ||
+		got != "The server answered HTTP 503|Try Again|Server Address:" {
+		t.Fatalf("%+v", r)
+	}
+	row := r.Rows[1]
+	if row.Kind != "page" || !strings.HasPrefix(row.Context, retryArg+":") || row.Subtitle != srv.URL {
+		t.Fatalf("Try Again %+v", row)
+	}
+	r = d.do("menu", row.Context) // still down: the page again, with a Try Again of its own
+	if r.Rows[0].Title != "The server answered HTTP 503" || r.Rows[1].Context == row.Context {
+		t.Fatalf("%+v", r.Rows)
+	}
+	again := r.Rows[1].Context
+	if r := d.do("menu", row.Context); r.Rows[0].Title == "The server answered HTTP 503" { // the older page's: none
+		t.Fatalf("an older Try Again checked: %q", titles(r))
+	}
+	down.Store(false)
+	r = d.do("menu", again)
+	if got := strings.Join(titles(r), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password" || d.loginServer() != srv.URL {
+		t.Fatalf("%q, kept %q", got, d.loginServer())
+	}
+	if got := strings.Join(titles(d.do("menu", again)), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password" {
+		t.Fatalf("asked again %q", got)
+	}
+}
+
+// Review 2026-11-20 #1: a Try Again kept by the first page (Q2 Pod keeps a level's arguments)
+// never checks an address that failed later on another page, nor once signed in: Back there is the
+// page as usual, with no check and no sign-out. #9: after "That isn't a server address" (with the
+// box to type it again), the old Try Again asks for the page as it stands, never the address.
+func TestServerFieldOldTryAgain(t *testing.T) {
+	d, _ := fieldDaemon(t)
+	good := d.loginServer()
+	bad := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(bad.Close)
+	d.do("menu")
+	r := d.do("setserver", "menu", bad.URL)
+	first := r.Rows[1].Context
+	if r := d.do("setserver", "menu", "not an address"); r.Rows[0].Title != "That isn't a server address" || r.Rows[1].Kind != "field" {
+		t.Fatalf("%+v", r)
+	}
+	if r := d.do("menu", first); r.Rows[0].Title == "The server answered HTTP 503" { // #9: Retry
+		t.Fatalf("Retry checked the old address: %q", titles(r))
+	}
+	r = d.do("setserver", "menu", bad.URL)
+	d.do("pwfield", "user", "u")
+	d.do("pwfield", "password", typedPassword)
+	if r := d.do("pwsignin"); r.Message != "Signed in as u" {
+		t.Fatalf("%+v", r)
+	}
+	later := d.do("setserver", "server", bad.URL) // fails on the Server page, signed in
+	if later.Rows[0].Title != "The server answered HTTP 503" {
+		t.Fatalf("%q", titles(later))
+	}
+	if r := d.do("menu", first); r.Message != "sections" && r.Message != "refresh" || d.client() == nil || d.loginServer() != good {
+		t.Fatalf("Back to the first page checked or signed out: %+v", r)
+	}
+}
+
+// Review 2026-11-20 #8: after the app starts again (the sign-in loaded from the card), a new
+// address that signs out still fills in the last user name.
+func TestPrefillAfterRestart(t *testing.T) {
+	d, _ := fieldDaemon(t)
+	d.do("menu")
+	d.do("pwfield", "user", "u")
+	d.do("pwfield", "password", typedPassword)
+	d.do("pwsignin")
+	d.login.user = "" // as after a restart: only the sign-in on the card knows it
+	d.mu.Lock()
+	d.cl = nil
+	d.mu.Unlock()
+	d.client()
+	other := httptest.NewTLSServer(&authServer{})
+	t.Cleanup(other.Close)
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, other.Client()) }
+	d.do("setserver", "server", other.URL)
+	pwForm(t, d.do("pwlogin"), "u", typeHint)
+}
+
+// Signed in, a new address on the Server page that works signs out and shows the sign-in page in
+// its place, the password page's Username: already the last user's.
+func TestServerFieldSignedInLandsOnSignIn(t *testing.T) {
+	d, _ := fieldDaemon(t)
+	d.do("menu")
+	d.do("pwfield", "user", "u")
+	d.do("pwfield", "password", typedPassword)
+	if r := d.do("pwsignin"); r.Message != "Signed in as u" {
+		t.Fatalf("%+v", r)
+	}
+	other := httptest.NewTLSServer(&authServer{})
+	t.Cleanup(other.Close)
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, other.Client()) }
+	r := d.do("setserver", "server", other.URL)
+	if got := strings.Join(titles(r), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password" || d.client() != nil {
+		t.Fatalf("%q", got)
+	}
+	pwForm(t, d.do("pwlogin"), "u", typeHint)
+}
+
+// U50: with Q2 Pod's fieldtext, every Server Address: row with an address opens its box holding it
+// (the row's position), to edit; without it, position stays empty (it would be a held Play/Pause
+// op there), and the password rows never carry one.
+func TestServerFieldOpensWithAddress(t *testing.T) {
+	d, _ := fieldDaemon(t)
+	d.caps.FieldText = true
+	r := d.do("menu")
+	if row := r.Rows[0]; row.Title != "Server Address:" || row.Position != d.loginServer() || row.Position == "" {
+		t.Fatalf("sign-in list %+v", row)
+	}
+	for _, row := range d.do("pwlogin").Rows {
+		if row.Position != "" {
+			t.Fatalf("password page %+v", row)
+		}
+	}
+	d.do("menu")
+	d.do("pwfield", "user", "u")
+	d.do("pwfield", "password", typedPassword)
+	d.do("pwsignin")
+	if row := d.do("server").Rows[0]; row.Kind != "field" || row.Position != d.loginServer() {
+		t.Fatalf("Server page %+v", row)
+	}
+	d.caps.FieldText = false
+	if row := d.do("server").Rows[0]; row.Position != "" {
+		t.Fatalf("without fieldtext %+v", row)
+	}
+}
+
+// A failed address's page opens its box holding the address that failed.
+func TestServerFieldFailedOpensWithIt(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	d := newTestDaemon(t, &nav{}, "field fieldtext", false)
+	d.newClient = func(c jellyfin.Creds) (*jellyfin.Client, error) { return jellyfin.New(c, srv.Client()) }
+	d.do("menu")
+	r := d.do("setserver", "menu", srv.URL)
+	if row := r.Rows[len(r.Rows)-1]; row.Title != "Server Address:" || row.Position != srv.URL {
+		t.Fatalf("%+v", r.Rows)
+	}
+}
+
+// U54 with field rows: the question comes in the page's place; No shows the page as it stands
+// (Return on the first page would leave the app); Yes keeps the server and shows the sign-in list.
+func TestPlainHTTPAskedField(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.caps.Field = true
+	d.do("menu")
+	r := d.do("setserver", "menu", "192.168.111.111:8096")
+	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" || r.Rows[3].URI != "deny" {
+		t.Fatalf("%q", titles(r))
+	}
+	r = d.do("menu", r.Rows[3].Context)
+	if row := r.Rows[len(r.Rows)-1]; row.Title != "Server Address:" || d.loginServer() != "" {
+		t.Fatalf("No: %q", titles(r))
+	}
+	r = d.do("setserver", "menu", "192.168.111.111:8096")
+	r = d.do("menu", r.Rows[2].Context)
+	if got := strings.Join(titles(r), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password|Warning: HTTP, not encrypted" {
+		t.Fatalf("Yes: %q", got)
+	}
+}
+
+// Without Q2 Pod's fieldtext the box opens empty: Add the port asks for the whole address again;
+// with it, the box holds what was typed.
+func TestAddPortWithoutFieldText(t *testing.T) {
+	d := privateHTTPDaemon(t, &authServer{})
+	d.caps.Field = true
+	d.do("menu")
+	if r := d.do("setserver", "menu", "192.168.111.111"); r.Rows[1].Subtitle != "Press to type it again with the port" || r.Rows[1].Position != "" {
+		t.Fatalf("%+v", r.Rows[1])
+	}
+	d.caps.FieldText = true
+	if r := d.do("setserver", "menu", "192.168.111.111"); r.Rows[1].Subtitle != "Press to add the port" || r.Rows[1].Position != "192.168.111.111" {
+		t.Fatalf("%+v", r.Rows[1])
 	}
 }

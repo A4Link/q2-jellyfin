@@ -5,7 +5,7 @@
 
 # q2-jellyfin
 
-A [Jellyfin](https://jellyfin.org) client for the **Shanling Q2** running [Q2 Pod](https://github.com/DiamondBond/q2-pod). Pick playlists, albums, artists and songs on the Q2, and it syncs them to the card over Wi-Fi, or streams a song straight from your server. It needs **Q2 Pod 1.7.3 or later** and a Jellyfin server reachable over HTTPS. Its requests are checked against the Jellyfin 12.4.0 API document.
+A [Jellyfin](https://jellyfin.org) client for the **Shanling Q2** running [Q2 Pod](https://github.com/DiamondBond/q2-pod). Pick playlists, albums, artists and songs on the Q2, and it syncs them to the card over Wi-Fi, or streams a song straight from your server. It needs **Q2 Pod 1.7.3 or later** and a Jellyfin server reachable over HTTPS (or, on your home network, plain HTTP at its IP address). Its requests are checked against the Jellyfin 12.4.0 API document.
 
 > **Status: 0.8.** Its tests run against a real Jellyfin 12.4.0 server, and test builds have run on a Q2 with Q2 Pod 1.8.0. It needs Q2 Pod 1.7.3 or later: on an older Q2 Pod it shows only *Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin.* A few features (the one-page sign-in, ⋯ showing the play queue, the heart, and reporting every streamed song) need Q2 Pod 1.8.1 or later; on 1.7.3 to 1.8.0 the app keeps its older pages and behaviour. Forked from [q2-subsonic](https://github.com/andsuor/q2-subsonic).
 
@@ -18,7 +18,7 @@ A [Jellyfin](https://jellyfin.org) client for the **Shanling Q2** running [Q2 Po
 - **Favourites:** the heart on Now Playing sets or clears a Jellyfin favourite. Favourites can be synced as a playlist that follows your hearts.
 - **Play reporting:** plays on the Q2, streamed or synced, are reported to your server; plays made offline go once Jellyfin is open with Wi-Fi. Some plays can't be counted, such as songs that play through while Jellyfin is closed: see *Reporting plays*.
 - **Lyrics:** shown with the song when the server has them. Played from Jellyfin on Q2 Pod 1.7.4 and later, they come for the song you press and the 19 after it.
-- **Secure and frictionless:** sign in with Quick Connect, by approving the Q2 from another Jellyfin app, or with a username and password. Only an access token is stored, encrypted. All connections to the server use HTTPS, and the Q2's player never receives the token.
+- **Secure and frictionless:** sign in with Quick Connect, by approving the Q2 from another Jellyfin app, or with a username and password. Only an access token is stored, encrypted. All connections to the server use HTTPS, unless you choose a home network server's plain HTTP address, and the Q2's player never receives the token.
 - **Music only:** films, audiobooks and photos on the same server are left out.
 
 ## Install
@@ -36,9 +36,9 @@ A [Jellyfin](https://jellyfin.org) client for the **Shanling Q2** running [Q2 Po
 
 ## Sign in
 
-Everything can be done on the Q2 itself. The app serves no web page and opens one port, on the Q2's own loopback (127.0.0.1) only, which nothing on your network can reach: Q2 Pod's player streams through it, over the app's own verified HTTPS connection. Nothing the app does crosses your Wi-Fi except HTTPS to your server.
+Everything can be done on the Q2 itself. The app serves no web page and opens one port, on the Q2's own loopback (127.0.0.1) only, which nothing on your network can reach: Q2 Pod's player streams through it, over the app's own verified HTTPS connection. Nothing the app does crosses your Wi-Fi except HTTPS to your server (or HTTP to a home network server, below).
 
-**First, the server's address.** Open **Streaming → Jellyfin** and press **Type Your Server Address**. Type it on the Q2's keyboard, for example `music.example.com` or `music.example.com:8920` (`https://` is added for you). The Q2 checks it is a Jellyfin server before keeping it. **Change Server** at the top of the sign-in list opens the address: press it to type a new one. On Q2 Pod firmware with `field` (in `/tmp/q2-addon.caps`) the address is a **Server Address:** row instead: press it and type; an address that doesn't work says why, with **Retry** and **Cancel**.
+**First, the server's address.** Open **Streaming → Jellyfin** and press **Type Your Server Address**. Type it on the Q2's keyboard, for example `music.example.com` or `music.example.com:8920` (`https://` is added for you). A server on your home network without HTTPS can be typed as its IP address and port, for example `192.168.1.10:8096` or `192.168.1.10:8096/jellyfin`: see **A server at home without HTTPS** below. The Q2 checks it is a Jellyfin server before keeping it. **Change Server** at the top of the sign-in list opens the address: press it to type a new one. On Q2 Pod firmware with `field` (in `/tmp/q2-addon.caps`) the address is a **Server Address:** row instead, at the top of the sign-in list too: press it and type; an address that works brings you back to the sign-in list (signed in, a new address on **Settings → Account → Server** signs you out and does the same), with your last user name already under **Username:** on the password page. A server that can't be reached, or doesn't answer as Jellyfin, says why, with **Try Again** to check the same address again and **Server Address:** to type another; something that isn't an address says why, with **Server Address:** to type it again (on Q2 Pod with `fieldtext` the box holds what you typed).
 
 **Then sign in on the Q2, in this order of preference:**
 
@@ -53,12 +53,59 @@ Sign-in with a Jellyfin API key is turned off for now: a Jellyfin API key is **a
 
 Things to know:
 
-- The server must be `https://`; `http://` is refused. Certificates are verified, and the token is never sent to another host on a redirect. Songs that Q2 Pod's own player streams are fetched through the app too, so they get the same checks, and no token is written to the queue Q2 Pod plays.
+- The server must be `https://`, unless it is on your home network: see **A server at home without HTTPS** below. Certificates are verified, and the token is never sent to another host on a redirect. Songs that Q2 Pod's own player streams are fetched through the app too, so they get the same checks, and no token is written to the queue Q2 Pod plays.
 - **Only an access token is stored on the card**, in `.jellyfin/credentials`: the token from Quick Connect or a password sign-in, never a password. It is encrypted with a key kept on the Q2 itself, so the card on its own doesn't give it away, but whoever has both can use it. If the Q2's own storage can't take the key (it is full or read-only), the sign-in stays unencrypted until it can; `.jellyfin/log.txt` says so. In another Q2 the card's sign-in can't be read, so Jellyfin asks you to sign in again; revoke the old one under **Dashboard → Devices**. **Tip: use a Jellyfin user just for the Q2, not an admin**, so a lost Q2 opens only that user's music. If it is lost, revoke the Q2 under **Dashboard → Devices**. A Q2 whose sign-in the server no longer takes (revoked, or the server rebuilt) says *Server refused this Q2*: sign in again after **Settings → Account → Sign Out**. A Q2 signed in with an API key before this version keeps that key on the card instead; if that card or Q2 is lost, delete the key under **Dashboard → API Keys** (revoking the device doesn't cancel an API key).
 - **Settings → Account** shows the server and who is signed in; press **Signed in as** to sign in as another user with a password; **Sign Out**, pressed twice (the first press says *Press again to sign out*, as it stops a sync and the music), removes the token and shows the sign-in. Your music stays on the card.
 - Syncing in **Original** quality needs the user's **Allow media downloading** permission on the server; Opus transcodes don't. Under an Opus quality, songs that are already lossy (MP3, AAC, Opus…) still sync as the server's file, which needs the permission, unless **Always Re-encode** is on.
 
 On Q2 Pod firmware that has them, Jellyfin's Loading… and error pages have no **Stop Jellyfin** row (an error page has **Retry** and **Cancel**, Cancel going back as Return does), and **⋯** on Now Playing, while Jellyfin's songs play, opens the **Play Queue** instead of the Q2's own ⋯ page: the songs queued to play (up to 100 before the one you pressed and 400 from it on). It opens at the song playing, with the songs after it following, then *Earlier songs*. The song playing is marked *Now Playing* once the Q2 says it plays (a Q2 Pod with `now`); until then, and on an older Q2 Pod, the song you pressed is marked *Started here*. Press a song to play the queue from it. It needs no Wi-Fi to show; after the Q2 is switched off, or after Sign Out, it says *Nothing from Jellyfin is playing* until you play something again. Older firmware ignores both.
+
+## A server at home without HTTPS
+
+Jellyfin serves plain HTTP on its own port (8096) and HTTPS only if you set it up. On your home network the Q2 can use the HTTP port. **Plain HTTP is not encrypted:** anyone on the same network can read your password while you sign in and the access token on every request, and the token is your Jellyfin account. The Q2 asks you before using a server over HTTP, and sends your sign-in to it only on your own Wi-Fi.
+
+**1. Find the server's address.** In Jellyfin's web page open **Dashboard → Networking**. You need three things:
+- the server's **IP address** on your network, for example `192.168.1.10` (also shown by your router; give the server a fixed address there, so it doesn't change);
+- its **HTTP port**, `8096` unless someone changed it (`8920` is the HTTPS port, which works only once HTTPS is set up);
+- its **Base URL**, if one is set (for example `/jellyfin`). Many setups have none.
+
+You can check them from a computer on the same network: `http://192.168.1.10:8096/System/Info/Public` in a browser (with the Base URL after the port: `http://192.168.1.10:8096/jellyfin/System/Info/Public`) shows a short text with `"ProductName":"Jellyfin Server"`. If it shows Jellyfin's web page or nothing, the port or the Base URL isn't right.
+
+**2. Type it on the Q2**, as the IP address, the port and the Base URL if there is one, with no `http://` (it is added for you):
+- `192.168.1.10:8096`
+- `192.168.1.10:8096/jellyfin` (with the Base URL `/jellyfin`)
+- `192.168.1.10:30013` (any other port your server uses)
+
+Always type the port. A name such as `nas.local:8096` means HTTPS, which Jellyfin's HTTP port doesn't speak: use the IP address.
+
+**3. Answer the question.** The Q2 checks the address is a Jellyfin server (sending nothing secret), then says *192.168.1.10:8096 is served over HTTP* and *Not encrypted*, with **Yes, allow HTTP** and **No**. Yes adds the server to the allow list (below), so it isn't asked again, and keeps your Wi-Fi as the server's home network. Then sign in. **Quick Connect is the best choice here:** no password is sent. Use a Jellyfin user just for the Q2, not an administrator.
+
+**Your home Wi-Fi only.** The Q2 keeps the Wi-Fi's name and the router's MAC address with the server, for up to 4 Wi-Fis (a 5 GHz name, an extender). On any other Wi-Fi (a hotel's, a café's, where 192.168.1.10 can be some other device) it sends your sign-in nowhere and says *Not this server's home Wi-Fi*. At home on another of your Wi-Fis, or after a new router, type the address again: the Q2 asks *This Wi-Fi isn't saved for 192.168.1.10:8096* / *Say Yes only at home*. Say Yes only at home: elsewhere a device could pose as your server. Just after Wi-Fi wakes, the Q2 may not read the network yet: it sends nothing and says it can't reach the server; try again a moment later.
+
+**The allow list** is `.jellyfin/http-allow.txt` on the card, one address per line:
+- a range, such as `192.168.0.0/16`: an IP address and port in it, typed on the Q2, means HTTP. The file starts with the home ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`;
+- an IP address and port, such as `192.168.1.10:8096`: a server you said Yes to (the Q2 adds these).
+
+Edit it on a computer: add a range (Tailscale's `100.64.0.0/10`, say), or delete a server's line to stop the Q2 sending it anything (it then says *Not on http-allow.txt: nothing sent*). Leave no address in it to turn plain HTTP off; delete the file to get the defaults back (that also forgets the servers you said Yes to: type a server's address again on the Q2 and say Yes, or add its line back, e.g. `192.168.1.10:8096`). `http://` typed in full on the Q2 works for any IPv4 address and port, even one outside the list; outside the home ranges the question says *On the internet, NOT encrypted*: your sign-in would cross the internet readable, so use HTTPS for that.
+
+**Signing in from a computer** (`Jellyfin sign-in.txt`) works for an HTTP server only once its address has been typed on the Q2 and said Yes to, on the Wi-Fi the Q2 is on.
+
+**What the messages mean:**
+
+| The Q2 says | What to do |
+|---|---|
+| *Add the port, e.g. 192.168.1.10:8096* | Type the port after the IP address. |
+| *Not a Jellyfin server* | Something else answers there, or Jellyfin has a Base URL: add it after the port (`192.168.1.10:8096/jellyfin`). |
+| *The server redirected to another address. Check the address and port* | Usually the wrong port: another service answers there. |
+| *This port has no HTTPS. At home, type the server's IP and port* | A name was typed with Jellyfin's HTTP port: type the server's IP address and port instead. |
+| *No HTTPS on this port. Type http:// first* | An IP address outside the allow list's ranges (Tailscale's, say) was typed with its HTTP port: type `http://` in front, or add its range to `http-allow.txt`. |
+| *Can't reach 192.168.1.10:8096* | The server is off, the IP or port is wrong, or the Q2 is on another network. |
+| *Can't check this Wi-Fi yet. Try again in a moment* | The Q2 couldn't read the router's address yet: try again. |
+| *Not this server's home Wi-Fi…* | The Q2 is on a Wi-Fi not saved for the server: nothing was sent. |
+| *Plain HTTP is turned off in http-allow.txt* | The allow list has no address: add one, or delete the file. |
+| *No HTTPS on this port. Plain HTTP is turned off in http-allow.txt* | An IP address was typed on a port with no HTTPS, and the allow list has no address: use the server's HTTPS port, or add an address to `http-allow.txt` (or delete the file). |
+
+**Or use HTTPS instead:** the safe way, at home and away. Put a reverse proxy (Caddy, Nginx Proxy Manager, Traefik) in front of Jellyfin with a certificate from a public authority (Let's Encrypt) for a name you own, and type that name on the Q2. A self-signed certificate isn't accepted.
 
 ## Use
 

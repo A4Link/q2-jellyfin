@@ -12,11 +12,15 @@ import (
 )
 
 var (
-	ErrAuth        = errors.New("wrong username or password")
-	ErrUnreachable = errors.New("server unreachable")
-	ErrCert        = errors.New("certificate not trusted")
-	ErrNotJellyfin = errors.New("not a Jellyfin server")
-	ErrInsecure    = errors.New("https required")
+	ErrAuth         = errors.New("wrong username or password")
+	ErrUnreachable  = errors.New("server unreachable")
+	ErrCert         = errors.New("certificate not trusted")
+	ErrNotJellyfin  = errors.New("not a Jellyfin server")
+	ErrInsecure     = errors.New("https required")
+	ErrRedirect     = errors.New("redirect refused")                    // to plain http, other than a plain server to itself
+	ErrOtherNetwork = errors.New("not the plain http server's network") // the app's check (cmd: homenet.go)
+	ErrNotAllowed   = errors.New("not on the http allow list")          // the app's check (cmd: httpallow.go)
+	ErrNoHTTPS      = errors.New("no https on this port")               // a plain http server's port typed as https
 	// ErrQuickConnectOff is a server whose admin hasn't turned Quick Connect on.
 	ErrQuickConnectOff = errors.New("quick connect is turned off on the server")
 	// ErrQuickConnectExpired is a code the server no longer knows (it expired, or the server restarted).
@@ -103,6 +107,14 @@ func transportKind(err error) error {
 	switch {
 	case errors.Is(err, ErrInsecure):
 		return ErrInsecure
+	case errors.Is(err, ErrRedirect):
+		return ErrRedirect
+	case errors.Is(err, ErrOtherNetwork):
+		return ErrOtherNetwork
+	case errors.Is(err, ErrNotAllowed):
+		return ErrNotAllowed
+	case noHTTPS(err):
+		return ErrNoHTTPS
 	case isCert(err):
 		var ci x509.CertificateInvalidError
 		if errors.As(err, &ci) && ci.Reason == x509.Expired && !timeKnown() {
@@ -111,6 +123,13 @@ func transportKind(err error) error {
 		return ErrCert
 	}
 	return ErrUnreachable
+}
+
+// noHTTPS reports whether err is a server that answered the TLS hello in plain HTTP: Jellyfin's own
+// port 8096, say, typed by name (which means https://).
+func noHTTPS(err error) bool {
+	var rh tls.RecordHeaderError
+	return errors.Is(err, http.ErrSchemeMismatch) || errors.As(err, &rh)
 }
 
 // timeKnown is tlsroots.Known, injectable for tests.
@@ -164,6 +183,14 @@ func Message(err error, host string) string {
 		return "Can't reach " + host
 	case errors.Is(err, ErrInsecure):
 		return "HTTPS is required. Use an https:// address"
+	case errors.Is(err, ErrRedirect):
+		return "The server redirected to another address. Check the address and port"
+	case errors.Is(err, ErrOtherNetwork):
+		return "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there"
+	case errors.Is(err, ErrNotAllowed):
+		return "Not on http-allow.txt: nothing sent"
+	case errors.Is(err, ErrNoHTTPS):
+		return "This port has no HTTPS. At home, type the server's IP and port"
 	}
 	if errors.As(err, &ae) && ae.Msg != "" {
 		return ae.Msg
