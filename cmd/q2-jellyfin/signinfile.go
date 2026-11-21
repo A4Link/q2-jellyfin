@@ -29,6 +29,7 @@ import (
 const (
 	signInFile    = "Jellyfin sign-in.txt"
 	signInFileMax = 4 << 10 // more than any sign-in: something else, never read whole into the Q2's RAM
+	utf16         = `save it as UTF-8, not UTF-16 ("Unicode")`
 )
 
 type fileSignIn struct {
@@ -37,9 +38,12 @@ type fileSignIn struct {
 }
 
 // parseSignIn reads key=value lines: LF or CRLF, a UTF-8 BOM, keys in any case, spaces around
-// trimmed, blank lines and # comments skipped. Errors never repeat a value.
+// trimmed, blank lines and # comments skipped. UTF-16 is refused. Errors never repeat a value.
 func parseSignIn(b []byte) (f fileSignIn, err error) {
 	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF}) // a UTF-8 BOM, as Notepad may write
+	if bytes.HasPrefix(b, []byte{0xFF, 0xFE}) || bytes.HasPrefix(b, []byte{0xFE, 0xFF}) || bytes.IndexByte(b, 0) >= 0 {
+		return f, errors.New(utf16) // a zero byte: UTF-16 even without its BOM
+	}
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line) // also CRLF's \r
 		if line == "" || strings.HasPrefix(line, "#") {

@@ -40,17 +40,19 @@ const (
 	urlsMax    = 256 << 10 // the most of the file Q2 Pod reads (tidal.c AU_MAX); a line cut there is dropped
 )
 
-// urlField is s as one field, cut to 1,000 bytes: a song's line then always fits in urlsMax.
+// urlField is s as one field, cut to 1,000 bytes: a song's line then always fits in urlsMax. Control
+// characters become spaces: the firmware stops reading the queue at a NUL.
 func urlField(s string) string {
 	if len(s) > 1000 {
 		s = strings.ToValidUTF8(s[:1000], "")
 	}
-	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r == '\t' || r == '\n' || r == '\r' }), " ")
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }), " ")
 }
 
-// urlsQueue is the Q2URLS/1 file for songs from from on, and the songs[lo:hi] it holds. It fits in
-// urlsMax: the song started and those after it first, then the ones before it as room allows.
-func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi int) {
+// urlsQueue is the Q2URLS/1 file for songs from from on, the songs[lo:hi] it holds, and their ids
+// by line, "" for one queued from the card (Q2 Pod's log has those). It fits in urlsMax: the song
+// started and those after it first, then the ones before it as room allows.
+func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi int, ids []string) {
 	lo, hi = max(0, from-urlsBefore), min(len(songs), from+urlsAfter)
 	q, re := quality.Normal(s.quality()), s.reencode() // once: it reads settings.json
 	m := s.manifest()
@@ -58,13 +60,13 @@ func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi 
 	if s.caps.Fav {
 		hearts = s.hearts()
 	}
-	lines := make([]string, hi-lo)
+	lines, ids := make([]string, hi-lo), make([]string, hi-lo)
 	for i, sg := range songs[lo:hi] {
 		src := ""
 		if e := m.Songs[sg.ID]; s.synced(e) {
 			src = e.Path // on the card: played as a local file within the queue
 		} else {
-			src = playerURL(sg.ID, library.Quality(q, sg, re))
+			src, ids[i] = playerURL(sg.ID, library.Quality(q, sg, re)), sg.ID
 		}
 		cover := ""
 		if sg.CoverArt != "" {
@@ -100,7 +102,7 @@ func (s *streamer) urlsQueue(songs []jellyfin.Song, from int) (b []byte, lo, hi 
 	for _, l := range lines[first-lo : end-lo] {
 		b = append(b, l...)
 	}
-	return b, first, end
+	return b, first, end, ids[first-lo : end-lo]
 }
 
 // urlsFile is the queue file, beside .play in /tmp.
@@ -111,7 +113,7 @@ func (s *streamer) urlsFile() string {
 // startURLs plays songs from from as a URL queue.
 func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	path := s.urlsFile()
-	b, lo, hi := s.urlsQueue(songs, from)
+	b, lo, hi, ids := s.urlsQueue(songs, from)
 	if err := q2.WriteFile(path, b); err != nil {
 		s.logf("stream: urls: %v", err)
 		return
@@ -121,13 +123,6 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	// the queue the firmware gets, for Now Playing's ⋯ (playqueue.go)
 	s.saveQueue(seq, songs[lo:hi], from-lo)
 	if s.caps.Now { // before .play: the firmware tells of the queue once it plays
-		m := s.manifest()
-		ids := make([]string, hi-lo)
-		for i, sg := range songs[lo:hi] {
-			if !s.synced(m.Songs[sg.ID]) { // a synced song is left to Q2 Pod's log, as below
-				ids[i] = sg.ID
-			}
-		}
 		s.queued(seq, ids)
 	}
 	if err := q2.WriteFile(s.playFile, []byte(seq+" "+path)); err != nil {
@@ -135,7 +130,7 @@ func (s *streamer) startURLs(songs []jellyfin.Song, from int) {
 	}
 	// Without the firmware's "now", of a URL queue the app knows only that the song pressed starts:
 	// the firmware's Tidal player says nothing of the ones after it.
-	if !s.caps.Now && !s.synced(s.manifest().Songs[songs[from].ID]) {
+	if !s.caps.Now && ids[from-lo] != "" {
 		s.started(songs[from])
 	}
 	s.logf("stream: %d songs as URLs from %q", len(songs), songs[from].Title)
@@ -203,6 +198,7 @@ func (s *streamer) urlsLyrics(songs []jellyfin.Song, first int, dir string) {
 	if write(first) {
 		misses++
 	}
+	// The window wraps round to the queue's start on purpose: under repeat-all those songs play next.
 	go func() {
 		for k := 1; k < min(len(songs), lyricsAhead) && misses < 2 && s.lyricsGen.Load() == gen; k++ {
 			if write((first + k) % len(songs)) {

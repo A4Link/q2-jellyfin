@@ -22,7 +22,7 @@ import (
 //	python3 contrib/testserver/setup.py ../jellyfin-test
 //	JELLYFIN_TEST_SERVER=../jellyfin-test/server.json go test ./internal/jellyfin -run Live -v
 //
-// The client only speaks HTTPS, so each test reaches the server through a TLS proxy of its own.
+// Each test reaches the server through a TLS proxy of its own, so the client speaks HTTPS to it.
 
 type liveServer struct {
 	URL     string                              `json:"url"`

@@ -35,7 +35,8 @@ dir=$2
         { cat /tmp/q2-jellyfin.err; echo "exit $code"; } >/tmp/q2-jellyfin.crash
         sleep $delay &
         wait $! # not sleep alone: a TERM interrupts a wait, but waits for a foreground sleep
-        [ $delay -lt 60 ] && delay=$((delay * 2))
+        delay=$((delay * 2))
+        [ $delay -gt 60 ] && delay=60
     done
     rm -f $pid /tmp/q2-jellyfin.bin /tmp/q2-jellyfin.run /tmp/q2-jellyfin.err /tmp/q2-jellyfin.crash
 ) </dev/null >/dev/null 2>&1 &

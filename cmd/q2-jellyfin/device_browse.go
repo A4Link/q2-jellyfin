@@ -19,8 +19,9 @@ import (
 // Browsing (playlists, albums, artists, search, an item's page) and choosing what syncs.
 
 // withSyncNow puts the Sync Now row first on a list's first page (after its search box), pushing the last row to the next.
+// "0" is the first page too: Previous page back to the first window asks for it.
 func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
-	if cursor != "" || r.Status != "" {
+	if cursor != "" && cursor != "0" || r.Status != "" {
 		return r
 	}
 	row, ok := d.syncNowRow()
@@ -161,6 +162,7 @@ type albumsFetch struct {
 	done   chan struct{}
 	all    []jellyfin.Album
 	err    error
+	at     time.Time // when it started
 }
 
 // everyAlbum is every album by name, for Random, kept for listFor (cachedList "albums"). It is
@@ -172,10 +174,10 @@ type albumsFetch struct {
 func (d *daemon) everyAlbum(ctx context.Context, cl *jellyfin.Client) ([]jellyfin.Album, error) {
 	d.mu.Lock()
 	f := d.albumsAll
-	if f == nil || f.cl != cl {
+	if f == nil || f.cl != cl || time.Since(f.at) > listFor { // an old outcome nobody took: ask again
 		d.dropAlbumsFetch()
 		bg, cancel := context.WithTimeout(context.Background(), everyAlbumIn)
-		f = &albumsFetch{cl: cl, cancel: cancel, done: make(chan struct{})}
+		f = &albumsFetch{cl: cl, cancel: cancel, done: make(chan struct{}), at: time.Now()}
 		d.albumsAll = f
 		d.spawn(func() {
 			defer cancel()
@@ -377,7 +379,7 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 	rows := []q2spot.Row{act("toggle", "Add to Sync", key)}
 	// a press could neither add nor remove it (R30, M37); Favourites stays its own playlist (audit 7)
 	if v.sel.Has(selection.KindLibrary, "all") && kind != selection.KindFavorites {
-		rows[0] = info("Included via Entire Library")
+		rows[0] = info(viaLibrary(v.sel))
 	}
 	if v.sel.Has(kind, id) && rows[0].Kind == "action" {
 		rows[0].Title = "Remove from Sync"
@@ -402,16 +404,20 @@ func (d *daemon) itemPage(ctx context.Context, cl *jellyfin.Client, arg, cursor 
 }
 
 // forgetUnsynced drops the songs and albums fetched for items outside sel, but key's (the page
-// being drawn) and Entire Library's: each page opened would otherwise stay in memory, and be walked
-// by every view, until the app exits. Such an item then shows the status the card records, as
-// after a restart. d.mu is held.
+// being drawn) and Entire Library's, with its playlists' while it is chosen and its list fetched
+// (the view reads a song of one as kept as the plan does): each page opened would otherwise stay
+// in memory, and be walked by every view, until the app exits. Such an item then shows the status
+// the card records, as after a restart. d.mu is held.
 func (d *daemon) forgetUnsynced(sel selection.Set, key string) {
 	keep := map[string]bool{key: true}
+	_, lib := d.resolved[selection.Key(selection.KindLibrary, "all")] // with every playlist's songs: no page piles up
+	lib = lib && sel.Has(selection.KindLibrary, "all")
 	for _, it := range sel.Items {
 		keep[selection.Key(it.Kind, it.ID)] = true
 	}
 	for k := range d.resolved {
-		if kind, _ := parseKey(k); kind != selection.KindLibrary && !keep[k] {
+		kind, _ := parseKey(k)
+		if kind != selection.KindLibrary && !(kind == selection.KindPlaylist && lib) && !keep[k] {
 			delete(d.resolved, k)
 		}
 	}
@@ -556,10 +562,6 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 				defer wg.Done()
 				defer func() { <-sem }()
 				s, e := cl.AlbumSongs(ctx, al.ID, false) // Play never starts an artist: no hearts
-				var ae *jellyfin.APIError
-				if errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
-					return // that album deleted since the list: the artist is still there
-				}
 				if e != nil {
 					mu.Lock()
 					first = cmp.Or(first, e)
@@ -605,7 +607,7 @@ func (d *daemon) songsOf(ctx context.Context, cl *jellyfin.Client, kind selectio
 // toggle adds or removes an item; one already inside a selected item is left as it is.
 func (d *daemon) toggle(ctx context.Context, cl *jellyfin.Client, arg string) q2spot.Reply {
 	kind, id := parseKey(arg)
-	sel, r, done := d.toggleOff(kind, id)
+	sel, r, done := d.toggleOff(cl, kind, id)
 	if done {
 		return r
 	}
@@ -614,7 +616,7 @@ func (d *daemon) toggle(ctx context.Context, cl *jellyfin.Client, arg string) q2
 	}
 	var name string
 	var n int
-	var song jellyfin.Song
+	var songs []jellyfin.Song // an album's or a song's, for coveredBy
 	// Pressed on the item's page just drawn (or a song's row there): its list, asking nothing.
 	shown, ok := d.shownList(cl, selection.Key(kind, id))
 	if f := strings.Fields(arg); kind == selection.KindSong && len(f) > 1 { // "song:id list:id i"
@@ -646,21 +648,18 @@ func (d *daemon) toggle(ctx context.Context, cl *jellyfin.Client, arg string) q2
 			n += al.SongCount
 		}
 	case selection.KindAlbum, selection.KindPlaylist, selection.KindSong, selection.KindFavorites:
-		songs, nm := shown.songs, shown.name
-		if !ok || songs == nil {
+		nm := shown.name
+		if songs = shown.songs; !ok || songs == nil {
 			var err error
 			if songs, nm, err = d.songsOf(ctx, cl, kind, id); err != nil {
 				return d.errToast(err)
 			}
 		}
 		name, n = nm, len(songs)
-		if kind == selection.KindSong && len(songs) == 1 {
-			song = songs[0]
-		}
 	default:
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
-	if via := d.coveredBy(sel, kind, id, song); via != "" {
+	if via := d.coveredBy(sel, kind, id, songs); via != "" {
 		return q2spot.Reply{Message: "Included via " + via}
 	}
 	// Loaded again after the fetches: another press may have saved it meanwhile.
@@ -670,18 +669,20 @@ func (d *daemon) toggle(ctx context.Context, cl *jellyfin.Client, arg string) q2
 	if err != nil {
 		return q2spot.Fail(q2spot.Error, selDamaged)
 	}
+	again := ""
 	if !sel.Has(kind, id) {
 		sel.Toggle(selection.Item{Kind: kind, ID: id, Name: name})
 		if err := d.saveSelection(sel); err != nil {
 			return q2spot.Fail(q2spot.Error, "Couldn't save the selection")
 		}
+		again = d.replan(cl)
 	}
-	return q2spot.Reply{Message: "Added to Sync · " + plural(n, "song")}
+	return q2spot.Reply{Message: "Added to Sync · " + plural(n, "song") + again}
 }
 
 // toggleOff is what toggle does without the server: a removal, Entire Library, or a refusal, then
 // done is true. Otherwise it returns the selection, for an item to add.
-func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r q2spot.Reply, done bool) {
+func (d *daemon) toggleOff(cl *jellyfin.Client, kind selection.Kind, id string) (sel selection.Set, r q2spot.Reply, done bool) {
 	d.selMu.Lock()
 	defer d.selMu.Unlock()
 	sel, err := d.selection()
@@ -689,7 +690,7 @@ func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r
 	case err != nil:
 		return sel, q2spot.Fail(q2spot.Error, selDamaged), true
 	case kind != selection.KindLibrary && kind != selection.KindFavorites && sel.Has(selection.KindLibrary, "all"):
-		return sel, q2spot.Reply{Message: "Included via Entire Library"}, true
+		return sel, q2spot.Reply{Message: viaLibrary(sel)}, true
 	case sel.Has(kind, id):
 		sel.Toggle(selection.Item{Kind: kind, ID: id})
 		r = q2spot.Reply{Message: "Removed from Sync"}
@@ -700,24 +701,45 @@ func (d *daemon) toggleOff(kind selection.Kind, id string) (sel selection.Set, r
 		return sel, r, false
 	}
 	if err := d.saveSelection(sel); err != nil {
-		r = q2spot.Fail(q2spot.Error, "Couldn't save the selection")
+		return sel, q2spot.Fail(q2spot.Error, "Couldn't save the selection"), true
 	}
+	r.Message += d.replan(cl)
 	return sel, r, true
 }
 
-// coveredBy names a selected item that already holds this album or song, or "". It asks the server
-// nothing, so a press answers at once: an artist's albums or a list's songs not in memory (after a
-// restart, until the Sync page or the item's own page fetches them) don't count, and the album or
-// song is added on its own; the plan holds a song once (audit 2026-11-16 #16).
-func (d *daemon) coveredBy(sel selection.Set, kind selection.Kind, id string, s jellyfin.Song) string {
+// viaLibrary is what an item's page and Add to Sync say under Entire Library. A held one adds
+// nothing new, so a new album would never arrive (A7b-P2-6).
+func viaLibrary(sel selection.Set) string {
+	for _, it := range sel.Items {
+		if it.Kind == selection.KindLibrary && it.Held {
+			return "Entire Library is held: resume it in Sync Jobs"
+		}
+	}
+	return "Included via Entire Library"
+}
+
+// coveredBy names a selected item that already holds this album or song (songs: its songs), or "".
+// It asks the server nothing, so a press answers at once: an artist's albums or a list's songs not
+// in memory (after a restart, until the Sync page or the item's own page fetches them) don't count,
+// and the album or song is added on its own; the plan holds a song once (audit 2026-11-16 #16). A
+// held item adds nothing new, so it covers an album or song only when every song of it is on the
+// card.
+func (d *daemon) coveredBy(sel selection.Set, kind selection.Kind, id string, songs []jellyfin.Song) string {
+	var s jellyfin.Song
+	if len(songs) > 0 {
+		s = songs[0]
+	}
 	album := id
 	if kind == selection.KindSong {
 		album = s.AlbumID
 	} else if kind != selection.KindAlbum {
 		return ""
 	}
+	m := d.manifest()
+	newSong := slices.ContainsFunc(songs, func(s jellyfin.Song) bool { return m.Songs[s.ID] == nil })
 	for _, it := range sel.Items {
 		switch {
+		case it.Held && newSong: // covers nothing
 		case it.Kind == selection.KindAlbum && it.ID == album:
 			return it.Name
 		case it.Kind == selection.KindArtist: // the albums fetched already (songsOf, toggle, its page)

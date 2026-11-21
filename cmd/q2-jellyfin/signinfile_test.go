@@ -79,12 +79,15 @@ func TestParseSignIn(t *testing.T) {
 		t.Fatalf("%+v %v", f, err)
 	}
 	for in, want := range map[string]string{
-		"user=u\npassword=p":                     "no server= line",
-		"server=s\nuser=u":                       "no password= line (or apikey=)",
-		"server=s\npassword=p":                   "no user= line",
-		"server=s\nuser=u\npassword=p\napikey=k": "both password= and apikey=: keep one",
-		"server=s\nuser=u\napikey=":              "apikey= is empty",
-		"server=s\nuser=u\nhunter2":              "a line isn't server=, user=, password= or apikey=",
+		"user=u\npassword=p":                       "no server= line",
+		"server=s\nuser=u":                         "no password= line (or apikey=)",
+		"server=s\npassword=p":                     "no user= line",
+		"server=s\nuser=u\npassword=p\napikey=k":   "both password= and apikey=: keep one",
+		"server=s\nuser=u\napikey=":                "apikey= is empty",
+		"server=s\nuser=u\nhunter2":                "a line isn't server=, user=, password= or apikey=",
+		"\xff\xfes\x00=\x00s\x00\r\x00\n\x00":      utf16, // Notepad's "Unicode", PowerShell 5.1's >
+		"\xfe\xff\x00s\x00=\x00s":                  utf16, // big-endian
+		"s\x00e\x00r\x00v\x00e\x00r\x00=\x00s\x00": utf16, // no BOM
 	} {
 		if _, err := parseSignIn([]byte(in)); err == nil || err.Error() != want {
 			t.Errorf("%q: %v, want %q", in, err, want)

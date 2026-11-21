@@ -327,15 +327,39 @@ func TestSettingNotSaved(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(d.dir, "settings.json"), 0o755); err != nil { // a file can't be written there
 		t.Fatal(err)
 	}
-	if r := d.do("setstreamq", "opus-160"); r.Status != q2spot.Error || r.Message != "Couldn't save the setting" {
+	if r := d.do("setstreamq", "opus-160"); r.Status != q2spot.Error || r.Message != settingsDamaged { // nor read
 		t.Fatalf("reply %+v", r)
 	}
 	if r := d.do("setdefq", "opus-128"); r.Status != q2spot.Error || r.Message != "Couldn't save the setting" {
 		t.Fatalf("setdefq reply %+v", r)
+	}
+	if r := d.do("swipe"); r.Status != q2spot.Error || r.Message != settingsDamaged { // unreadable: nothing written (A5-P2-2)
+		t.Fatalf("swipe reply %+v", r)
 	}
 	d.bg.Wait()
 	if st := d.runner.Snapshot().State; st != "running" {
 		t.Fatalf("state %s", st)
 	}
 	close(n.block)
+}
+
+// Swipe Between Sections with settings.json readable but the folder not writable (a full or
+// read-only card) says it wasn't saved, as every other setting does (review A7a-P1-1).
+func TestSwipeNotSaved(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	d := newTestDaemon(t, &nav{}, "", true)
+	if err := d.saveSettings(settings{}); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(d.dir, 0o555)
+	t.Cleanup(func() { os.Chmod(d.dir, 0o755) })
+	on := d.swipeOn()
+	if r := d.do("swipe"); r.Status != q2spot.Error || r.Message != "Couldn't save the setting" {
+		t.Fatalf("swipe reply %+v", r)
+	}
+	if d.swipeOn() != on {
+		t.Fatal("swipe changed though it wasn't saved")
+	}
 }

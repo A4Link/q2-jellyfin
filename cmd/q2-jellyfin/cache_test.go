@@ -29,6 +29,25 @@ func TestCacheClear(t *testing.T) {
 	}
 }
 
+// Clear Playback Cache empties the whole folder: a part, temp or lyrics file an older version or
+// a crash left is counted and removed too.
+func TestCacheClearLeftovers(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "urls", true)
+	putCache(t, d, "a-original.flac", 100)
+	left := []string{putCache(t, d, "b-original.flac.part", 40), putCache(t, d, "c.tmp", 7), putCache(t, d, "d.lrc", 3)}
+	if n := d.cacheSize(); n != 150 {
+		t.Errorf("size %d, want 150", n)
+	}
+	if n := d.clearCache(); n != 150 {
+		t.Errorf("cleared %d, want 150", n)
+	}
+	for _, p := range left {
+		if exists(p) {
+			t.Errorf("%s left", filepath.Base(p))
+		}
+	}
+}
+
 // Clear Playback Cache asks first, as Q2 Pod's Clear All Downloads does, and still empties the
 // songs an earlier version cached; nothing sets the cache's size any more.
 func TestCacheSettings(t *testing.T) {

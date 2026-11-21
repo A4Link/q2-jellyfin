@@ -383,7 +383,8 @@ func (r *Runner) Forget() {
 // DropMissing forgets the songs of m, the card's manifest as the caller read it, whose files are
 // gone from the card (deleted by hand, or with the folder after the app was removed), so the next
 // plan fetches them again (I9). It also forgets the gone files of m.Stale, deleted by a run that
-// ended before it saved again. The card is read without the lock, which a reply may wait for;
+// ended before it saved again, and the sums of playlists whose .m3u is gone, so the plan writes
+// them again (review A5-P1-4). The card is read without the lock, which a reply may wait for;
 // nothing is dropped while the card is away, when every file would seem gone. ErrBusy while a sync
 // runs.
 func (r *Runner) DropMissing(m *library.Manifest) error {
@@ -402,7 +403,13 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 			staleGone[f] = true
 		}
 	}
-	if len(gone) == 0 && len(staleGone) == 0 || !r.CardMounted() {
+	plGone := map[string]string{} // playlist name -> its file
+	for name, f := range m.Playlists {
+		if _, err := os.Lstat(f); errors.Is(err, os.ErrNotExist) && m.PlaylistSums[name] != "" {
+			plGone[name] = f
+		}
+	}
+	if len(gone) == 0 && len(staleGone) == 0 && len(plGone) == 0 || !r.CardMounted() {
 		return nil
 	}
 	return r.edit(true, func(m *library.Manifest) (bool, error) {
@@ -415,6 +422,12 @@ func (r *Runner) DropMissing(m *library.Manifest) error {
 		}
 		if n > 0 {
 			r.logf("sync: %d songs gone from the card, planned again", n)
+		}
+		for name, f := range plGone {
+			if m.Playlists[name] == f && m.PlaylistSums[name] != "" {
+				delete(m.PlaylistSums, name)
+				n++
+			}
 		}
 		was := len(m.Stale)
 		m.Stale = slices.DeleteFunc(m.Stale, func(f string) bool { return staleGone[f] })
@@ -430,6 +443,13 @@ func (r *Runner) Moving(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return (r.stat.State == "running" || r.stat.State == "paused") && r.moving[id]
+}
+
+// Removes reports whether the plan a sync runs, or holds paused, removes songs.
+func (r *Runner) Removes() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return (r.stat.State == "running" || r.stat.State == "paused") && r.plan != nil && len(r.plan.Remove) > 0
 }
 
 // Busy is whether a sync runs, or has just ended and its OnDone hasn't returned (I15).

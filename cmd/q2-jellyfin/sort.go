@@ -113,15 +113,21 @@ func (d *daemon) sortOp(op, arg string) q2spot.Reply {
 	}
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
-	s := d.settings()
+	s, serr := d.settingsErr()
+	if serr != nil && (op == "setsort" || op == "setorder") { // it would save the defaults over it
+		return q2spot.Fail(q2spot.Error, settingsDamaged)
+	}
 	o, c := s.sortOf(name)
-	save := func(o listSort) {
+	save := func(o listSort) q2spot.Reply {
 		if s.Sort == nil {
 			s.Sort = map[string]listSort{}
 		}
 		s.Sort[name] = o
-		d.saveSettings(s)
-		d.dropLists(name) // a new order: the list comes fresh from the server
+		if err := d.saveSettings(s); err != nil {
+			return q2spot.Fail(q2spot.Error, settingNotSaved)
+		}
+		d.dropLists(name)     // a new order: the list comes fresh from the server
+		return q2spot.Reply{} // no toast: the page comes again with the mark moved
 	}
 	switch op {
 	case "sort": // the Sort page
@@ -148,9 +154,9 @@ func (d *daemon) sortOp(op, arg string) q2spot.Reply {
 					d.dropLists(name)
 				}
 				if x != c { // the current one again changes nothing: its Order is kept
-					save(listSort{By: x.key}) // a new Sort By starts in its natural direction
+					return save(listSort{By: x.key}) // a new Sort By starts in its natural direction
 				}
-				return q2spot.Reply{} // no toast: the page comes again with the mark moved
+				return q2spot.Reply{}
 			}
 		}
 		return q2spot.Fail(q2spot.Bad, "Bad request")
@@ -173,7 +179,7 @@ func (d *daemon) sortOp(op, arg string) q2spot.Reply {
 		}
 		if turned := choice == "turned"; turned != o.Reverse { // the current one again changes nothing
 			o.Reverse = turned
-			save(o)
+			return save(o)
 		}
 		return q2spot.Reply{}
 	}

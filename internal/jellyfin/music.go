@@ -4,7 +4,6 @@ import (
 	"context"
 	"maps"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,12 +85,12 @@ func (c *Client) musicFolders(ctx context.Context) (musicRoots, error) {
 		// Every top-level item, paged, not just the first 200: a library can have more than one
 		// content folder, and a song in a later one must not be filtered out as non-music (audit S15).
 		q := url.Values{"userId": {c.c.UserID}, "parentId": {lib}, "fields": {"Path"}, "enableUserData": {"false"}}
-		_, err := c.eachPage(ctx, "/Items", q, func(k wireItem) {
-			if p := slashPath(k.Path); p != "" {
-				if dir := path.Dir(p); !seen[dir] {
-					seen[dir] = true
-					roots = append(roots, dir)
-				}
+		_, err := c.eachPage(ctx, "/Items", q, 0, func(k wireItem) {
+			// the folder, cut at the last "/": path.Dir would clean a share's "//nas" to "/nas"
+			p := slashPath(k.Path)
+			if i := strings.LastIndexByte(p, '/'); i > 0 && !seen[p[:i]] {
+				seen[p[:i]] = true
+				roots = append(roots, p[:i])
 			}
 		})
 		if err != nil {
@@ -187,7 +186,7 @@ func (c *Client) allMusicItems(ctx context.Context, q url.Values, f func(wireIte
 		lq.Set("fields", itemFields)
 		lq.Set("enableImageTypes", "Primary")
 		got := map[string]bool{} // this library's items: fewer than its total means one was skipped
-		total, err := c.eachPage(ctx, "/Items", lq, func(w wireItem) {
+		total, err := c.eachPage(ctx, "/Items", lq, len(seen), func(w wireItem) {
 			got[w.ID] = true
 			if !seen[w.ID] {
 				seen[w.ID] = true
@@ -254,7 +253,7 @@ func (c *Client) pagedMusic(ctx context.Context, q url.Values, offset, size int)
 		if !r.startsAt(skip) {
 			return nil, ErrChanged
 		}
-		out = append(out, r.Items...)
+		out = append(out, r.Items[:min(len(r.Items), size-len(out))]...) // no more than asked
 		skip = 0
 	}
 	return out, nil

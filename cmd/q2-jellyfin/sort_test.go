@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -371,5 +373,41 @@ func TestSignOutStopsRandomAlbumsFetch(t *testing.T) {
 	case <-f.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the fetch still runs after Sign Out")
+	}
+}
+
+// A sort that can't be saved (card full, or taken by USB storage) says so, and the sort stays.
+func TestSortNotSaved(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	if err := os.MkdirAll(filepath.Join(d.dir, "settings.json.tmp", "x"), 0o755); err != nil { // the write fails
+		t.Fatal(err)
+	}
+	if r := d.do("setsort", "albums added"); r.Status != q2spot.Error || r.Message != settingNotSaved {
+		t.Errorf("setsort: %+v", r)
+	}
+	if r := d.do("setorder", "albums turned"); r.Status != q2spot.Error || r.Message != settingNotSaved {
+		t.Errorf("setorder: %+v", r)
+	}
+	if p := d.do("sort", "albums"); p.Rows[0].Subtitle != "Name" || p.Rows[1].Subtitle != "A to Z" {
+		t.Errorf("sort page %+v", p.Rows)
+	}
+}
+
+// A failed Random album fetch older than listFor isn't shown at the next visit: a new fetch starts.
+func TestRandomAlbumsOldFailureNotShown(t *testing.T) {
+	n := &nav{albums: 2000, songsPer: 1, listDelay: 150 * time.Millisecond, listErr: 70} // the second page fails
+	d := newTestDaemon(t, n, "", true)
+	d.answerIn = 100 * time.Millisecond
+	d.do("setsort", "albums random")
+	if r := d.do("albums"); r.Message != "refresh" { // Loading albums…, then the user leaves
+		t.Fatalf("%+v", r)
+	}
+	d.mu.Lock()
+	f := d.albumsAll
+	f.at = f.at.Add(-listFor - time.Second) // and comes back later
+	d.mu.Unlock()
+	<-f.done
+	if r := d.do("albums"); r.Message != "refresh" {
+		t.Errorf("next visit: %q %q", r.Message, titles(r))
 	}
 }

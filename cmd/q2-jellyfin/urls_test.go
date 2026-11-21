@@ -253,6 +253,23 @@ func TestURLQueueLongFieldCut(t *testing.T) {
 	}
 }
 
+// A control character in a field, a NUL from the server's JSON ("\u0000") above all, is a space:
+// the firmware stops reading the queue at a NUL, and would play another song than the one pressed.
+func TestURLQueueControlChars(t *testing.T) {
+	e := newEnv(t, fw.Caps{URLs: true})
+	e.s.src = urlSrc{e.src}
+	ss := songs(3, "flac")
+	ss[0].Title, ss[0].Artist = "Intro\x00(live)", "A\x1fB\x7f"
+	e.s.start(ss, 2)
+	lines := e.urlsFile(t)
+	if len(lines) != 4 || strings.ContainsAny(strings.Join(lines, ""), "\x00\x1f\x7f") {
+		t.Fatalf("%q", lines)
+	}
+	if f := strings.Split(lines[1], "\t"); f[1] != "Intro (live)" || f[2] != "A B" {
+		t.Errorf("song 0: %q", f)
+	}
+}
+
 // gatedLyrics is a URL-queue source that records its lyrics requests in order; a song with a gate
 // waits for it (or its request's time limit), and fail, when set, is every answer's error.
 type gatedLyrics struct {
@@ -391,6 +408,20 @@ func TestURLQueueLyricsWindow(t *testing.T) {
 	}
 }
 
+// Pressed near the end of a list, the window wraps round to the queue's start, the songs that
+// play next under repeat-all.
+func TestURLQueueLyricsWindowWraps(t *testing.T) {
+	e := newEnv(t, fw.Caps{URLs: true})
+	src := &gatedLyrics{urlSrc: urlSrc{e.src}}
+	e.s.src = src
+	dir := lyricsDirOf(e)
+	e.s.start(lyricSongs("s", 30), 29)
+	eventually(t, "the window's lyrics", func() bool { return lyricLines(dir) == 20 })
+	if got := src.askedNow(); len(got) != 20 || got[0] != "s29" || got[1] != "s0" || got[19] != "s18" {
+		t.Errorf("asked %q, want s29 then s0 to s18", got)
+	}
+}
+
 // Past lyricsKeep songs' lyrics kept, the next Play removes the oldest of them down to lyricsKeep,
 // not all of them: the rest aren't asked of the server again. The last queue's lines go.
 func TestKeptLyricsTrimOldestFirst(t *testing.T) {
@@ -429,5 +460,37 @@ func TestURLQueueFirstLyricsBounded(t *testing.T) {
 	}
 	if !exists(e.play) {
 		t.Error("no .play")
+	}
+}
+
+// syncingLyrics is urlSrc whose lyrics request lets a song's sync finish meanwhile.
+type syncingLyrics struct {
+	urlSrc
+	done func()
+}
+
+func (s syncingLyrics) Lyrics(context.Context, string) (string, error) { s.done(); return "", nil }
+
+// A song whose sync finishes while its queue is written (here, as its lyrics are fetched) is
+// reported as the line it got: streamed, by the app; on the card, by Q2 Pod's log; never neither
+// or both.
+func TestURLQueueSyncedMeanwhile(t *testing.T) {
+	for _, now := range []bool{false, true} {
+		e := newEnv(t, fw.Caps{URLs: true, Now: now})
+		path := e.root + "/Jellyfin/s1.flac"
+		e.man.Songs["s1"] = &library.Entry{ID: "s1", Path: path} // being synced: no file yet
+		e.s.src = syncingLyrics{urlSrc{e.src}, func() {
+			os.MkdirAll(e.root+"/Jellyfin", 0o755)
+			os.WriteFile(path, []byte("x"), 0o644)
+		}}
+		var ids, started []string
+		e.s.queued = func(_ string, i []string) { ids = i }
+		e.s.started = func(sg jellyfin.Song) { started = append(started, sg.ID) }
+		ss := songs(2, "flac")
+		ss[1].HasLyrics = true
+		e.s.start(ss, 1)
+		if now && !slices.Equal(ids, []string{"s0", "s1"}) || !now && !slices.Equal(started, []string{"s1"}) {
+			t.Errorf("now %v: ids %q, started %q", now, ids, started)
+		}
 	}
 }

@@ -93,8 +93,14 @@ type itemPage struct {
 
 // startsAt reports whether the page starts where it was asked to. Jellyfin echoes startIndex; a
 // server or caching proxy that ignores it sends page one again under a huge total, and paging would
-// loop until the caller's deadline (audit 2026-11-16 #23). A page that doesn't say counts as right.
-func (r itemPage) startsAt(start int) bool { return r.StartIndex == nil || *r.StartIndex == start }
+// loop until the caller's deadline (audit 2026-11-16 #23). A page that doesn't say counts as right
+// only as the first.
+func (r itemPage) startsAt(start int) bool {
+	if r.StartIndex == nil {
+		return start == 0
+	}
+	return *r.StartIndex == start
+}
 
 // suffix is the song's file extension without the dot, lower case: from the file's path when the
 // server shows it, else from its container. A list ("mov,mp4,m4a") names m4a when it can, then

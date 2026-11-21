@@ -206,7 +206,9 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		if s.Failed > 0 {
 			rows = append(rows, list("failed", "Failed Songs", "", ""))
 		}
-		rows = append(rows, act("resume", "Resume", ""))
+		// The songs it fetched are on the card, not yet in the Q2's library: a press, as a scan
+		// stops playback (review A5-P1-9).
+		rows = append(rows, list("library", "Update Your Library", "", ""), act("resume", "Resume", ""))
 	} else {
 		rows = append(rows, act("pause", "Pause", ""))
 	}
@@ -264,7 +266,7 @@ func (d *daemon) jobs(cursor string) q2spot.Reply {
 			name = favName
 		}
 		switch {
-		case it.Held && st == "":
+		case it.Held && (st == "" || st == "Held"):
 			st = "Held"
 		case it.Held:
 			st = "Held · " + st
@@ -329,6 +331,17 @@ func (d *daemon) restartSync(cl *jellyfin.Client) string {
 		return " · press Start Sync to continue"
 	}
 	return " · checking the sync again"
+}
+
+// replan restarts a sync under way, after an item joined or left Sync, when its plan removes songs:
+// it could delete an album just put back in Sync (review A5-P1-7). One that removes nothing runs on,
+// a long sync isn't cancelled by each press, and the change waits for the next sync. It returns
+// what to add to the reply, as restartSync.
+func (d *daemon) replan(cl *jellyfin.Client) string {
+	if !d.runner.Removes() {
+		return ""
+	}
+	return d.restartSync(cl)
 }
 
 // onQ2Subtitle is On This Q2's subtitle: how many items are chosen, and the bytes on the card. sel
@@ -519,6 +532,7 @@ func (d *daemon) stoppedRows(s syncer.Snapshot) q2spot.Reply {
 	if s.Failed > 0 {
 		rows = append(rows, list("failed", "Failed Songs", "", ""))
 	}
+	rows = append(rows, list("library", "Update Your Library", "", "")) // as paused (syncRows)
 	return q2spot.Reply{Rows: append(rows, act("retry", "Retry", ""), check,
 		list("details", "Details", "", det))}
 }

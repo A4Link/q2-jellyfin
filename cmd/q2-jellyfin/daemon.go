@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -134,7 +135,7 @@ type daemon struct {
 	server, user, host string
 	lastReq            time.Time
 	armed              armed             // Clear Playback Cache's or Sign Out's first press
-	sectionsShown      bool              // the last menu reply was sections: Settings shows the main list's notices
+	sectionsShown      bool              // the last menu reply was sections (before one, the setting): Settings shows the main list's notices
 	shuffles           map[string]uint64 // each list's Random order (sort.go)
 	albumsAll          *albumsFetch      // every album, being fetched for Random (everyAlbum)
 	autoStart          bool              // Sync Favourites: start the sync once its preview is ready
@@ -197,6 +198,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	// matches this run's (httpask.go). Not from the clock: an unset Q2's repeats after a boot.
 	d.login.askN, d.login.triedN = rand.IntN(1<<30), rand.IntN(1<<30)
 	d.loadServer()
+	d.sectionsShown = d.swipeOn() // until the menu is asked: after a restart Q2 Pod may not ask it (review A7a-P1-8)
 	d.runner = syncer.New(card, src{d}, lg)
 	d.runner.OnDone = d.syncDone
 	d.runner.Free = func() int64 { return d.free(d.card) }
@@ -452,13 +454,32 @@ func damagedSelection() q2spot.Reply {
 
 const selDamaged = "Selection file is damaged: reset it in On This Q2"
 
+// settings is settings.json, the defaults when it is missing or damaged. The Sync preview and
+// Report Plays read settingsErr instead: a damaged file would plan the card at Original, and turn
+// Report Plays back on.
 func (d *daemon) settings() settings {
-	var s settings
-	if b, err := os.ReadFile(filepath.Join(d.dir, "settings.json")); err == nil {
-		json.Unmarshal(b, &s)
-	}
+	s, _ := d.settingsErr()
 	return s
 }
+
+// settingsErr is settings and why settings.json can't be read. A Windows editor's UTF-8 BOM reads
+// as the file without it (review A5-P1-1).
+func (d *daemon) settingsErr() (settings, error) {
+	var s settings
+	b, err := os.ReadFile(filepath.Join(d.dir, "settings.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return s, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF}), &s)
+	}
+	return s, err
+}
+
+// settingsDamaged answers the Sync preview and a setting's press while settings.json can't be read.
+// Only a Sync Quality writes the file again: any other press would save the defaults over it, and
+// the next sync would replace every Opus song at Original (review A5-P2-2).
+const settingsDamaged = "Couldn't read the settings on the card: choose a Sync Quality"
 
 func (d *daemon) saveSettings(s settings) error {
 	b, _ := json.Marshal(s)
@@ -497,9 +518,9 @@ func (d *daemon) tick() {
 // the user made is never replaced.
 func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
-	last := d.lastReq
+	last, wasBusy := d.lastReq, d.wasBusy // busy at the last tick: the next one counts its end
 	d.mu.Unlock()
-	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.qcWaiting() &&
+	return now.Sub(last) >= idleAfter && !wasBusy && !d.runner.Busy() && !d.qcWaiting() &&
 		d.relayIdle(now) && !d.nowKeeps(now) // now.go: its URL queue playing, streamed through the relay
 }
 

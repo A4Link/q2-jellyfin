@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run launcher.sh (the card's run) on the host with a fake app: after a failure it restarts, waiting
-5 s and doubling; an exit of 0 ends the loop and tidies /tmp; a second run while it runs starts
+5 s and doubling to a minute; an exit of 0 ends the loop and tidies /tmp; a second run while it runs starts
 nothing; a TERM to the loop's pid stops the app and tidies,
 and an app that ignores it is killed 2 s later. The app is copied to /tmp after run returns, so a
 slow copy doesn't hold up Q2 Pod, and a failed copy tidies /tmp.
@@ -50,13 +50,13 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:
     tmp = pathlib.Path(d)
     card, t, env = rig(tmp, 'echo "$@" >> "$Q2_TEST/args"\n'
                             'cat "$Q2_T/q2-%s.crash" >> "$Q2_TEST/crashes" 2>/dev/null\n'
-                            '[ "$(wc -l < "$Q2_TEST/args")" -ge 3 ] && exit 0\necho "panic: boom $(wc -l < "$Q2_TEST/args")" >&2\nexit 2\n' % app)
+                            '[ "$(wc -l < "$Q2_TEST/args")" -ge 7 ] && exit 0\necho "panic: boom $(wc -l < "$Q2_TEST/args")" >&2\nexit 2\n' % app)
     subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
-    wait(lambda: len(lines(tmp/'args')) == 3 and not (t/f'q2-{app}').exists(), 'the loop to end')
-    assert lines(tmp/'args') == [f'-dir {card}'] * 3, lines(tmp/'args')
-    assert lines(tmp/'sleeps') == ['5', '10'], lines(tmp/'sleeps')
+    wait(lambda: len(lines(tmp/'args')) == 7 and not (t/f'q2-{app}').exists(), 'the loop to end')
+    assert lines(tmp/'args') == [f'-dir {card}'] * 7, lines(tmp/'args')
+    assert lines(tmp/'sleeps') == ['5', '10', '20', '40', '60', '60'], lines(tmp/'sleeps')  # doubling to a minute
     # each restart finds what the failed run left on stderr and its exit code, for log.txt (M43)
-    assert lines(tmp/'crashes') == ['panic: boom 1', 'exit 2', 'panic: boom 2', 'exit 2'], lines(tmp/'crashes')
+    assert lines(tmp/'crashes') == [l for i in range(1, 7) for l in (f'panic: boom {i}', 'exit 2')], lines(tmp/'crashes')
     assert not list(t.iterdir()), list(t.iterdir())  # the pid, the copied app and launcher gone
 
 with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:

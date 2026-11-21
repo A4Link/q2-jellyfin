@@ -1,8 +1,8 @@
-// Package selection models .jellyfin/selection.json, which a future web
-// client also edits, so unknown top-level fields are preserved.
+// Package selection models .jellyfin/selection.json: what is in Sync.
 package selection
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -36,11 +36,10 @@ type Item struct {
 	Held bool `json:"held,omitempty"`
 }
 
-// Set is the selection. Its file's "exclude" is reserved: never read, always written [].
+// Set is the selection. A key the file has but Set doesn't (an older "exclude") is ignored.
 type Set struct {
-	Version int
-	Items   []Item
-	extra   map[string]json.RawMessage // unknown top-level keys
+	Version int    `json:"version"`
+	Items   []Item `json:"items"`
 }
 
 func Key(kind Kind, id string) string { return string(kind) + ":" + id }
@@ -54,39 +53,19 @@ func Load(path string) (Set, error) {
 	if err != nil {
 		return Set{}, err
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(b, &m); err != nil {
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF}) // "UTF-8 with BOM" from a Windows editor
+	s := Set{Version: 1}
+	if err := json.Unmarshal(b, &s); err != nil {
 		return Set{}, err
 	}
-	s := Set{Version: 1}
-	if v, ok := m["version"]; ok {
-		if err := json.Unmarshal(v, &s.Version); err != nil {
-			return Set{}, err
-		}
-	}
-	if v, ok := m["items"]; ok {
-		if err := json.Unmarshal(v, &s.Items); err != nil {
-			return Set{}, err
-		}
-	}
-	delete(m, "version")
-	delete(m, "items")
-	delete(m, "exclude")
-	s.extra = m
 	return s, nil
 }
 
 func (s Set) Save(path string) error {
-	m := map[string]any{}
-	for k, v := range s.extra {
-		m[k] = v
+	if s.Items == nil {
+		s.Items = []Item{}
 	}
-	items := s.Items
-	if items == nil {
-		items = []Item{}
-	}
-	m["version"], m["items"], m["exclude"] = s.Version, items, []string{}
-	b, err := json.Marshal(m)
+	b, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}

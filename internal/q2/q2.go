@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // State is a key=value status file rewritten whole (a .tmp, renamed), so a reader never sees half of
@@ -155,20 +154,6 @@ func (l *Logger) Write(p []byte) (int, error) {
 func SetupLog(name string) {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.SetOutput(&Logger{Path: "/tmp/" + name + ".log", Max: 256 << 10})
-}
-
-// Every runs fn every d until stop is closed.
-func Every(d time.Duration, stop <-chan struct{}, fn func()) {
-	t := time.NewTicker(d)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			fn()
-		}
-	}
 }
 
 // LocalIP is the Q2's Wi-Fi address: the first IPv4 address of an interface that is up and not the

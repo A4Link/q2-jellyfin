@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/A4Link/q2-jellyfin/internal/applog"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
@@ -47,8 +48,9 @@ func plural(n int, one string) string {
 	return fmt.Sprintf("%d %ss", n, one)
 }
 
+// size is b in MB, rounded, or in GB from 999.5 MB on, which would round to 1000 MB.
 func size(b int64) string {
-	if b >= 1e9 {
+	if b >= 999_500_000 {
 		return fmt.Sprintf("%.1f GB", float64(b)/1e9)
 	}
 	return fmt.Sprintf("%d MB", (b+5e5)/1e6)
@@ -249,7 +251,10 @@ func parseKey(arg string) (selection.Kind, string) {
 
 func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 	start := time.Now()
-	if in, ok := searchSections[req.Op]; ok { // as asked, not as answered: see searchSections
+	// With the field caps word the Server, Account and password pages have no search box: the box is
+	// still the one before, which Return asks for again.
+	noBox := d.caps.Field && (req.Op == "server" || req.Op == "account" || req.Op == "pwlogin")
+	if in, ok := searchSections[req.Op]; ok && !noBox { // as asked, not as answered: see searchSections
 		d.mu.Lock()
 		d.searchIn = in
 		d.mu.Unlock()
@@ -466,8 +471,27 @@ func errDetails(err error, op string, at time.Time) string {
 }
 
 // withErr adds err's text to a Details context, for a failure no op, HTTP status or code explains.
+// A long text (a failed rename names two paths) keeps its start and its end, where the reason is, so
+// the context fits the 400 bytes Q2 Pod sends back and "Error: " + text fits a row (review A7a-P3-1).
+// Bytes are counted as Q2 Pod sends them back, escaped: a % is 3 (review A7a-P4-1).
 func withErr(ctx string, err error) string {
-	return ctx + "|" + strings.ReplaceAll(applog.Redact(err.Error()), "|", "/")
+	e := strings.ReplaceAll(applog.Redact(err.Error()), "|", "/")
+	if n := 240; len(q2spot.Escape(e)) > n {
+		h, room := 0, n/2
+		for ; h < len(e) && len(q2spot.Escape(e[h:h+1])) <= room; h++ {
+			room -= len(q2spot.Escape(e[h : h+1]))
+		}
+		head := q2spot.Cut(e, h)
+		i, room := len(e), n-len(q2spot.Escape(head))-len("…")
+		for ; i > 0 && len(q2spot.Escape(e[i-1:i])) <= room; i-- {
+			room -= len(q2spot.Escape(e[i-1 : i]))
+		}
+		for i < len(e) && !utf8.RuneStart(e[i]) {
+			i++
+		}
+		e = head + "…" + e[i:]
+	}
+	return ctx + "|" + e
 }
 
 func details(ctx string) q2spot.Reply {
@@ -553,6 +577,8 @@ func when(t, now time.Time) string {
 	y, m, dd := now.Date()
 	today := time.Date(y, m, dd, 0, 0, 0, 0, now.Location())
 	switch {
+	case t.After(now): // the Q2's clock went back (review A7a-P3-2)
+		return t.Format("Jan 2 15:04")
 	case !t.Before(today):
 		return "today " + t.Format("15:04")
 	case !t.Before(today.AddDate(0, 0, -1)):
@@ -568,14 +594,22 @@ const settingNotSaved = "Couldn't save the setting"
 func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
-	s := d.settings()
+	s, serr := d.settingsErr()
+	if serr != nil { // a press would save the defaults over it: only a Sync Quality writes it again
+		switch op {
+		case "setstreamq", "reencode", "keepfree", "swipe", "reportplays":
+			return q2spot.Fail(q2spot.Error, settingsDamaged)
+		case "setdefq":
+			s = settings{} // a fresh file
+		}
+	}
 	switch op {
 	case "defq":
 		return syncQualityPage(s)
 	case "streamq":
 		return streamQualityPage(s)
 	case "setdefq": // every synced song's: the next sync brings those at another quality again
-		if quality.Normal(arg) == s.def() { // as it is: a sync under way goes on
+		if serr == nil && quality.Normal(arg) == s.def() { // as it is: a sync under way goes on
 			return q2spot.Reply{Message: "Sync Quality: " + quality.Name(s.def())}
 		}
 		s.StreamQuality = s.stream() // "" followed Sync Quality: it keeps the value it had
@@ -584,8 +618,12 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 			return q2spot.Fail(q2spot.Error, settingNotSaved)
 		}
 		d.changed()
+		reset := ""
+		if serr != nil { // the others couldn't be read: they are the defaults now (review A5-P3-3)
+			reset = " · other settings were reset"
+		}
 		// a sync under way goes on at the new quality
-		return q2spot.Reply{Message: "Sync Quality: " + quality.Name(s.def()) + d.restartSync(d.client())}
+		return q2spot.Reply{Message: "Sync Quality: " + quality.Name(s.def()) + reset + d.restartSync(d.client())}
 	case "setstreamq":
 		s.StreamQuality = quality.Normal(arg)
 		if d.saveSettings(s) != nil {
@@ -636,14 +674,18 @@ func (d *daemon) settingsOp(op, arg string) q2spot.Reply {
 		}
 		return q2spot.Reply{Rows: rows}
 	}
+	cl := d.client() // first: it sets d.user when Settings is the app's first request
 	d.mu.Lock()
 	user, shown := d.user, d.sectionsShown
 	d.mu.Unlock()
+	if cl == nil {
+		user = "" // signed out: d.user stays only to prefill the sign-in
+	}
 	var syncRows []q2spot.Row // the sync, first
 	if shown {                // no root to show the main list's notices: here, first
 		syncRows = append(d.fileRows(), d.favRows()...)
 	}
-	if cl := d.client(); cl != nil {
+	if cl != nil {
 		syncRows = append(syncRows, list("sync", "Sync", d.syncSubtitle(cl), ""))
 	}
 	return q2spot.Reply{Rows: append(syncRows, []q2spot.Row{list("storage", "Quality and Storage", "", ""),

@@ -17,7 +17,7 @@ var (
 	ErrCert         = errors.New("certificate not trusted")
 	ErrNotJellyfin  = errors.New("not a Jellyfin server")
 	ErrInsecure     = errors.New("https required")
-	ErrRedirect     = errors.New("redirect refused")                    // to plain http, other than a plain server to itself
+	ErrRedirect     = errors.New("redirect refused")                    // to plain http (but a plain server to itself), or a POST to another host
 	ErrOtherNetwork = errors.New("not the plain http server's network") // the app's check (cmd: homenet.go)
 	ErrNotAllowed   = errors.New("not on the http allow list")          // the app's check (cmd: httpallow.go)
 	ErrNoHTTPS      = errors.New("no https on this port")               // a plain http server's port typed as https
@@ -65,8 +65,7 @@ func (e *APIError) Error() string {
 func (e *APIError) Unwrap() error { return e.kind }
 
 // statusError is the APIError for an HTTP status Jellyfin answered instead of success.
-// TODO(verify): confirm 403 is what a user without the download permission gets from
-// /Items/{id}/Download on the Jellyfin versions you support.
+// A user without the download permission gets 403 from /Items/{id}/Download (TestLiveOriginal).
 func statusError(op string, status int) *APIError {
 	e := &APIError{Op: op, HTTP: status, Msg: http.StatusText(status)}
 	switch {
@@ -163,11 +162,16 @@ func Message(err error, host string) string {
 		return "API key not accepted, or not an admin key"
 	case errors.Is(err, ErrNoSuchUser):
 		return "No user by that name on the server"
-	case errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) && ae.Op != "AuthenticateByName":
+	case errors.As(err, &ae) && (ae.HTTP == http.StatusUnauthorized || ae.HTTP == http.StatusForbidden) && ae.Op != "AuthenticateByName" && ae.Op != "AuthenticateWithQuickConnect" && ae.Op != "Public":
 		// a token the server stopped taking (the Q2 revoked, the server rebuilt): no password was
 		// typed, and only a new sign-in helps. A list of a library the account lost answers 401
 		// too; the Sync preview then asks CheckMusic and says ErrNoMusic when none is left
 		return "Server refused this Q2. Sign in again: Settings → Account → Sign Out"
+	case errors.As(err, &ae) && ae.HTTP == http.StatusForbidden && (ae.Op == "AuthenticateByName" || ae.Op == "AuthenticateWithQuickConnect"):
+		// Jellyfin's answer to a right password (or an approved Quick Connect code) for a disabled or
+		// locked-out account, or one not allowed from this network or at this hour; a wrong
+		// password is 401
+		return "The server refused this account (disabled, locked, or not allowed from here). Ask its admin"
 	case errors.Is(err, ErrAuth):
 		return "Wrong username or password"
 	case errors.Is(err, ErrCert):

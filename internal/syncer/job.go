@@ -57,16 +57,17 @@ type job struct {
 	m       *library.Manifest
 	unsaved int       // changes not on the card yet
 	saved   time.Time // when the manifest was last saved
-	failed  int       // songs whose download failed this run ...
+	failed  int       // songs whose download failed this run, other than for room ...
 	arrived int       // ... and songs downloaded
-	hold    bool      // a failure the whole sync shares: nothing is removed (I2)
+	hold    bool      // a failure the whole sync shares: nothing is removed (I2); under Entire Library, until a later song arrives
 	removed bool      // the removals ran (space ran them early)
 	// recorded counts the songs recorded at each file (lower case): two at one, from older builds,
 	// keep it when one of them is replaced or removed.
 	recorded map[string]int
 }
 
-// held reports whether this run removes nothing (I2): a failure looked server-wide (hold), or,
+// held reports whether this run removes nothing (I2): a failure looked server-wide (hold; under
+// Entire Library, a song arriving after it clears it, so one song can't hold every run), or,
 // outside Entire Library, several songs failed and fewer arrived, as when an album taken out of
 // Sync is swapped for one that didn't come. A single song failing on its own holds nothing back,
 // nor do any under Entire Library: nothing is swapped there, and its songs can't be taken out of
@@ -291,7 +292,9 @@ func (j *job) downloads() error {
 					return q2.ErrNoCard
 				}
 				j.fail(id, w.Song.Title, "download", err)
-				j.failed++
+				if !errors.Is(err, ErrSpaceLow) { // the removals make the room it lacked
+					j.failed++
+				}
 				switch stop := StopReason(err); {
 				case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 					return stop
@@ -341,6 +344,9 @@ func (j *job) downloads() error {
 				j.cover(j.ctx, w)
 			}
 			j.arrived++
+			if j.p.Whole { // the server is up: a song that always fails as if it were down holds nothing for good
+				j.hold = false
+			}
 			j.finished(w)
 			j.op("download", w.Path)
 		}

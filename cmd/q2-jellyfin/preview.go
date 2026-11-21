@@ -155,15 +155,28 @@ func (d *daemon) computePreview(ctx context.Context, cl *jellyfin.Client, p *pre
 // no songs, so those only it wanted are removed, and it leaves Sync with Start Sync (dropGone). The
 // manifest is read failed or not: the pages share the copy it keeps (onQ2Subtitle).
 func (d *daemon) planPreview(ctx context.Context, cl *jellyfin.Client) (plan.Plan, map[string][]jellyfin.Song, []selection.Item, error) {
-	// The last Entire Library list goes first: a big one would be live beside the new one for the
-	// whole download, or kept after Entire Library is switched off. resolveLibrary sets it again.
-	d.mu.Lock()
-	delete(d.resolved, selection.Key(selection.KindLibrary, "all"))
-	d.mu.Unlock()
+	// The last Entire Library list (and its playlists' but those chosen on their own) goes first: a big
+	// one would be live beside the new one for the whole download, or kept after Entire Library is
+	// switched off. resolveLibrary sets them again.
 	sel, err := d.selection()
+	d.mu.Lock()
+	if _, ok := d.resolved[selection.Key(selection.KindLibrary, "all")]; ok {
+		for k := range d.resolved {
+			if kind, id := parseKey(k); kind == selection.KindLibrary || kind == selection.KindPlaylist && !sel.Has(kind, id) {
+				delete(d.resolved, k)
+			}
+		}
+	}
+	d.mu.Unlock()
 	if err != nil {
 		d.manifestErr()
 		return plan.Plan{}, nil, nil, err
+	}
+	set, err := d.settingsErr() // not the defaults: a sync at Original would replace every Opus song
+	if err != nil {
+		d.log.Printf("settings: %v", err)
+		d.manifestErr()
+		return plan.Plan{}, nil, nil, errors.New(settingsDamaged)
 	}
 	resolved, names, gone, err := d.resolveItems(ctx, cl, &sel)
 	if err == nil && len(gone) > 0 { // or the account lost its music library: nothing goes then
@@ -185,7 +198,7 @@ func (d *daemon) planPreview(ctx context.Context, cl *jellyfin.Client) (plan.Pla
 	if derr := d.runner.DropMissing(man); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
 		d.log.Printf("sync: %v", derr)
 	}
-	pl := plan.Compute(sel, d.settings().def(), d.settings().reencode(), resolved, names, d.manifest(), d.card, d.free(d.card))
+	pl := plan.Compute(sel, set.def(), set.reencode(), resolved, names, d.manifest(), d.card)
 	// The items holding songs already on the card, recorded now: an up-to-date preview starts
 	// no sync, and status reads them after a restart (I12). A running sync records its own.
 	if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
@@ -244,6 +257,9 @@ func (d *daemon) resolveItems(ctx context.Context, cl *jellyfin.Client, sel *sel
 			var ae *jellyfin.APIError
 			if it.Kind != selection.KindFavorites && errors.As(e, &ae) && ae.Code == jellyfin.CodeGone {
 				gone, e = append(gone, it), nil
+				d.mu.Lock() // fetched and empty: Browse sees its songs go, as the plan does (A7b-P5-1)
+				d.resolved[key] = []jellyfin.Song{}
+				d.mu.Unlock()
 			}
 			if e != nil && err == nil {
 				err = e
@@ -340,8 +356,8 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 	}
 	// In the albums' order, as getAlbum gave them, sorted in place (one copy of a big library). A
 	// song whose album the album pages missed (they shifted mid-fetch, audit S14) is kept and sorted
-	// last, so a library scan on the server doesn't make the sync delete songs already on the card; a
-	// song with no album at all stays out, as before.
+	// last, so a library scan on the server doesn't make the sync delete songs already on the card. A
+	// song with no album at all (a loose track) is sorted last the same way (review A5-P1-8).
 	at := make(map[string]int, len(albums))
 	for i, a := range albums {
 		at[a.ID] = i
@@ -352,7 +368,6 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 		}
 		return len(albums)
 	}
-	all = slices.DeleteFunc(all, func(s jellyfin.Song) bool { return s.AlbumID == "" })
 	slices.SortStableFunc(all, func(x, y jellyfin.Song) int { return cmp.Compare(pos(x.AlbumID), pos(y.AlbumID)) })
 	for i := 0; i < len(all); {
 		j := i + 1
@@ -408,6 +423,9 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *jellyfin.Client, sem ch
 	res.songs = all
 	d.mu.Lock()
 	d.resolved[selection.Key(selection.KindLibrary, "all")] = res.songs
+	for _, p := range res.playlists { // the view reads a song of one as kept, or not, as the plan does
+		d.resolved[selection.Key(selection.KindPlaylist, p.id)] = p.songs
+	}
 	d.libCount, d.libKnown = [2]int{len(albums), len(pls)}, true
 	d.mu.Unlock()
 	return res, nil

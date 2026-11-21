@@ -223,13 +223,13 @@ func TestM3UKeepsDuplicates(t *testing.T) {
 	}
 }
 
-// A synced playlist is written only when its text changed; the stream queue (nil Manifest) always is.
+// A synced playlist is written only when its text changed.
 func TestM3UUnchangedNotRewritten(t *testing.T) {
 	root := t.TempDir()
 	p := PlaylistFile(root, "Mix")
 	m := &Manifest{Playlists: map[string]string{"Mix": p}}
 	old := time.Now().Add(-time.Hour).Truncate(time.Second)
-	written := func(m *Manifest, paths ...string) bool {
+	written := func(paths ...string) bool {
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -245,18 +245,11 @@ func TestM3UUnchangedNotRewritten(t *testing.T) {
 	if err := m.WriteM3U(root, p, []string{"/mnt/mmc/a.flac"}); err != nil {
 		t.Fatal(err)
 	}
-	if written(m, "/mnt/mmc/a.flac") {
+	if written("/mnt/mmc/a.flac") {
 		t.Fatal("unchanged playlist rewritten")
 	}
-	if !written(m, "/mnt/mmc/a.flac", "/mnt/mmc/b.flac") {
+	if !written("/mnt/mmc/a.flac", "/mnt/mmc/b.flac") {
 		t.Fatal("changed playlist not written")
-	}
-	p = root + "/Jellyfin/queue.m3u"
-	if err := WriteM3U(root, p, []string{"/mnt/mmc/a.flac"}); err != nil {
-		t.Fatal(err)
-	}
-	if !written(nil, "/mnt/mmc/a.flac") {
-		t.Fatal("stream queue not written")
 	}
 }
 

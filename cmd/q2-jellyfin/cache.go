@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/A4Link/q2-jellyfin/internal/library"
 	"github.com/A4Link/q2-jellyfin/internal/q2spot"
@@ -20,13 +19,13 @@ type cached struct {
 	size int64
 }
 
-// cacheFiles lists the cache's songs; part files and anything else are left out.
+// cacheFiles lists every file in the cache: its songs, and any part, temp or lyrics file an older
+// version or a crash left there.
 func (d *daemon) cacheFiles() []cached {
 	ents, _ := os.ReadDir(d.cacheDir())
 	var out []cached
 	for _, e := range ents {
-		if e.IsDir() || strings.HasSuffix(e.Name(), ".part") || strings.HasSuffix(e.Name(), ".tmp") ||
-			strings.HasSuffix(e.Name(), ".lrc") { // a song's lyrics go with it (library.Remove)
+		if !e.Type().IsRegular() {
 			continue
 		}
 		if fi, err := e.Info(); err == nil {

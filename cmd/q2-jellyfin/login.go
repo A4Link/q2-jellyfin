@@ -65,8 +65,8 @@ const (
 )
 
 // apiKeySignIn turns API key sign-in on: its row on the signed-out root, its pages (keylogin) and
-// apikey= in the sign-in file. Off for now (TODO.md); a key already stored keeps working. A var,
-// so tests can turn it on.
+// apikey= in the sign-in file. It is off; the code is kept in case key sign-in comes back, and a
+// key already stored keeps working. A var, so tests can turn it on.
 var apiKeySignIn = false
 
 // keyOff is why an API key sign-in is refused while apiKeySignIn is off.
@@ -423,6 +423,9 @@ func (d *daemon) signedIn(c jellyfin.Creds) error {
 	d.login.tried = ""                                             // a Try Again from before checks nothing now (review #1)
 	d.login.formUser, d.login.formPw, d.login.formMsg = "", "", "" // whichever way it signed in (clearForm)
 	d.login.mu.Unlock()
+	if d.reportsOn() {
+		d.startReports()
+	}
 	return nil
 }
 
@@ -435,13 +438,11 @@ func (d *daemon) startQC() q2spot.Reply {
 	if server == "" {
 		return q2spot.Fail(q2spot.Error, "Set the server first")
 	}
-	if plainHTTP(server) { // its token would be refused here at once (homenet.go)
-		if err := d.onHomeNetwork(server); err != nil {
-			return q2spot.Fail(q2spot.Error, jellyfin.Message(err, hostOf(server)))
-		}
+	if err := d.qcHome(server); err != nil {
+		return q2spot.Fail(q2spot.Error, jellyfin.Message(err, hostOf(server)))
 	}
 	d.cancelQC()
-	cl, err := d.clientFor(jellyfin.Creds{Server: d.loginServer()})
+	cl, err := d.clientFor(jellyfin.Creds{Server: server})
 	if err != nil {
 		return q2spot.Fail(q2spot.Error, jellyfin.Message(err, hostOf(server)))
 	}
@@ -460,11 +461,21 @@ func (d *daemon) startQC() q2spot.Reply {
 	if poll == 0 {
 		poll = qcPoll
 	}
-	d.spawn(func() { d.pollQC(pctx, cl, secret, poll) })
+	d.spawn(func() { d.pollQC(pctx, cl, server, secret, poll) })
 	return q2spot.Reply{Message: "Approve code " + code + " in a Jellyfin app"}
 }
 
-func (d *daemon) pollQC(ctx context.Context, cl *jellyfin.Client, secret string, every time.Duration) {
+// qcHome is nil, or for a plain http server, onHomeNetwork: the Quick Connect client has no
+// secret of the sign-in's, so homeOnly doesn't check it, but its secret and the token swapped for
+// it go only to the server's home Wi-Fi too (homenet.go).
+func (d *daemon) qcHome(server string) error {
+	if !plainHTTP(server) {
+		return nil
+	}
+	return d.onHomeNetwork(server)
+}
+
+func (d *daemon) pollQC(ctx context.Context, cl *jellyfin.Client, server, secret string, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	defer d.endQC()
@@ -477,22 +488,35 @@ func (d *daemon) pollQC(ctx context.Context, cl *jellyfin.Client, secret string,
 			return
 		case <-t.C:
 		}
+		if err := d.qcHome(server); err != nil {
+			if errors.Is(err, errNetworkUnsure) { // can't tell yet: ask again next tick
+				continue
+			}
+			d.setLoginMsg(jellyfin.Message(err, hostOf(server)))
+			return
+		}
 		rctx, cancel := context.WithTimeout(ctx, loginIn)
 		ok, err := cl.QuickConnectPoll(rctx, secret)
 		if err == nil && ok {
+			if err = d.qcHome(server); errors.Is(err, errNetworkUnsure) { // nothing sent yet: wait a tick
+				cancel()
+				continue
+			}
 			var c jellyfin.Creds
-			if c, err = cl.QuickConnectSignIn(rctx, secret); err == nil {
-				err = d.signedIn(c)
+			if err == nil { // checked again: the poll may have taken seconds
+				if c, err = cl.QuickConnectSignIn(rctx, secret); err == nil {
+					err = d.signedIn(c)
+				}
 			}
 			cancel()
 			if err != nil {
-				d.setLoginMsg(jellyfin.Message(err, hostOf(d.loginServer())))
+				d.setLoginMsg(jellyfin.Message(err, hostOf(server)))
 			}
 			return
 		}
 		cancel()
 		if err != nil && !errors.Is(err, jellyfin.ErrUnreachable) { // a Wi-Fi blip: keep polling
-			d.setLoginMsg(jellyfin.Message(err, hostOf(d.loginServer())))
+			d.setLoginMsg(jellyfin.Message(err, hostOf(server)))
 			return
 		}
 	}

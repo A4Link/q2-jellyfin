@@ -30,8 +30,9 @@ import (
 // file aside for a later tick. What is in the outbox goes as reports do: when the server is in reach, retried
 // with a growing wait, never on a page's time; the state is sent whatever the server's is
 // (POST or DELETE /UserFavoriteItems), and only the last state of a song waits. A song the server
-// no longer has (404) is dropped; one it refuses (400, 403) is dropped too, logged, and the root
-// (Settings with sections) says so for the rest of the app's run (favRows).
+// no longer has (404) is dropped; one it refuses (400, or 403 while the account still answers: a
+// 403 to everything waits) is dropped too, logged, and the root (Settings with sections) says so
+// for the rest of the app's run (favRows).
 //
 // Signed out, the file waits for a sign-in; Sign Out drops it with the outbox: the presses were the
 // account's. Favourites and Sync Favourites go by the server's list, as before: a song un-hearted
@@ -158,8 +159,9 @@ func (d *daemon) sendFav(cl *jellyfin.Client, r report) error {
 	return cl.SetFavorite(ctx, r.Item, r.On)
 }
 
-// httpStatus is err's HTTP status, 0 when it has none (no answer). For a favourite, 403 (not allowed)
-// is the server's final word as Refused's 400 and 404 are; 404 is a song gone, said to no one.
+// httpStatus is err's HTTP status, 0 when it has none (no answer). A 403 is one item's final word,
+// as Refused's 400 and 404 are, only while the account still answers (sendReports asks); 404 is a
+// song gone, said to no one.
 func httpStatus(err error) int {
 	var ae *jellyfin.APIError
 	if errors.As(err, &ae) {

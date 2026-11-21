@@ -136,6 +136,21 @@ func TestSectionKeepsItsPage(t *testing.T) {
 	}
 }
 
+// Previous page back to an album's first window ("0") shows it as first opened (""): Sync Now and
+// all.
+func TestPreviousPageKeepsSyncNow(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 250}, "window", true)
+	d.do("toggle", "album:al0")
+	first := d.do("album", "album:al0")
+	if first.Rows[0].Title != "Sync Now" {
+		t.Fatalf("first open: %q", titles(first)[:3])
+	}
+	d.do("album", "album:al0", "200") // Next page
+	if r := d.do("album", "album:al0", "0"); !slices.Equal(titles(r), titles(first)) || r.Cursor != first.Cursor {
+		t.Fatalf("Previous page: %q…, cursor %q; want %q…, %q", titles(r)[:3], r.Cursor, titles(first)[:3], first.Cursor)
+	}
+}
+
 // Albums page by the server: the windows cut it the same way.
 func TestAlbumsWindows(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 260, songsPer: 1}, "window", true)

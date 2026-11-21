@@ -121,6 +121,21 @@ func TestEntireLibraryKeepsSongsOfAMissedAlbum(t *testing.T) {
 	}
 }
 
+// A song with no album (a loose track) is in Entire Library too, in the unknown-album folder
+// (review A5-P1-8).
+func TestEntireLibraryKeepsSongsWithNoAlbum(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2, noAlbum: "al1.1"}, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	ids := map[string]string{}
+	for _, w := range d.daemon.preview.plan.Add {
+		ids[w.Song.ID] = w.Path
+	}
+	if len(ids) != 4 || ids["al1.1"] == "" {
+		t.Errorf("planned %v, want all 4 songs including al1.1", ids)
+	}
+}
+
 // countLyrics counts lyrics requests, answering each as lyricSrc does.
 type countLyrics struct {
 	urlSrc
