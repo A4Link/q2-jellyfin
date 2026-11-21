@@ -78,8 +78,11 @@ func (g homeGate) RoundTrip(req *http.Request) (*http.Response, error) {
 // onHomeNetwork is nil when the network now is one kept for server, errNetworkUnsure when that
 // can't be told yet, or jellyfin.ErrOtherNetwork. A refusal is logged once, until one is allowed.
 func (d *daemon) onHomeNetwork(server string) error {
-	if !d.allowed(server) { // taken off the allow list on a computer since it was said Yes to
+	if a := d.allowList(); !a.has(server) { // taken off the allow list on a computer since it was said Yes to
 		d.logRefusal(func() { d.log.Printf("plain http: nothing sent: the server isn't on %s", allowFile) })
+		if a.off() && a.skipped {
+			return jellyfin.ErrAllowUnread
+		}
 		return jellyfin.ErrNotAllowed
 	}
 	now := d.network()

@@ -4,6 +4,20 @@ All notable changes for users of q2-jellyfin. Format: [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Fixed
+
+- **An `http-allow.txt` saved as "UTF-8 with BOM" keeps its first line:** some Windows editors put an invisible mark at the start of the file, and the address on the first line was skipped, so plain HTTP could turn off or a server you said Yes to was refused.
+- **A plain HTTP server typed with `:80` may redirect to itself without the port**, as nginx does; it was refused with *The server redirected to another address*.
+- **Edits to `http-allow.txt` take effect without restarting the app**, and a file that couldn't be read is read again when it can be. They used to wait until the app restarted.
+- **No file is left in `/tmp` on each Wi-Fi check while wpa_supplicant isn't running.**
+- **Saying Yes to a server after `http-allow.txt` was deleted keeps the home ranges.** The file could be left holding only that server, so a bare address such as `192.168.1.10:8096` stopped meaning `http://`. A Yes while the file can't be read leaves it as it is and says *Couldn't write http-allow.txt*.
+
+### Changed
+
+- **An `http-allow.txt` with lines but no address the app can read** (a typo, or saved as UTF-16 "Unicode") says *http-allow.txt has no address the app can read*, not *Plain HTTP is turned off in http-allow.txt*. Plain HTTP stays off until it's fixed.
+- **The first question for a plain HTTP server says *Say Yes only at home* too**, as the question on a new Wi-Fi does: its Yes also keeps the Wi-Fi the Q2 is on as the server's home network, so answering it at a friend's or a café's sends the sign-in on that Wi-Fi later.
+- **README:** Tailscale's 100.64.0.0/10 gets the ordinary HTTP warning, as the home ranges do, because the Q2 reaches it through your own router; the README said only the home ranges did.
+
 ## [0.8.2] - 2026-11-21
 
 ### Changed

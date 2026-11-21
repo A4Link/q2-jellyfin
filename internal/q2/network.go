@@ -22,9 +22,6 @@ type Network struct {
 	Gateway string `json:"gateway,omitempty"`
 }
 
-// Known reports whether anything about the network could be read.
-func (n Network) Known() bool { return n.SSID != "" || n.Gateway != "" }
-
 // Same reports whether now is the network n was read on: n knows its gateway's MAC (a Wi-Fi name
 // alone is anyone's to copy) and every part n knows matches now's. A part now can't read counts
 // as different.
@@ -71,10 +68,10 @@ func wifiSSID() string {
 func wpaStatus(path string) map[string]string {
 	local := filepath.Join(os.TempDir(), fmt.Sprintf("q2-jellyfin-wpa-%d-%d", os.Getpid(), wpaSeq.Add(1)))
 	c, err := net.DialUnix("unixgram", &net.UnixAddr{Name: local, Net: "unixgram"}, &net.UnixAddr{Name: path, Net: "unixgram"})
+	defer os.Remove(local) // bound before the connect, so also when the dial fails
 	if err != nil {
 		return nil
 	}
-	defer os.Remove(local)
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(time.Second))
 	if _, err := c.Write([]byte("STATUS")); err != nil {

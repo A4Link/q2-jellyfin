@@ -78,7 +78,7 @@ You can check them from a computer on the same network: `http://192.168.1.10:809
 
 Always type the port. A name such as `nas.local:8096` means HTTPS, which Jellyfin's HTTP port doesn't speak: use the IP address.
 
-**3. Answer the question.** The Q2 checks the address is a Jellyfin server (sending nothing secret), then says *192.168.1.10:8096 is served over HTTP* and *Not encrypted*, with **Yes, allow HTTP** and **No**. Yes adds the server to the allow list (below), so it isn't asked again, and keeps your Wi-Fi as the server's home network. Then sign in. **Quick Connect is the best choice here:** no password is sent. Use a Jellyfin user just for the Q2, not an administrator.
+**3. Answer the question.** The Q2 checks the address is a Jellyfin server (sending nothing secret), then says *192.168.1.10:8096 is served over HTTP*, *Not encrypted* and *Say Yes only at home*, with **Yes, allow HTTP** and **No**. Answer it at home. Yes adds the server to the allow list (below), so it isn't asked again, and keeps your Wi-Fi as the server's home network. Then sign in. **Quick Connect is the best choice here:** no password is sent. Use a Jellyfin user just for the Q2, not an administrator.
 
 **Your home Wi-Fi only.** The Q2 keeps the Wi-Fi's name and the router's MAC address with the server, for up to 4 Wi-Fis (a 5 GHz name, an extender). On any other Wi-Fi (a hotel's, a café's, where 192.168.1.10 can be some other device) it sends your sign-in nowhere and says *Not this server's home Wi-Fi*. At home on another of your Wi-Fis, or after a new router, type the address again: the Q2 asks *This Wi-Fi isn't saved for 192.168.1.10:8096* / *Say Yes only at home*. Say Yes only at home: elsewhere a device could pose as your server. Just after Wi-Fi wakes, the Q2 may not read the network yet: it sends nothing and says it can't reach the server; try again a moment later.
 
@@ -86,7 +86,7 @@ Always type the port. A name such as `nas.local:8096` means HTTPS, which Jellyfi
 - a range, such as `192.168.0.0/16`: an IP address and port in it, typed on the Q2, means HTTP. The file starts with the home ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`;
 - an IP address and port, such as `192.168.1.10:8096`: a server you said Yes to (the Q2 adds these).
 
-Edit it on a computer: add a range (Tailscale's `100.64.0.0/10`, say), or delete a server's line to stop the Q2 sending it anything (it then says *Not on http-allow.txt: nothing sent*). Leave no address in it to turn plain HTTP off; delete the file to get the defaults back (that also forgets the servers you said Yes to: type a server's address again on the Q2 and say Yes, or add its line back, e.g. `192.168.1.10:8096`). `http://` typed in full on the Q2 works for any IPv4 address and port, even one outside the list; outside the home ranges the question says *On the internet, NOT encrypted*: your sign-in would cross the internet readable, so use HTTPS for that.
+Edit it on a computer: add a range (Tailscale's `100.64.0.0/10`, say), or delete a server's line to stop the Q2 sending it anything (it then says *Not on http-allow.txt: nothing sent*). Leave no address in it to turn plain HTTP off; delete the file to get the defaults back (that also forgets the servers you said Yes to: type a server's address again on the Q2 and say Yes, or add its line back, e.g. `192.168.1.10:8096`). `http://` typed in full on the Q2 works for any IPv4 address and port, even one outside the list; outside the home ranges and Tailscale's `100.64.0.0/10` (which the Q2 reaches through your own router) the question says *On the internet, NOT encrypted*: your sign-in would cross the internet readable, so use HTTPS for that.
 
 **Signing in from a computer** (`Jellyfin sign-in.txt`) works for an HTTP server only once its address has been typed on the Q2 and said Yes to, on the Wi-Fi the Q2 is on.
 
@@ -103,6 +103,7 @@ Edit it on a computer: add a range (Tailscale's `100.64.0.0/10`, say), or delete
 | *Can't check this Wi-Fi yet. Try again in a moment* | The Q2 couldn't read the router's address yet: try again. |
 | *Not this server's home Wi-Fi…* | The Q2 is on a Wi-Fi not saved for the server: nothing was sent. |
 | *Plain HTTP is turned off in http-allow.txt* | The allow list has no address: add one, or delete the file. |
+| *http-allow.txt has no address the app can read* | The allow list has lines, but none is an address the app can read (a typo, or the file saved as UTF-16 "Unicode"): fix the line, save the file as UTF-8, or delete it. Plain HTTP is off until then. |
 | *No HTTPS on this port. Plain HTTP is turned off in http-allow.txt* | An IP address was typed on a port with no HTTPS, and the allow list has no address: use the server's HTTPS port, or add an address to `http-allow.txt` (or delete the file). |
 
 **Or use HTTPS instead:** the safe way, at home and away. Put a reverse proxy (Caddy, Nginx Proxy Manager, Traefik) in front of Jellyfin with a certificate from a public authority (Let's Encrypt) for a name you own, and type that name on the Q2. A self-signed certificate isn't accepted.

@@ -17,6 +17,18 @@ import (
 // oldPage is the update page as the firmware reads it off the socket.
 const oldPage = "Q2SPOT/1\n7\tok\t\t\ninfo\t\t" + oldFirmware + "\t\t\t\n"
 
+// sockDir is a new empty directory under /tmp for a test's Unix sockets, removed after the test.
+// A socket's path holds at most 108 bytes, which t.TempDir() under a long TMPDIR goes past.
+func sockDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "qj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
 // askSock sends req to the app at sock, once it listens, and returns the reply.
 func askSock(t *testing.T, sock, req string) string {
 	t.Helper()
@@ -45,7 +57,7 @@ func askSock(t *testing.T, sock, req string) string {
 // other, is answered with the one page asking for an update, over the socket as the firmware asks:
 // a plain info row, which that firmware draws.
 func TestOldFirmwarePage(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "s.sock")
+	sock := filepath.Join(sockDir(t), "s.sock")
 	go serveOld(sock)
 	if oldFirmware != "Needs Q2 Pod 1.7.3 or later. Update Q2 Pod to use Jellyfin." {
 		t.Fatalf("text %q", oldFirmware)
@@ -87,7 +99,7 @@ func TestOldFirmwareGate(t *testing.T) {
 		return
 	}
 	card := t.TempDir()
-	gateApp(t, card, t.TempDir())
+	gateApp(t, card, sockDir(t))
 	if e, err := os.ReadDir(card); err != nil || len(e) != 0 {
 		t.Fatalf("card %v %v", e, err)
 	}
@@ -96,7 +108,7 @@ func TestOldFirmwareGate(t *testing.T) {
 // C3 before 1.7.3 too: the update page encrypts a sign-in an older version saved unencrypted, so
 // the token isn't left plain on the card until Q2 Pod is updated.
 func TestOldFirmwareGateEncrypts(t *testing.T) {
-	card, tmp := t.TempDir(), t.TempDir()
+	card, tmp := t.TempDir(), sockDir(t)
 	dir := filepath.Join(card, ".jellyfin")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

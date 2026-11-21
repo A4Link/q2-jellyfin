@@ -488,7 +488,7 @@ func TestPlainHTTPCheckKeepsDateURL(t *testing.T) {
 	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" {
 		t.Fatalf("%q", titles(r))
 	}
-	d.do("menu", r.Rows[3].Context) // No
+	d.do("menu", r.Rows[4].Context) // No
 	if tlsroots.DateURL() != "https://music.example" {
 		t.Fatalf("date URL %q", tlsroots.DateURL())
 	}
@@ -1203,13 +1203,13 @@ func TestPlainHTTPAsked(t *testing.T) {
 	d := privateHTTPDaemon(t, &authServer{})
 	d.do("menu")
 	r := d.do("search", "192.168.111.111:8096")
-	if got := strings.Join(titles(r), "|"); got != "192.168.111.111:8096 is served over HTTP|Not encrypted|Yes, allow HTTP|No" {
+	if got := strings.Join(titles(r), "|"); got != "192.168.111.111:8096 is served over HTTP|Not encrypted|Say Yes only at home|Yes, allow HTTP|No" {
 		t.Fatalf("%q", got)
 	}
 	if d.loginServer() != "" {
 		t.Fatal("kept before Yes")
 	}
-	no := r.Rows[3] // find matches by prefix: "Not encrypted" starts with "No"
+	no := r.Rows[4] // find matches by prefix: "Not encrypted" starts with "No"
 	if no.URI != "deny" {
 		t.Fatalf("No %+v", no)
 	}
@@ -1341,6 +1341,34 @@ func TestHomeNetworkNotAllowed(t *testing.T) {
 	err := d.onHomeNetwork("http://192.168.111.111:8096")
 	if !errors.Is(err, jellyfin.ErrNotAllowed) || jellyfin.Message(err, "x") != "Not on http-allow.txt: nothing sent" {
 		t.Fatal(err)
+	}
+}
+
+// Review 0.8.3 p1: signed in, an allow list re-saved as UTF-16 on a computer (still holding the
+// server) has no address the app can read: nothing is sent, and the message says why.
+func TestHomeNetworkAllowListUnreadable(t *testing.T) {
+	a := &authServer{}
+	d := privateHTTPDaemon(t, a)
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	d.do("pwlogin")
+	d.do("search", "u")
+	loginSuccessPage(t, d.do("search", typedPassword))
+	p := filepath.Join(d.dir, allowFile)
+	b, _ := os.ReadFile(p)
+	utf16 := []byte{0xff, 0xfe}
+	for _, c := range string(b) {
+		utf16 = append(utf16, byte(c), 0)
+	}
+	os.WriteFile(p, utf16, 0o644)
+	os.Chtimes(p, time.Now(), time.Now().Add(time.Minute)) // FAT's times are to 2 s
+	before := a.requests.Load()
+	err := d.client().Logout(context.Background())
+	if !errors.Is(err, jellyfin.ErrNotAllowed) || a.requests.Load() != before {
+		t.Fatalf("%v, %d requests sent", err, a.requests.Load()-before)
+	}
+	if m := jellyfin.Message(err, "x"); m != "http-allow.txt has no address the app can read" {
+		t.Fatal(m)
 	}
 }
 
@@ -1515,15 +1543,15 @@ func TestPlainHTTPAskedField(t *testing.T) {
 	d.caps.Field = true
 	d.do("menu")
 	r := d.do("setserver", "menu", "192.168.111.111:8096")
-	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" || r.Rows[3].URI != "deny" {
+	if r.Rows[0].Title != "192.168.111.111:8096 is served over HTTP" || r.Rows[4].URI != "deny" {
 		t.Fatalf("%q", titles(r))
 	}
-	r = d.do("menu", r.Rows[3].Context)
+	r = d.do("menu", r.Rows[4].Context)
 	if row := r.Rows[len(r.Rows)-1]; row.Title != "Server Address:" || d.loginServer() != "" {
 		t.Fatalf("No: %q", titles(r))
 	}
 	r = d.do("setserver", "menu", "192.168.111.111:8096")
-	r = d.do("menu", r.Rows[2].Context)
+	r = d.do("menu", r.Rows[3].Context)
 	if got := strings.Join(titles(r), "|"); got != "Server Address:|Sign In with Quick Connect|Sign In with Password|Warning: HTTP, not encrypted" {
 		t.Fatalf("Yes: %q", got)
 	}

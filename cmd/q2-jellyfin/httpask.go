@@ -48,16 +48,17 @@ func (d *daemon) askPage() q2spot.Reply {
 	n := strconv.Itoa(a.n)
 	yes := q2spot.Row{Kind: "page", URI: "allow", Context: "allow:" + n, Title: "Yes, allow HTTP", Subtitle: "Adds it to " + allowFile}
 	no := q2spot.Row{Kind: "page", URI: "deny", Context: "deny:" + n, Title: "No"}
+	// Both questions' Yes keeps the Wi-Fi the Q2 is on as one the sign-in may be sent on.
+	home := q2spot.Row{Kind: "info", Title: "Say Yes only at home", Subtitle: "Elsewhere a device could pose as your server"}
 	if a.newWiFi {
 		yes.Title, yes.Subtitle = "Yes, this is my home Wi-Fi", "Its sign-in is sent on this Wi-Fi too"
-		return q2spot.Reply{Rows: []q2spot.Row{info("This Wi-Fi isn't saved for " + addr),
-			{Kind: "info", Title: "Say Yes only at home", Subtitle: "Elsewhere a device could pose as your server"}, yes, no}}
+		return q2spot.Reply{Rows: []q2spot.Row{info("This Wi-Fi isn't saved for " + addr), home, yes, no}}
 	}
 	risk := q2spot.Row{Kind: "info", Title: "Not encrypted", Subtitle: "Others on this network can read your password and sign-in"}
 	if onInternet(a.server) {
 		risk = q2spot.Row{Kind: "info", Title: "On the internet, NOT encrypted", Subtitle: "Anyone on the way can read your password and sign-in"}
 	}
-	return q2spot.Reply{Rows: []q2spot.Row{info(addr + " is served over HTTP"), risk, yes, no}}
+	return q2spot.Reply{Rows: []q2spot.Row{info(addr + " is served over HTTP"), risk, home, yes, no}}
 }
 
 // answerHTTP is a page asked again with its question's answer last: Yes adds the server to the

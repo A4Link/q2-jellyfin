@@ -123,6 +123,8 @@ type daemon struct {
 	netRefused     bool // the last secret's request was refused (homenet.go logRefusal)
 	allowMu        sync.Mutex
 	allow          *allowList  // http-allow.txt as last read, nil to read it again (httpallow.go)
+	allowFI        os.FileInfo // its stat at that read, nil after a failed one
+	allowGone      bool        // that read found it missing (its defaults kept until it is there)
 	wifiOff        func() bool // the user's Wi-Fi switch is off (q2.WiFiSwitchedOff)
 	answerIn       time.Duration
 	selMu          sync.Mutex // held from loading selection.json to saving it, so no edit is lost

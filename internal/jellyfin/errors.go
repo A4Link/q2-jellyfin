@@ -21,6 +21,9 @@ var (
 	ErrOtherNetwork = errors.New("not the plain http server's network") // the app's check (cmd: homenet.go)
 	ErrNotAllowed   = errors.New("not on the http allow list")          // the app's check (cmd: httpallow.go)
 	ErrNoHTTPS      = errors.New("no https on this port")               // a plain http server's port typed as https
+	// ErrAllowUnread is an allow list with lines but no address the app can read (UTF-16, a
+	// typo); it is ErrNotAllowed too.
+	ErrAllowUnread = fmt.Errorf("no address read in the http allow list: %w", ErrNotAllowed)
 	// ErrQuickConnectOff is a server whose admin hasn't turned Quick Connect on.
 	ErrQuickConnectOff = errors.New("quick connect is turned off on the server")
 	// ErrQuickConnectExpired is a code the server no longer knows (it expired, or the server restarted).
@@ -111,6 +114,8 @@ func transportKind(err error) error {
 		return ErrRedirect
 	case errors.Is(err, ErrOtherNetwork):
 		return ErrOtherNetwork
+	case errors.Is(err, ErrAllowUnread):
+		return ErrAllowUnread
 	case errors.Is(err, ErrNotAllowed):
 		return ErrNotAllowed
 	case noHTTPS(err):
@@ -187,6 +192,8 @@ func Message(err error, host string) string {
 		return "The server redirected to another address. Check the address and port"
 	case errors.Is(err, ErrOtherNetwork):
 		return "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there"
+	case errors.Is(err, ErrAllowUnread):
+		return "http-allow.txt has no address the app can read"
 	case errors.Is(err, ErrNotAllowed):
 		return "Not on http-allow.txt: nothing sent"
 	case errors.Is(err, ErrNoHTTPS):
