@@ -36,7 +36,9 @@ func (c *Client) QuickConnectPoll(ctx context.Context, secret string) (bool, err
 		Authenticated bool `json:"Authenticated"`
 	}
 	if err := c.call(ctx, "GET", "/QuickConnect/Connect", url.Values{"secret": {secret}}, nil, &r); err != nil {
-		return false, kindOn(err, ErrQuickConnectExpired, 404) // "Unknown quick connect secret": it expired
+		// 404 "Unknown quick connect secret": it expired. 401/403: Quick Connect was turned off (or a
+		// proxy refused) while the code was on screen; no one is signed in yet to sign out
+		return false, kindOn(kindOn(err, ErrQuickConnectExpired, 404), ErrQuickConnectOff, 401, 403)
 	}
 	return r.Authenticated, nil
 }

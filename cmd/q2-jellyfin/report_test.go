@@ -8,10 +8,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/A4Link/q2-jellyfin/internal/applog"
+	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/fw"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
 	"github.com/A4Link/q2-jellyfin/internal/library"
@@ -412,9 +414,14 @@ func TestReportsStopInFlight(t *testing.T) {
 	n.reportStatus.Store(503)
 	d.streamStarted(jellyfin.Song{ID: "al0.2"})
 	d.bg.Wait()
-	d.notePlays(func(*playsMark) {}) // a read that ended after Off
-	if m := d.do("reportplays").Message; m != "Report Plays to Server: On" || exists(d.playsPath()) || len(d.outbox()) != 0 {
-		t.Fatalf("%q plays %v outbox %+v", m, exists(d.playsPath()), d.outbox())
+	d.notePlays(func(m *playsMark) { m.At = 1000 }) // a read that ended after Off
+	on := time.Now().Unix()
+	m := d.do("reportplays").Message
+	d.rep.playsMu.Lock()
+	mark, _ := d.loadPlays()
+	d.rep.playsMu.Unlock()
+	if m != "Report Plays to Server: On" || mark.At < on || len(d.outbox()) != 0 {
+		t.Fatalf("%q plays %+v outbox %+v", m, mark, d.outbox())
 	}
 	pressSignOut(d)
 	d.bg.Wait()
@@ -455,7 +462,9 @@ func TestReportsNoAnswer(t *testing.T) {
 
 // A tried play is compared with the server's last-played date to the second, whatever its
 // fraction or zone: the same, it had counted and is dropped unsent; another, or one that can't be
-// read, and it goes.
+// read, and it goes. A tried live start (Sent) is dated by the server's clock when it arrived, never
+// before it was sent: a date from a minute before Sent (the clocks' difference) to liveSpan after
+// it is that start; an earlier one is another play, a replay of the song before the start was lost.
 func TestReportsTriedCompare(t *testing.T) {
 	for _, c := range []struct {
 		server string
@@ -474,6 +483,28 @@ func TestReportsTriedCompare(t *testing.T) {
 		d.sendNow(t)
 		if sent := len(n.reported()) == 1; sent != c.sent || len(d.outbox()) != 0 {
 			t.Errorf("%s: sent %v, outbox %+v", c.server, sent, d.outbox())
+		}
+	}
+	for _, c := range []struct {
+		server string
+		sent   bool
+	}{
+		{"2023-11-14T22:23:20Z", false}, // the start went 10 minutes into the song: Sent
+		{"2023-11-14T22:33:20Z", false}, // liveSpan on from Sent
+		{"2023-11-14T22:13:20Z", false}, // At itself: a play marked at its time
+		{"2023-11-14T22:43:21Z", true},  // more than liveSpan after Sent
+		{"2023-11-14T22:13:19Z", true},  // a second before At, more than a minute before Sent
+		{"2023-11-14T22:20:00Z", true},  // a play 200 s before Sent: the song before it, repeated
+		{"2023-11-14T22:22:19Z", true},  // more than a minute before Sent
+		{"2023-11-14T22:22:50Z", false}, // the server's clock 30 s behind
+	} {
+		n := &nav{}
+		d := newTestDaemon(t, n, "", true)
+		n.lastPlayed.Store("al0.0", c.server)
+		d.rep.box.add(report{Kind: "played", Item: "al0.0", At: 1700000000, Sent: 1700000600, Tried: true})
+		d.sendNow(t)
+		if sent := len(n.reported()) == 1; sent != c.sent || len(d.outbox()) != 0 {
+			t.Errorf("live %s: sent %v, outbox %+v", c.server, sent, d.outbox())
 		}
 	}
 }
@@ -720,6 +751,15 @@ func TestReportsNowRepeat(t *testing.T) {
 		{130 * time.Second, "100\t0\tplaying\t190\t0", []string{"progress al0.0 190 false"}},
 		{160 * time.Second, "100\t0\tplaying\t1\t0", []string{"progress al0.0 1 false"}},
 	})
+	// A song of 20 s is all first and last seconds: played on, it is one play; back to its start, two.
+	d.nowQueued("200", []string{"al0.1"})
+	d.nowSteps(t, n, t0, []nowStep{
+		{200 * time.Second, "200\t0\tplaying\t0\t20", []string{"stop al0.0 10000000", "start al0.1"}},
+		{205 * time.Second, "200\t0\tplaying\t5\t20", nil},
+		{210 * time.Second, "200\t0\tplaying\t10\t20", nil},
+		{215 * time.Second, "200\t0\tplaying\t15\t20", nil},
+		{220 * time.Second, "200\t0\tplaying\t0\t20", []string{"stop al0.1 150000000", "start al0.1"}},
+	})
 }
 
 // Paused, the firmware writes nothing more; Progress (paused, the same position) goes again every
@@ -753,5 +793,218 @@ func TestReportsNowNoPlaysMark(t *testing.T) {
 	if exists(d.playsPath()) {
 		b, _ := os.ReadFile(d.playsPath())
 		t.Fatalf("plays.json written: %s", b)
+	}
+}
+
+// Report Plays turned on, or a sign-in, marks the place in Q2 Pod's log then, Wi-Fi or not: a
+// listen played after it goes at the next send, even when no send read the log between. With the
+// clock unset then (Q2 Pod logs nothing while it is), the place is the log's newest listen.
+func TestReportsOnMarksPlace(t *testing.T) {
+	t.Cleanup(func() { clock = time.Now })
+	for _, how := range []string{"on", "sign-in", "on, clock unset", "sign-in, clock unset"} {
+		n := &nav{}
+		d := newTestDaemon(t, n, "", true)
+		m, _ := reportSongs(d.card)
+		m.Save(d.card, filepath.Join(d.dir, "manifest.json"))
+		d.sendNow(t)                            // the first read
+		d.localIP = func() string { return "" } // away from Wi-Fi
+		t0 := time.Now()
+		old := logHeader + listen("Miles", "Kind", "So What", 3, t0.Unix()-60) // before the place
+		os.WriteFile(filepath.Join(d.card, ".scrobbler.log"), []byte(old), 0o644)
+		if strings.HasSuffix(how, "unset") {
+			unsetClock(t)
+		}
+		if strings.HasPrefix(how, "on") {
+			d.do("reportplays") // off
+			d.do("reportplays") // on
+		} else {
+			c, _ := creds.Load(d.dir)
+			pressSignOut(d)
+			d.bg.Wait()
+			if err := d.signedIn(c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		clock = time.Now
+		d.tick()
+		d.bg.Wait()
+		played := t0.Unix() + 600 // a synced song, ten minutes on
+		os.WriteFile(filepath.Join(d.card, ".scrobbler.log"), []byte(old+listen("Miles", "Kind", "Blue", 2, played)), 0o644)
+		clock = func() time.Time { return t0.Add(time.Hour) } // Wi-Fi back an hour on
+		d.localIP = func() string { return "192.168.1.20" }
+		d.tick()
+		d.bg.Wait()
+		clock = time.Now
+		if got, want := n.reported(), []string{"played blue1 " + day(played)}; !slices.Equal(got, want) {
+			t.Errorf("%s: reported %q, want %q", how, got, want)
+		}
+	}
+}
+
+// Sign Out while a send reads Q2 Pod's log: the plays read don't stay in the outbox for the next
+// account.
+func TestReportsSignOutDuringRead(t *testing.T) {
+	t.Cleanup(func() { clock = time.Now })
+	n := &nav{}
+	d := newTestDaemon(t, n, "", true)
+	m, _ := reportSongs(d.card)
+	m.Save(d.card, filepath.Join(d.dir, "manifest.json"))
+	now := time.Now().Unix()
+	d.notePlays(func(m *playsMark) { m.At = now - 60 }) // read a minute ago
+	c, _ := creds.Load(d.dir)
+	os.WriteFile(filepath.Join(d.card, ".scrobbler.log"), []byte(logHeader+listen("Miles", "Kind", "Blue", 2, now-10)), 0o644)
+	var calls atomic.Int32
+	done := make(chan struct{})
+	clock = func() time.Time {
+		if calls.Add(1) == 2 { // listens' now: the log is being read, plays.json held
+			go func() { pressSignOut(d); close(done) }()
+			time.Sleep(300 * time.Millisecond) // Sign Out gets as far as it can meanwhile
+		}
+		return time.Now()
+	}
+	d.wantReports(true)
+	d.tick()
+	<-done      // Sign Out has started all its background work (bg.Add) before we wait on it
+	d.bg.Wait() // so no Add races this Wait (go test -race)
+	clock = time.Now
+	if ob := d.outbox(); len(ob) != 0 {
+		t.Fatalf("signed out: outbox %+v", ob)
+	}
+	c.User, c.UserID = "other", "u2"
+	d.signedIn(c)
+	d.sendNow(t)
+	if got := n.reported(); len(got) != 0 {
+		t.Fatalf("sent: %q", got)
+	}
+}
+
+// Playing counts a play at once: a start whose answer was lost waits in the outbox tried, and the
+// next send finds the server's last-played date (its own clock's) near the start and sends nothing.
+func TestReportsNowLostStart(t *testing.T) {
+	n := &nav{}
+	d := newTestDaemon(t, n, "urls now", true)
+	d.nowQueued("100", []string{"al0.0"})
+	n.dropReply.Store(true)
+	d.nowLine(t, n, time.Now(), "100\t0\tplaying\t3\t200")
+	n.dropReply.Store(false)
+	if ob := d.outbox(); len(ob) != 1 || !ob[0].Tried {
+		t.Fatalf("outbox %+v", ob)
+	}
+	d.sendNow(t)
+	if got := n.reported(); !slices.Equal(got, []string{"start al0.0"}) || len(d.outbox()) != 0 {
+		t.Fatalf("reported %q, outbox %+v", got, d.outbox())
+	}
+	// The app opened 15 minutes into a long song: the start is dated at the song's start, the
+	// server's count when it arrived. Still one count.
+	n = &nav{}
+	d = newTestDaemon(t, n, "urls now", true)
+	d.nowQueued("100", []string{"al0.0"})
+	n.dropReply.Store(true)
+	d.nowLine(t, n, time.Now(), "100	0	playing	900	1800")
+	n.dropReply.Store(false)
+	d.sendNow(t)
+	if got := n.reported(); !slices.Equal(got, []string{"start al0.0"}) || len(d.outbox()) != 0 {
+		t.Fatalf("mid-song: reported %q, outbox %+v", got, d.outbox())
+	}
+}
+
+// A long send takes what the server took out of outbox.json as it goes, reportBatch at a time: a
+// stop mid-send (power off, Stop Streaming Services) sends again at most one batch.
+func TestReportsOutboxTrimmedAsSent(t *testing.T) {
+	n := &nav{}
+	d := newTestDaemon(t, n, "", true)
+	for i := range reportBatch + 2 {
+		d.rep.box.add(report{Kind: "played", Item: "al0.0", At: 1700000000 + int64(i)})
+	}
+	var calls, left atomic.Int32
+	n.onReport = func() {
+		if calls.Add(1) == reportBatch+2 { // the last
+			var f outboxFile
+			b, _ := os.ReadFile(filepath.Join(d.dir, "outbox.json"))
+			json.Unmarshal(b, &f)
+			left.Store(int32(len(f.Reports)))
+		}
+	}
+	d.sendNow(t)
+	if left.Load() != 2 || len(d.outbox()) != 0 {
+		t.Fatalf("outbox.json held %d while the last was sent; now %+v", left.Load(), d.outbox())
+	}
+}
+
+// A play the server forbids (403) is dropped as refused, as a heart is: the reports behind it go.
+func TestReportsForbiddenPlay(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.rep.box.add(report{Kind: playedKind, Item: "al0.0", At: 1700000000}, report{Kind: favKind, Item: "al0.1", On: true})
+	n.reportStatus.Store(403)
+	d.sendNow(t)
+	if got := n.reported(); !slices.Equal(got, []string{"fav al0.1 1"}) || len(d.outbox()) != 0 {
+		t.Fatalf("reported %q, outbox %+v", got, d.outbox())
+	}
+}
+
+// A 403 to everything (an access schedule, remote access refused, a proxy's allow list) is the
+// account refused, not each song: the plays and hearts wait, and go once the server answers again.
+func TestReportsForbiddenAccount(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.rep.box.add(report{Kind: playedKind, Item: "al0.0", At: 1700000000}, report{Kind: favKind, Item: "al0.1", On: true})
+	n.rawStatus.Store(403)
+	d.sendNow(t)
+	if len(d.outbox()) != 2 {
+		t.Fatalf("outbox %+v", d.outbox())
+	}
+	n.rawStatus.Store(0)
+	d.sendNow(t)
+	if got := n.reported(); !slices.Equal(got, []string{"played al0.0 2023-11-14T22:13:20Z", "fav al0.1 1"}) || len(d.outbox()) != 0 {
+		t.Fatalf("reported %q, outbox %+v", got, d.outbox())
+	}
+}
+
+// Review A5-P4-1: Report Plays turned Off stays off while settings.json can't be read (cut short
+// by a power loss): nothing is sent against the choice.
+func TestReportsOffDamagedSettings(t *testing.T) {
+	n := &nav{}
+	d := newTestDaemon(t, n, "", true)
+	if m := d.do("reportplays").Message; m != "Report Plays to Server: Off" {
+		t.Fatalf("%q", m)
+	}
+	p := filepath.Join(d.dir, "settings.json")
+	b, _ := os.ReadFile(p)
+	os.WriteFile(p, b[:len(b)/2], 0o644)
+	if d.reportsOn() {
+		t.Fatalf("reports on with settings.json %q", b[:len(b)/2])
+	}
+	d.streamStarted(jellyfin.Song{ID: "al0.1"})
+	d.bg.Wait()
+	d.sendNow(t)
+	if got := n.reported(); len(got) != 0 {
+		t.Fatalf("sent: %q", got)
+	}
+}
+
+// Review A6-P2-5: while outbox.json can't be written (a full card) no play is sent: the outbox
+// couldn't take it out, so each send would count it again. The plays wait, and go once there is room.
+func TestReportsOutboxUnwritable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	n := &nav{}
+	d := newTestDaemon(t, n, "", true)
+	for i := range 3 {
+		d.rep.box.add(report{Kind: playedKind, Item: "al0.0", At: 1700000000 + int64(i)})
+	}
+	os.Chmod(d.dir, 0o555)
+	t.Cleanup(func() { os.Chmod(d.dir, 0o755) })
+	d.sendNow(t)
+	d.sendNow(t)
+	if got := n.reported(); len(got) != 0 || len(d.outbox()) != 3 {
+		t.Fatalf("reported %q, outbox %+v", got, d.outbox())
+	}
+	os.Chmod(d.dir, 0o755)
+	d.sendNow(t)
+	d.sendNow(t)
+	if got := n.reported(); len(got) != 3 || len(d.outbox()) != 0 {
+		t.Fatalf("reported %q, outbox %+v", got, d.outbox())
 	}
 }

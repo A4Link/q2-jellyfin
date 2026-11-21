@@ -52,9 +52,9 @@ const (
 )
 
 // repeated is whether cur, the same song as prev, is it played again: from its last seconds back
-// to its first (repeat one), not a seek back mid-song.
+// to its first (repeat one), not a seek back mid-song, nor a short song played on.
 func repeated(prev, cur nowLine) bool {
-	return prev.length > 0 && prev.sec >= prev.length-nowEdge && cur.sec < nowEdge &&
+	return prev.length > 0 && prev.sec >= prev.length-nowEdge && cur.sec < nowEdge && cur.sec < prev.sec &&
 		prev.state != "stopped" && cur.state != "stopped"
 }
 

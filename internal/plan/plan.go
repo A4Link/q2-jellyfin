@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	Margin     = 16 << 20  // room kept free on top of what a sync needs (Fits)
+	Margin     = 16 << 20  // room kept free on top of what a sync needs (the Sync page's previewRows)
 	coverBytes = 256 << 10 // a cover.jpg at 600 px, counted once per new album folder
 )
 
@@ -31,19 +31,18 @@ type Want struct {
 type Move struct{ From, To, ID string }
 
 type Plan struct {
-	Add, Replace         []Want
-	Keep                 []Want // no transfer, but the record changes: the items holding it, or its MetaKey
-	Rename               []Move
-	Remove               []*library.Entry
-	Playlists            map[string][]string
-	PlaylistsStale       bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
-	PlaylistsChanged     int  // playlist files to write or delete though no song moves: new, changed, renamed or taken out (I10)
-	Leftover             int  // files a stopped sync left listed in m.Stale: a run deletes them first
-	NeedBytes, FreeBytes int64
-	ReplaceBytes         int64 // what the replaces add, or free when negative
-	RemoveBytes          int64 // what the removals free (a run short of space removes them first)
-	Fits                 bool
-	Whole                bool // the selection holds Entire Library: no song of it can be taken out of Sync (I2)
+	Add, Replace     []Want
+	Keep             []Want // no transfer, but the record changes: the items holding it, or its MetaKey
+	Rename           []Move
+	Remove           []*library.Entry
+	Playlists        map[string][]string
+	PlaylistsStale   bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
+	PlaylistsChanged int  // playlist files to write or delete though no song moves: new, changed, renamed or taken out (I10)
+	Leftover         int  // files a stopped sync left listed in m.Stale: a run deletes them first
+	NeedBytes        int64
+	ReplaceBytes     int64 // what the replaces add, or free when negative
+	RemoveBytes      int64 // what the removals free (a run short of space removes them first)
+	Whole            bool  // the selection holds Entire Library: no song of it can be taken out of Sync (I2)
 }
 
 // Changes reports whether p has anything to do: a song to move, a playlist file to write or
@@ -77,37 +76,55 @@ func estimate(s jellyfin.Song, q string) int64 {
 	return int64(s.Duration) * quality.Bitrate(q) / 8
 }
 
-// resized reports whether an original's server file changed size since it was synced (a re-rip).
-func resized(e *library.Entry, w *Want) bool {
-	return w.Quality == "original" && e.SrcSize > 0 && w.Song.Size > 0 && e.SrcSize != w.Song.Size
+// Resized reports whether an original (q) whose server file is size bytes changed size since it
+// was synced (a re-rip).
+func Resized(e *library.Entry, q string, size int64) bool {
+	return q == "original" && e.SrcSize > 0 && size > 0 && e.SrcSize != size
+}
+
+// Wanted is the quality a chosen item wants song s at (e: its record on the card, nil when it isn't
+// there): syncQ (Sync Quality, "" for Original), but a held item's, which stays at the quality on
+// the card; ok is false for a held item's song not on the card, which it doesn't add. reencode is
+// Always Re-encode: without it a lossy song stays as it is under a transcode (library.Quality).
+// Compute plans each song at the best quality its items want; Browse reads its statuses the same
+// way while no preview is at hand.
+func Wanted(held bool, s jellyfin.Song, e *library.Entry, syncQ string, reencode bool) (q string, ok bool) {
+	q = syncQ
+	if q == "" {
+		q = "original"
+	}
+	if held { // only what is on the card, as it is
+		if e == nil {
+			return "", false
+		}
+		q, reencode = e.Quality, true
+	}
+	return library.Quality(q, s, reencode), true
+}
+
+// Fetches reports whether the sync fetches song s at quality q: it isn't on the card (e nil), or is
+// there at another quality or in another format, or was re-ripped on the server. Any other song
+// wanted stays, renamed when its tags changed.
+func Fetches(e *library.Entry, s jellyfin.Song, q string) bool {
+	return e == nil || e.Quality != q || !strings.EqualFold(filepath.Ext(e.Path), library.Ext(s, q)) || Resized(e, q, s.Size)
 }
 
 // Compute diffs the selection (resolved: item key -> its songs; playlistNames: playlist item key
-// -> display name) against the manifest. Every item's songs are at syncQ (Sync Quality, "" for
-// Original), but a held item's, which stay at the quality on the card. reencode is Always
-// Re-encode: without it a lossy song stays as it is under a transcode (library.Quality).
+// -> display name) against the manifest, each song at the best quality its items want (Wanted).
 func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string][]jellyfin.Song, playlistNames map[string]string,
-	m *library.Manifest, root string, free int64) Plan {
+	m *library.Manifest, root string) Plan {
 	wants := map[string]*Want{}
 	multi := map[string]bool{}
-	if syncQ == "" {
-		syncQ = "original"
-	}
 	for _, it := range sel.Items {
 		key := selection.Key(it.Kind, it.ID)
 		for _, s := range resolved[key] {
 			if s.Disc > 1 {
 				multi[s.AlbumID] = true
 			}
-			q, re := syncQ, reencode
-			if it.Held { // only what is on the card, as it is
-				e := m.Songs[s.ID]
-				if e == nil {
-					continue
-				}
-				q, re = e.Quality, true
+			q, ok := Wanted(it.Held, s, m.Songs[s.ID], syncQ, reencode)
+			if !ok {
+				continue
 			}
-			q = library.Quality(q, s, re)
 			w := wants[s.ID]
 			if w == nil {
 				w = &Want{Song: s, Quality: q}
@@ -118,14 +135,8 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 			if w.Song.AlbumArtist == w.Song.Artist && s.AlbumArtist != s.Artist {
 				w.Song = s // its album's own artist over its track artist, whichever item came first (M41)
 			}
-			if n := len(w.Items); n == 0 || w.Items[n-1] != key {
-				seen := false
-				for _, k := range w.Items {
-					seen = seen || k == key
-				}
-				if !seen {
-					w.Items = append(w.Items, key)
-				}
+			if !slices.Contains(w.Items, key) {
+				w.Items = append(w.Items, key)
 			}
 		}
 	}
@@ -139,16 +150,23 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 	// unchanged: the song stays as it is on the card.
 	unchanged := func(e *library.Entry, w *Want) bool {
 		return e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) && !library.StaleName(root, e.Path) &&
-			!resized(e, w)
+			!Resized(e, w.Quality, w.Song.Size)
 	}
 	// Every song owns its current path, keyed by its lyrics path (the name with the extension dropped),
 	// case-folded (the card is FAT/exFAT: case variants are one file), for this whole sync: nothing new
 	// lands on a file that a rename, a replace or the removals take away, and no two songs share a path
 	// or a .lrc file (swapped tags, or the same song in two formats, get their [id] instead; audit S16).
 	key := func(path string) string { return strings.ToLower(library.LyricsPath(path)) }
+	// In id order: two entries on one stem (left by a version before S16) give it to the same song
+	// every time.
 	claim := map[string]string{}
-	for id, e := range m.Songs {
-		claim[key(e.Path)] = id
+	have := make([]string, 0, len(m.Songs))
+	for id := range m.Songs {
+		have = append(have, id)
+	}
+	sort.Strings(have)
+	for _, id := range have {
+		claim[key(m.Songs[id].Path)] = id
 	}
 
 	p := Plan{Whole: sel.Has(selection.KindLibrary, "all")}
@@ -178,8 +196,7 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 		case e == nil:
 			p.Add = append(p.Add, *w)
 			p.NeedBytes += w.Bytes
-		case e.Quality != w.Quality || !strings.EqualFold(filepath.Ext(e.Path), filepath.Ext(path)) || resized(e, w):
-			// a new format or a re-rip is fetched again, never renamed
+		case Fetches(e, w.Song, w.Quality): // a new format or a re-rip is fetched again, never renamed
 			p.Replace = append(p.Replace, *w)
 			p.NeedBytes += w.Bytes - e.Size
 			p.ReplaceBytes += w.Bytes - e.Size
@@ -261,7 +278,5 @@ func Compute(sel selection.Set, syncQ string, reencode bool, resolved map[string
 	byPath(p.Replace)
 	sort.Slice(p.Rename, func(i, j int) bool { return p.Rename[i].To < p.Rename[j].To })
 	sort.Slice(p.Remove, func(i, j int) bool { return p.Remove[i].Path < p.Remove[j].Path })
-	p.FreeBytes = free
-	p.Fits = p.NeedBytes <= 0 || p.NeedBytes-p.RemoveBytes+Margin <= free // freeing space always fits
 	return p
 }

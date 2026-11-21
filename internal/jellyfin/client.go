@@ -1,9 +1,10 @@
-// Package jellyfin is a small Jellyfin client over HTTPS only. It signs in once (password or Quick
+// Package jellyfin is a small Jellyfin client over HTTPS (or plain HTTP to a home server the user
+// allows: PlainOK). It signs in once (password or Quick
 // Connect) and keeps only the access token; every request carries it in the Authorization header,
 // never in a URL, so URLs and logs hold no secret.
 //
-// Endpoints follow the Jellyfin 10.9+ REST API. TODO(verify): check each path and query name against
-// your server's OpenAPI document (https://<server>/api-docs/openapi.json) before the first release.
+// Endpoints follow the Jellyfin 10.9+ REST API. TestRequestsMatchOpenAPI checks each path and query
+// name against a server's OpenAPI document, and the Live tests run them against a real server.
 package jellyfin
 
 import (
@@ -131,6 +132,9 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 			return ErrRedirect
 		}
 		if hostPort(req.URL) != hostPort(via[0].URL) {
+			if req.Method != "GET" && req.Method != "HEAD" {
+				return ErrRedirect // a 307/308 would send the body (the password) to another host
+			}
 			req.Header.Del("Authorization") // never hand the token to another host
 		}
 		if len(via) >= 10 {
@@ -188,6 +192,11 @@ const (
 	// idleAfter fails a body Read that gets no data for this long (a hung transcode or NAS).
 	idleAfter = 30 * time.Second
 )
+
+// callTimeout limits one JSON request in all, so a server that drips its answer can't keep a page
+// loading for ever; a real page is at most maxBody. Downloads have only the idle limit. A var for
+// tests.
+var callTimeout = 120 * time.Second
 
 // do sends one request and logs it. Its body fails with ErrStalled once one Read waits longer than
 // the idle time, so a stalled server can't hang a download.
@@ -274,6 +283,8 @@ func (c *Client) call(ctx context.Context, method, p string, q url.Values, in, o
 	if in != nil {
 		body, _ = json.Marshal(in)
 	}
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	resp, err := c.do(ctx, method, op, c.endpoint(p, q), body, 0)
 	if err != nil {
 		return err
@@ -383,8 +394,7 @@ func (c *Client) SignIn(ctx context.Context) (Creds, error) {
 // SignInWithKey signs in with a server API key (in Creds.Token) for the user named user, whose
 // library the app then shows. The key is checked by listing the server's users (GET /Users, which
 // only an admin-level token may do) and picking that user by name. What it returns keeps the key:
-// a Jellyfin API key can't be swapped for a narrower token.
-// TODO(verify): confirm GET /Users answers an API key on the Jellyfin versions you support.
+// a Jellyfin API key can't be swapped for a narrower token. TestLiveAPIKey checks it on a real server.
 func (c *Client) SignInWithKey(ctx context.Context, user string) (Creds, error) {
 	if err := c.CheckServer(ctx); err != nil {
 		return Creds{}, err
@@ -412,7 +422,8 @@ func (c *Client) CheckServer(ctx context.Context) error {
 		Version     string `json:"Version"`
 	}
 	if err := c.call(ctx, "GET", "/System/Info/Public", nil, nil, &info); err != nil {
-		return kindOn(err, ErrNotJellyfin, 404)
+		// a proxy in front that refuses it (basic auth, Authelia) is no sign-in to redo
+		return kindOn(kindOn(err, ErrNotJellyfin, 404), ErrUnreachable, 401, 403)
 	}
 	if !strings.Contains(strings.ToLower(info.ProductName), "jellyfin") {
 		return &APIError{Op: "Public", Msg: "not a Jellyfin server", kind: ErrNotJellyfin}
@@ -504,7 +515,7 @@ func (c *Client) PlaylistSongs(ctx context.Context, id string, hearts bool) ([]S
 	}
 	kept := []Song{} // music only, in the playlist's order, duplicates included
 	q := url.Values{"userId": {c.c.UserID}, "fields": {itemFields}, "enableUserData": {strconv.FormatBool(hearts)}}
-	_, err = c.eachPage(ctx, "/Playlists/"+url.PathEscape(id)+"/Items", q, func(e wireItem) {
+	_, err = c.eachPage(ctx, "/Playlists/"+url.PathEscape(id)+"/Items", q, 0, func(e wireItem) {
 		if s.inMusic(e) {
 			kept = append(kept, e.song())
 		}
@@ -589,7 +600,7 @@ func (c *Client) AlbumSongs(ctx context.Context, id string, hearts bool) ([]Song
 	r, err := c.items(ctx, url.Values{"parentId": {id}, "includeItemTypes": {"Audio"}, "recursive": {"true"},
 		"sortBy": {"ParentIndexNumber,IndexNumber,SortName"}, "enableUserData": {strconv.FormatBool(hearts)}})
 	if err != nil {
-		return nil, err
+		return nil, listErr(err) // Jellyfin answers 400 for an album it doesn't know: a 404 is a proxy's
 	}
 	return songs(r.Items), nil
 }
@@ -613,7 +624,7 @@ func (c *Client) Artists(ctx context.Context, order string, reverse bool) ([]Art
 	for _, lib := range s.libs {
 		q := url.Values{"parentId": {lib}, "userId": {c.c.UserID}, "fields": {artistFields},
 			"sortBy": base["sortBy"], "sortOrder": base["sortOrder"], "enableUserData": {"false"}}
-		_, err := c.eachPage(ctx, "/Artists/AlbumArtists", q, func(w wireItem) {
+		_, err := c.eachPage(ctx, "/Artists/AlbumArtists", q, len(out), func(w wireItem) {
 			if !seen[w.ID] {
 				seen[w.ID] = true
 				out = append(out, w.artist())
@@ -707,9 +718,16 @@ func (c *Client) Latest(ctx context.Context) ([]Album, error) {
 // album artist in one answer can pass maxBody.
 const listPage = 500
 
+// maxListed is the most items one long list reads, all its music libraries together, so a server
+// that would page for ever stops here. It counts items, not bytes: 100,000 real songs already hold
+// about 46 MB, near the app's 48 MB memory limit, and songs with very long titles take more.
+const maxListed = 100_000
+
 // eachPage calls f for every item of GET p with q, listPage at a time, in order, and returns the
-// server's total.
-func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wireItem)) (int, error) {
+// server's total. done is how many items the list already holds (from other music libraries): a
+// list whose total takes it past maxListed is refused on its first page. The total can't change
+// between pages (ErrChanged), so it is the only check needed.
+func (c *Client) eachPage(ctx context.Context, p string, q url.Values, done int, f func(wireItem)) (int, error) {
 	total := -1
 	for start := 0; ; start += listPage {
 		q.Set("startIndex", strconv.Itoa(start))
@@ -729,7 +747,11 @@ func (c *Client) eachPage(ctx context.Context, p string, q url.Values, f func(wi
 		if !r.startsAt(start) {
 			return 0, ErrChanged
 		}
+		if r.TotalRecordCount > maxListed-done { // not done+total: a huge total would wrap it negative
+			return 0, &APIError{Op: opName(p), Msg: "Library too large for the Q2"}
+		}
 		total = r.TotalRecordCount
+		r.Items = r.Items[:min(len(r.Items), listPage)] // no more than asked; the next page starts after them
 		for _, w := range r.Items {
 			f(w)
 		}
@@ -839,9 +861,9 @@ func (c *Client) PlayURL(id, q string) string {
 // transcodeURL asks /Audio/{id}/universal for the song in q's codec at q's bitrate. container is
 // what the client takes as it is: a source already in that codec within the bitrate is sent
 // untouched; anything else the server transcodes with ffmpeg into transcodingContainer.
-// TODO(verify): on a live server, that Opus arrives as Ogg Opus the Q2 plays (container "opus",
-// transcodingContainer "ogg"), and that transcoded files keep their tags, which the Q2's library
-// reads for Artists and Albums.
+// On a real server (TestLiveOpus), Opus arrives as Ogg Opus the Q2 plays (container "opus",
+// transcodingContainer "ogg"), and transcoded files keep their tags, which the Q2's library reads
+// for Artists and Albums.
 func (c *Client) transcodeURL(id, q string) string {
 	codec, _ := quality.Parse(q)
 	container, muxer := "opus", "ogg"

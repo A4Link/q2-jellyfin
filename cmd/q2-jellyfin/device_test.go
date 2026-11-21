@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/A4Link/q2-jellyfin/internal/creds"
 	"github.com/A4Link/q2-jellyfin/internal/jellyfin"
@@ -37,8 +39,9 @@ type nav struct {
 	errCode          int           // every API call fails: 40 answers 401, any other 404
 	block            chan struct{} // downloads wait for it
 	failID           string        // getAlbum fails for this album only (HTTP 502); every-song listings fail
-	goneID           string        // an album deleted on the server: getAlbum and its songs request answer 404
+	goneID           string        // an album deleted on the server: getAlbum answers 404, its songs request 400, as Jellyfin's
 	allGone          bool          // as goneID, for every album
+	songs404         string        // this album's songs request answers 404: a proxy's, not Jellyfin's
 	rootsGone        bool          // the music library's folder listing answers 404
 	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
@@ -49,6 +52,7 @@ type nav struct {
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
 	mediaErr         int           // download and stream answer 404 (or 401 for 40)
 	dup              bool          // each playlist holds its first song twice, last too
+	order            atomic.Value  // when set, the []int of song numbers every album and playlist lists, in order (a list changed on the server)
 	artists          int           // getArtists lists this many more artists, ar2.., with no albums
 	listErr          int           // getAlbumList2 fails with this code from offset 50 on
 	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
@@ -81,15 +85,16 @@ type nav struct {
 	rawStatus        atomic.Int32  // when set, every request answers this HTTP status (a proxy's 502)
 	pings            atomic.Int32  // /Users/Me requests served
 	hideAlbum        string        // an album left out of the album list pages, its songs still listed
+	noAlbum          string        // this song has no album (no Album, no AlbumId)
 	lyricsReqs       sync.Map      // song id -> how many lyrics requests for it, an *atomic.Int32
 	reqs             atomic.Int32  // every request served
 	reportMu         sync.Mutex
 	reports          []string     // play reports: "played <id> <datePlayed>", "start <id>", "stop <id> <ticks>", "progress <id> <sec> <paused>"
 	reportStatus     atomic.Int32 // when set, play reports answer this HTTP status
 	onReport         func()       // optional: called as each play report or favourite arrives
-	dropReply        atomic.Bool  // a play marked is counted, then the connection cut: no answer
-	cutBody          atomic.Bool  // a play marked is counted, answered 200, and its body cut short
-	lastPlayed       sync.Map     // song id -> the datePlayed last marked, its UserData.LastPlayedDate
+	dropReply        atomic.Bool  // a play marked or started is counted, then the connection cut: no answer
+	cutBody          atomic.Bool  // a play marked or started is counted, answered 200, and its body cut short
+	lastPlayed       sync.Map     // song id -> the datePlayed last marked (a start: now), its UserData.LastPlayedDate
 	hearts           sync.Map     // song id -> its favourite state as last set (/UserFavoriteItems), over favs
 	favStatus        atomic.Int32 // when set, /UserFavoriteItems answers this HTTP status
 	songReqs         atomic.Int32 // /Items/al<i>.<j> calls served (cl.Song)
@@ -114,11 +119,16 @@ func (n *nav) song(al, j int) map[string]any {
 	if n.various {
 		artist = fmt.Sprintf("Artist %d", j)
 	}
-	return map[string]any{"Id": fmt.Sprintf("al%d.%d", al, j), "Type": "Audio", "Name": fmt.Sprintf("Song %d", j),
+	s := map[string]any{"Id": fmt.Sprintf("al%d.%d", al, j), "Type": "Audio", "Name": fmt.Sprintf("Song %d", j),
 		"Album": fmt.Sprintf("Album %03d", al), "AlbumId": fmt.Sprintf("al%d", al), "Artists": []string{artist},
 		"ProductionYear": 2020, "ParentIndexNumber": 1, "IndexNumber": j + 1, "RunTimeTicks": 100 * 10_000_000,
 		"MediaSources": []any{map[string]any{"Size": 1000, "Container": "flac"}}, "HasLyrics": n.lyrics.Load(),
 		"AlbumPrimaryImageTag": map[bool]string{true: "t"}[n.songArt], "UserData": n.userData(fmt.Sprintf("al%d.%d", al, j))}
+	if s["Id"] == n.noAlbum {
+		delete(s, "Album")
+		delete(s, "AlbumId")
+	}
+	return s
 }
 
 func (n *nav) userData(id string) map[string]any {
@@ -166,6 +176,12 @@ func (n *nav) songs(al int) []map[string]any {
 	for j := 0; j < n.songsPer; j++ {
 		out = append(out, n.song(al, j))
 	}
+	if order, ok := n.order.Load().([]int); ok {
+		out = nil
+		for _, j := range order {
+			out = append(out, n.song(al, j))
+		}
+	}
 	return out
 }
 
@@ -200,7 +216,8 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if items == nil {
 			items = []map[string]any{}
 		}
-		ok(map[string]any{"Items": items, "TotalRecordCount": len(items)})
+		start, _ := strconv.Atoi(q.Get("startIndex")) // Jellyfin says where each page starts
+		ok(map[string]any{"Items": items, "TotalRecordCount": len(items), "StartIndex": start})
 	}
 	fail := func(code int) { http.Error(w, "Not found", status(code)) }
 	p := r.URL.Path
@@ -246,8 +263,13 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		n.reportMu.Lock()
 		n.reports = append(n.reports, line)
 		n.reportMu.Unlock()
-		if id, ok := strings.CutPrefix(p, "/UserPlayedItems/"); ok {
-			n.lastPlayed.Store(id, q.Get("datePlayed"))
+		id, counts := strings.CutPrefix(p, "/UserPlayedItems/")
+		date := q.Get("datePlayed")
+		if p == "/Sessions/Playing" { // counts too, dated by the server's clock
+			id, counts, date = body.ItemID, true, time.Now().UTC().Format(time.RFC3339)
+		}
+		if counts {
+			n.lastPlayed.Store(id, date)
 			if n.dropReply.Load() {
 				panic(http.ErrAbortHandler)
 			}
@@ -345,6 +367,13 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ars = append(ars, map[string]any{"Id": fmt.Sprintf("ar%d", i+2), "Name": fmt.Sprintf("Artist %05d", i+2), "AlbumCount": 1,
 				"DateCreated": fmt.Sprintf("2026-01-01T00:%02d:%02dZ", (i+2)/60%60, (i+2)%60)})
 		}
+		// One page, as Jellyfin sends it: the client reads no more than it asked for (eachPage), so
+		// every artist sent each time made a 4,000-artist list cost nine whole lists (C37).
+		if lim, err := strconv.Atoi(q.Get("limit")); err == nil {
+			start, _ := strconv.Atoi(q.Get("startIndex"))
+			ok(map[string]any{"Items": ars[min(start, len(ars)):min(start+lim, len(ars))], "TotalRecordCount": len(ars), "StartIndex": start})
+			return
+		}
 		page(ars)
 	case p == "/Items":
 		kind := q.Get("includeItemTypes")
@@ -356,7 +385,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for _, id := range strings.Split(q.Get("ids"), ",") {
 				var a, j int
 				switch {
-				case n.noMusic || id == n.leaveOut || id == n.failID: // gone, or the account can't see it
+				case n.noMusic || id == n.leaveOut || id == n.failID || id == n.goneID || n.allGone && !strings.Contains(id, "."): // gone, or the account can't see it
 				case strings.HasPrefix(id, "pl"):
 					k, _ := strconv.Atoi(strings.TrimPrefix(id, "pl"))
 					s = append(s, n.playlist(k))
@@ -412,11 +441,14 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				case <-time.After(2 * time.Second):
 				}
 			}
-			if q.Get("parentId") == n.goneID || n.allGone {
+			switch id := q.Get("parentId"); {
+			case id == n.songs404:
 				fail(70)
-				return
+			case id == n.goneID || n.allGone: // Jellyfin 12.4's answer for an id it doesn't know
+				http.Error(w, "Error processing request", http.StatusBadRequest)
+			default:
+				page(n.songs(albumOf(id)))
 			}
-			page(n.songs(albumOf(q.Get("parentId"))))
 		case q.Get("albumArtistIds") != "":
 			var als []map[string]any
 			for i := range cmp.Or(n.artistAlbums, 2) {
@@ -440,7 +472,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if s == nil {
 				s = []map[string]any{}
 			}
-			ok(map[string]any{"Items": s, "TotalRecordCount": n.albums * n.songsPer})
+			ok(map[string]any{"Items": s, "TotalRecordCount": n.albums * n.songsPer, "StartIndex": off})
 		case kind == "Playlist":
 			n.playlistSort.Store(q.Get("sortBy") + " " + q.Get("sortOrder"))
 			var pls []map[string]any
@@ -630,6 +662,18 @@ func eventually(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// A size reads in MB, rounded, and in GB from the first byte count that would round to 1000 MB.
+func TestSize(t *testing.T) {
+	for b, want := range map[int64]string{
+		0: "0 MB", 499_999: "0 MB", 500_000: "1 MB", 512e6: "512 MB",
+		999_499_999: "999 MB", 999_600_000: "1.0 GB", 1e9: "1.0 GB", 2_560_000_000: "2.6 GB",
+	} {
+		if got := size(b); got != want {
+			t.Errorf("size(%d) = %q, want %q", b, got, want)
+		}
+	}
+}
+
 func TestRootSignedIn(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	r := d.do("menu")
@@ -738,7 +782,7 @@ func TestDownloadsOffHint(t *testing.T) {
 		if e := d.saveSettings(settings{DefaultQuality: c.q, Reencode: c.re}); e != nil {
 			t.Fatal(e)
 		}
-		want := "|" + plain + c.hint + "|Resume"
+		want := "|" + plain + c.hint + "|Update Your Library|Resume"
 		if got := strings.Join(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})), "|"); !strings.Contains(got, want) {
 			t.Errorf("%s reencode %q: %q, want %q", c.q, c.re, got, want)
 		}
@@ -1165,6 +1209,47 @@ func TestDetailsRow(t *testing.T) {
 	}
 }
 
+// A failed rename names two long paths: the Details context stays within the 400 bytes Q2 Pod sends
+// back, and the Error row keeps the reason at the end (review A7a-P3-1).
+func TestDetailsLongError(t *testing.T) {
+	from := "/mnt/sdcard/Music/" + strings.Repeat("é", 95) + "/song.flac"
+	to := "/mnt/sdcard/Music/" + strings.Repeat("ü", 100) + "/song.flac"
+	pct := "/mnt/sdcard/Music/Artist/" + strings.Repeat("%", 120) + "/01 Song.flac" // Q2 Pod sends % as %25 (review A7a-P4-1)
+	for _, err := range []error{
+		&os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EROFS},
+		&os.LinkError{Op: "rename", Old: pct, New: pct + ".tmp", Err: syscall.EROFS},
+	} {
+		ctx := withErr(detailsCtx("sync", 0, 0, time.Now(), ""), err)
+		if n := len(q2spot.Escape(ctx)); n > 398 {
+			t.Errorf("context is %d bytes, want at most 398", n)
+		}
+		got := titles(details(ctx))
+		e := got[len(got)-1]
+		if !strings.HasPrefix(e, "Error: rename /mnt/sdcard/Music/") || !strings.HasSuffix(e, "read-only file system") ||
+			len(e) > q2spot.MaxText || !utf8.ValidString(e) {
+			t.Errorf("Error row %q (%d bytes)", e, len(e))
+		}
+	}
+}
+
+// A sync later than the Q2's clock (the clock went back after a battery drain) shows its date, not
+// "today" (review A7a-P3-2).
+func TestWhenAfterNow(t *testing.T) {
+	now := time.Date(2000, 1, 1, 0, 5, 0, 0, time.UTC)
+	for _, c := range []struct {
+		t    time.Time
+		want string
+	}{
+		{time.Date(2026, 11, 20, 18, 30, 0, 0, time.UTC), "Nov 20 18:30"},
+		{time.Date(2000, 1, 1, 0, 1, 0, 0, time.UTC), "today 00:01"},
+		{time.Date(1999, 12, 31, 23, 0, 0, 0, time.UTC), "yesterday 23:00"},
+	} {
+		if got := when(c.t, now); got != c.want {
+			t.Errorf("when(%v) = %q, want %q", c.t, got, c.want)
+		}
+	}
+}
+
 // An item's later pages reuse the list its first page fetched; a first page fetches it again.
 func TestItemPagesFetchOnce(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 120}
@@ -1361,28 +1446,38 @@ func TestPreviewManyItemsGone(t *testing.T) {
 	}
 }
 
-// An artist one of whose albums the server deleted stays in Sync: only that album's songs go.
-func TestPreviewArtistAlbumGone(t *testing.T) {
-	card := t.TempDir()
-	d := newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1}, "", true)
-	d.do("toggle", "artist:ar1") // al0 and al1
-	d.preview(t)
-	d.do("start")
-	eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+// Jellyfin answers 400 for the songs of an album it doesn't know, so a 404 there is a proxy's (its
+// backend restarting), not a deletion. It fails the preview: neither an artist's album nor an album
+// found in the batch lookup goes under Removed or leaves Sync (review A5-P1-2). Two albums in Sync
+// make the batch lookup run (A5-P3-2).
+func TestPreviewAlbumSongsNotFound(t *testing.T) {
+	for _, keys := range [][]string{{"artist:ar1"}, {"album:al0", "album:al1"}} {
+		key := strings.Join(keys, "+")
+		card := t.TempDir()
+		d := newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1}, "", true)
+		for _, k := range keys {
+			d.do("toggle", k) // the artist has al0 and al1
+		}
+		d.preview(t)
+		d.do("start")
+		eventually(t, "the first sync", func() bool { return d.runner.Snapshot().State == "done" })
+		had := len(d.manifest().Songs)
 
-	// Album 001 deleted after the artist's album list: its songs request answers 404.
-	d = newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1, goneID: "al1"}, "", true)
-	got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
-	if !strings.HasPrefix(got, "−1 song") {
-		t.Fatalf("preview %q", got)
-	}
-	if rm := d.daemon.preview.plan.Remove; len(rm) != 1 || !strings.Contains(rm[0].Path, "Album 001") {
-		t.Fatalf("Remove %+v", rm)
-	}
-	d.do("start")
-	eventually(t, "the second sync", func() bool { return d.runner.Snapshot().State == "done" })
-	if it := d.selected(t); len(it) != 1 || it[0].ID != "ar1" {
-		t.Errorf("selection %+v", it)
+		d = newTestDaemonOn(t, card, &nav{albums: 2, songsPer: 1, songs404: "al1"}, "", true)
+		got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|")
+		if got != "The server answered HTTP 404|Check Again|Details" {
+			t.Fatalf("%s: preview %q", key, got)
+		}
+		var sel []string
+		for _, it := range d.selected(t) {
+			sel = append(sel, selection.Key(it.Kind, it.ID))
+		}
+		if strings.Join(sel, "+") != key {
+			t.Errorf("%s: selection %q", key, sel)
+		}
+		if k := len(d.manifest().Songs); k != had {
+			t.Errorf("%s: %d songs on the card, had %d", key, k, had)
+		}
 	}
 }
 
@@ -1879,8 +1974,8 @@ func TestPausedSyncSaysWhy(t *testing.T) {
 // The preview shows what a quality change adds or frees (M20).
 func TestPreviewReplaceShowsSize(t *testing.T) {
 	for want, p := range map[string]*plan.Plan{
-		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
-		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
+		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6},
+		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6},
 	} {
 		if r := previewRows(p, 0, 512<<20, 10, nil); !strings.Contains(strings.Join(titles(r), "|"), want) {
 			t.Errorf("want %q: %q", want, titles(r))
@@ -1894,13 +1989,35 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 func TestPreviewWarnsMostRemoved(t *testing.T) {
 	const warn = "Removes most of the synced songs"
 	for _, c := range []struct{ remove, onCard int }{{3, 4}, {2, 4}, {4, 4}, {1, 10}} {
-		p := &plan.Plan{Fits: true}
+		p := &plan.Plan{}
 		for range c.remove {
 			p.Remove = append(p.Remove, &library.Entry{Size: 1000})
 		}
 		got := strings.Contains(strings.Join(titles(previewRows(p, 0, 512<<20, c.onCard, nil)), "|"), warn)
 		if want := c.remove*2 > c.onCard; got != want {
 			t.Errorf("%d of %d removed: warning %v", c.remove, c.onCard, got)
+		}
+	}
+}
+
+// Whether it fits: it fits exactly at what it needs plus the margin, a plan that only frees space
+// always fits (I11), and what the removals free counts (audit 2026-11-10 #2).
+func TestPreviewFits(t *testing.T) {
+	const short = "Not all of it fits on the card"
+	add := []plan.Want{{Bytes: 2000}}
+	for _, c := range []struct {
+		p    plan.Plan
+		free int64
+		fits bool
+	}{
+		{plan.Plan{Add: add, NeedBytes: 2000}, plan.Margin + 1999, false},
+		{plan.Plan{Add: add, NeedBytes: 2000}, plan.Margin + 2000, true},
+		{plan.Plan{Remove: []*library.Entry{{Size: 1000}}, RemoveBytes: 1000}, 5 << 20, true},
+		{plan.Plan{Add: add, NeedBytes: 2000, Remove: []*library.Entry{{Size: 5000}}, RemoveBytes: 5000}, plan.Margin + 1999, true},
+	} {
+		got := !strings.Contains(strings.Join(titles(previewRows(&c.p, c.free, 0, 10, func() []q2spot.Row { return nil })), "|"), short)
+		if got != c.fits {
+			t.Errorf("need %d, remove %d, free %d: fits %v", c.p.NeedBytes, c.p.RemoveBytes, c.free, got)
 		}
 	}
 }
@@ -2002,7 +2119,7 @@ func TestPausedRefusedSaysWhy(t *testing.T) {
 	d.client()
 	err := fmt.Errorf("%w: %w", syncer.ErrRefused, &jellyfin.APIError{Op: "download", HTTP: 200, Code: 50, Msg: "User not authorized"})
 	want := jellyfin.Message(err, d.hostName())
-	if r := d.syncRows(syncer.Snapshot{State: "paused", Err: err}); !strings.Contains(strings.Join(titles(r), "|"), "|"+want+"|Resume") {
+	if r := d.syncRows(syncer.Snapshot{State: "paused", Err: err}); !strings.Contains(strings.Join(titles(r), "|"), "|"+want+"|Update Your Library|Resume") {
 		t.Errorf("want %q: %q", want, titles(r))
 	}
 }
@@ -2635,6 +2752,30 @@ func TestStaysUpAfterSync(t *testing.T) {
 	}
 	if d.idle(time.Now().Add(idleAfter - time.Minute)) {
 		t.Fatal("exits before idleAfter")
+	}
+}
+
+// A sync that pauses by itself between a tick and the idle check after it isn't taken for idle:
+// the next tick counts its end as activity (I15).
+func TestStaysUpAfterSyncPausesBetweenTicks(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	t.Cleanup(func() { close(n.block) })
+	d := newTestDaemon(t, n, "library", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	d.mu.Lock()
+	d.lastReq = time.Now().Add(-time.Hour) // an unattended sync: no request for an hour
+	d.mu.Unlock()
+	d.tick()
+	d.runner.Pause() // Wi-Fi gone, say, before the serve loop's idle check
+	if d.idle(time.Now()) {
+		t.Fatal("exits the moment the sync pauses")
+	}
+	d.tick()
+	if d.idle(time.Now()) {
+		t.Fatal("exits after the next tick")
 	}
 }
 
@@ -3604,20 +3745,27 @@ func TestStoppedDetailsTime(t *testing.T) {
 }
 
 // A resolved item is On Q2 only when its songs are: a song a server playlist dropped doesn't stand
-// in for the one it gained (review G3, Minor 4).
+// in for the one it gained (review G3, Minor 4). Album 000 keeps the dropped song on the card, so
+// it isn't due to go. The sync fetches the song Mix gained: Waiting to sync; held, Mix adds
+// nothing, and counts its own songs.
 func TestResolvedItemCountsItsOwnSongs(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
 	d.do("toggle", "playlist:pl1")
+	d.do("toggle", "album:al0")
 	d.syncOK(t)
 	d.mu.Lock()
 	d.resolved["playlist:pl1"] = []jellyfin.Song{{ID: "al0.0", Suffix: "flac"}, {ID: "al1.0", Suffix: "flac"}} // al0.1 swapped for al1.0
 	d.mu.Unlock()
 	r := d.do("playlists")
-	if row, _ := find(r, "Mix"); row.Subtitle != "2 songs · 1 of 2 songs on Q2" {
+	if row, _ := find(r, "Mix"); row.Subtitle != "2 songs · Waiting to sync" {
 		t.Errorf("Mix %q", row.Subtitle)
 	}
 	if _, ok := find(r, "Sync Now"); !ok {
 		t.Error("no Sync Now")
+	}
+	d.do("hold", "playlist:pl1")
+	if row, _ := find(d.do("playlists"), "Mix"); row.Subtitle != "2 songs · 1 of 2 songs on Q2" {
+		t.Errorf("held Mix %q", row.Subtitle)
 	}
 }
 
@@ -3909,5 +4057,563 @@ func TestPagesForgottenOutsideSync(t *testing.T) {
 	d.do("playlist", "playlist:pl1")
 	if got := keys(); got != "playlist:pl1" {
 		t.Fatalf("in memory with Entire Library: %q", got)
+	}
+}
+
+// settings.json saved by a Windows editor (a UTF-8 BOM) reads as written. One cut short fails the
+// preview: read as Original, it would plan to replace every Opus song on the card, and Sync
+// Favourites would start that with no press (review A5-P1-1). No other setting's press writes the
+// defaults over it: only a Sync Quality does (review A5-P2-1, A5-P2-2).
+func TestPreviewDamagedSettings(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3}, "", true)
+	if err := d.saveSettings(settings{DefaultQuality: "opus-128", Reencode: "on"}); err != nil {
+		t.Fatal(err)
+	}
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	f := filepath.Join(d.dir, "settings.json")
+	b, _ := os.ReadFile(f)
+	os.WriteFile(f, append([]byte{0xEF, 0xBB, 0xBF}, b...), 0o644)
+	d.do("check")
+	if got := titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}); len(got) != 1 || got[0] != "Everything is up to date" {
+		t.Fatalf("with a BOM: preview %q", got)
+	}
+
+	cut := b[:len(b)/2]
+	os.WriteFile(f, cut, 0o644)
+	d.do("check")
+	if got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|"); got != settingsDamaged+"|Check Again|Details" {
+		t.Fatalf("cut short: preview %q", got)
+	}
+	for _, p := range [][]string{{"keepfree"}, {"setstreamq", "opus-96"}, {"reencode"}, {"swipe"},
+		{"reportplays"}, {"setsort", "albums added"}, {"setorder", "albums turned"}} {
+		if r := d.do(p[0], p[1:]...); r.Message != settingsDamaged {
+			t.Errorf("%v: %q", p, r.Message)
+		}
+		if nb, _ := os.ReadFile(f); string(nb) != string(cut) {
+			t.Fatalf("%v wrote settings.json: %s", p, nb)
+		}
+	}
+	d.do("syncfav")
+	d.preview(t)
+	time.Sleep(300 * time.Millisecond) // time for a start that shouldn't come
+	for _, e := range d.manifest().Songs {
+		if e.Quality != "opus-128" {
+			t.Fatalf("Sync Favourites synced %+v", e)
+		}
+	}
+	// the way out: a fresh file, and the answer says the other settings went back to their defaults
+	if m := d.do("setdefq", "opus-128").Message; m != "Sync Quality: Opus 128 kbps · other settings were reset" {
+		t.Errorf("setdefq: %q", m)
+	}
+	d.do("check")
+	if got := strings.Join(titles(q2spot.Reply{Rows: afterOptions(d.preview(t))}), "|"); strings.Contains(got, "Replace") || strings.Contains(got, settingsDamaged) {
+		t.Fatalf("after Sync Quality: preview %q", got)
+	}
+}
+
+// A synced playlist's .m3u deleted from the card (on a computer) is written again, as a deleted
+// song is fetched again (I9) (review A5-P1-4).
+func TestPlaylistFileDeletedWrittenAgain(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	if err := os.Remove(mix); err != nil {
+		t.Fatal(err)
+	}
+	d.do("check")
+	if _, ok := find(d.preview(t), "Everything is up to date"); ok {
+		t.Fatal("Mix.m3u is gone but the preview has nothing to do")
+	}
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	if !exists(mix) {
+		t.Error("Mix.m3u not written again")
+	}
+}
+
+// albumRow is the Albums row of title and whether Albums has a Sync Now row.
+func (d *tdaemon) albumRow(title string) (string, bool) {
+	r := d.do("albums")
+	row, _ := find(r, title)
+	_, now := find(r, "Sync Now")
+	return row.Subtitle, now
+}
+
+// A synced album or playlist that lost a song on the server (removed from it on a phone) is due a
+// sync, as the plan removes the song: Waiting to sync and Sync Now, not On Q2.
+func TestStatusSongLostOnServer(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	n.songsPer = 2
+	d.do("album", "album:al0") // its page fetches it afresh
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+
+	n = &nav{albums: 2, songsPer: 3}
+	d = newTestDaemon(t, n, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	n.songsPer = 2
+	d.do("playlist", "playlist:pl1")
+	r := d.do("playlists")
+	row, _ := find(r, "Mix")
+	if _, now := find(r, "Sync Now"); row.Subtitle != "2 songs · Waiting to sync" || !now {
+		t.Errorf("playlist: %q, Sync Now %v", row.Subtitle, now)
+	}
+}
+
+// An original re-ripped on the server (its size changed since the sync) is replaced by the plan:
+// its album is Waiting to sync, with Sync Now, and so is its song row.
+func TestStatusResizedOriginal(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	m := d.manifest()
+	m.Songs["al0.1"].SrcSize = 999 // synced from a 999-byte file; the server's is 1000
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	r := d.do("album", "album:al0")
+	if s0, _ := find(r, "Song 0"); s0.Subtitle != "Artist · On Q2" {
+		t.Errorf("Song 0 %q", s0.Subtitle)
+	}
+	if s1, _ := find(r, "Song 1"); s1.Subtitle != "Artist · Waiting to sync" {
+		t.Errorf("Song 1 %q", s1.Subtitle)
+	}
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+}
+
+// Song rows of an album taken out of Sync say Waiting to sync, as the sync removes them, but a song
+// a chosen playlist keeps stays On Q2.
+func TestSongRowsDueToGo(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("toggle", "album:al0") // taken out
+	for _, s := range []string{"Song 0", "Song 1"} {
+		if row, _ := find(d.do("album", "album:al0"), s); row.Subtitle != "Artist · Waiting to sync" {
+			t.Errorf("%s %q", s, row.Subtitle)
+		}
+	}
+
+	d = newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "playlist:pl1") // Mix holds al0's songs
+	d.syncOK(t)
+	d.do("toggle", "album:al0")
+	for _, s := range []string{"Song 0", "Song 1"} {
+		if row, _ := find(d.do("album", "album:al0"), s); row.Subtitle != "Artist · On Q2" {
+			t.Errorf("kept by Mix: %s %q", s, row.Subtitle)
+		}
+	}
+}
+
+// A held item with nothing on the card says Held, not Waiting to sync: the sync adds nothing of it.
+func TestHeldNothingOnCard(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.do("hold", "playlist:pl1")
+	if row, _ := find(d.do("playlists"), "Mix"); row.Subtitle != "2 songs · Held" {
+		t.Errorf("Playlists: %q", row.Subtitle)
+	}
+	if row, _ := find(d.do("jobs"), "Mix"); row.Subtitle != "Held" {
+		t.Errorf("Sync Jobs: %q", row.Subtitle)
+	}
+}
+
+// A song of a held album that isn't on the card is added on its own: the held album adds nothing
+// new, so "Included via" would leave it out for good.
+func TestSongOfHeldAlbumAdded(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	n.songsPer = 3 // a new track al0.2
+	d.do("hold", "album:al0")
+	if r := d.do("toggle", "song:al0.0 album:al0 0"); r.Message != "Included via Album 000" { // on the card: kept
+		t.Errorf("song on the card: %q", r.Message)
+	}
+	d.do("album", "album:al0")
+	if r := d.do("toggle", "song:al0.2 album:al0 2"); r.Message != "Added to Sync · 1 song" {
+		t.Errorf("new song: %q", r.Message)
+	}
+	if sel := d.selected(t); len(sel) != 2 || sel[1].ID != "al0.2" {
+		t.Errorf("selection %+v", sel)
+	}
+}
+
+// With the field caps word the Server, Account and password pages have no search box: Return from
+// one to a search asks for the search again, and its text is searched, not taken as an address.
+func TestSearchAfterServerPage(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "sections art urls window sort field", true)
+	d.do("menu")
+	d.do("albums")
+	d.do("search", "Album 1")
+	for _, op := range []string{"server", "account", "pwlogin"} {
+		d.do(op)
+		if r := d.do("search", "Album 1"); !slices.Contains(titles(r), "Album 000") { // the stand-in finds every album
+			t.Errorf("after %s: %q %q", op, r.Message, titles(r))
+		}
+	}
+}
+
+// With every caps word on: Previous page back to an item page's first window (cursor "0") keeps its Sync Now row.
+func TestPreviousPageKeepsSyncNowAllCaps(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 230}, "sections art urls window sort field", true)
+	d.do("menu")
+	d.do("toggle", "album:al0")
+	a := d.do("album", "album:al0")
+	b := d.do("album", "album:al0", "0")
+	if !slices.Equal(titles(a), titles(b)) || a.Cursor != b.Cursor {
+		t.Errorf("opened %q… cursor %q, Previous page %q… cursor %q", titles(a)[:3], a.Cursor, titles(b)[:3], b.Cursor)
+	}
+}
+
+// A held item the sync still changes (a song lost on the server, an original re-ripped there) says
+// Waiting to sync and has Sync Now: the plan removes or replaces that song, hold or not.
+func TestHeldItemDueHasSyncNow(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("hold", "album:al0")
+	n.songsPer = 2
+	d.do("album", "album:al0")
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("lost a song: %q, Sync Now %v", sub, now)
+	}
+
+	d = newTestDaemon(t, &nav{albums: 2, songsPer: 3}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("hold", "album:al0")
+	m := d.manifest()
+	m.Songs["al0.1"].SrcSize = 999
+	if err := m.Save(d.card, filepath.Join(d.card, ".jellyfin", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d.do("album", "album:al0")
+	if r, _ := find(d.do("albums"), "Sync Now"); r.Subtitle != "1 waiting" {
+		t.Errorf("re-ripped: Sync Now %q", r.Subtitle)
+	}
+}
+
+// A song an artist chosen since (its songs not fetched yet) may hold stays On Q2 when its album is
+// taken out: the plan keeps it through the artist.
+func TestSongKeptByUnfetchedItem(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("toggle", "artist:ar1") // holds al0 and al1
+	d.do("toggle", "album:al0")
+	r := d.do("album", "album:al0")
+	for _, s := range []string{"Song 0", "Song 1"} {
+		if row, _ := find(r, s); row.Subtitle != "Artist · On Q2" {
+			t.Errorf("%s %q", s, row.Subtitle)
+		}
+	}
+}
+
+// A held album's songs that another chosen item wants at a better quality are due: the plan
+// replaces them at the best quality any chosen item wants.
+func TestHeldSongUpgradedByOtherItem(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, artistAlbums: 1}, "", true)
+	d.do("setdefq", "opus-128")
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("hold", "album:al0")
+	d.do("setdefq", "original")
+	d.do("toggle", "artist:ar1")
+	d.preview(t) // fetches the artist's songs
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+	if row, _ := find(d.do("album", "album:al0"), "Song 0"); row.Subtitle != "Artist · Waiting to sync" {
+		t.Errorf("Song 0 %q", row.Subtitle)
+	}
+
+	d = newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("setdefq", "opus-192")
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("hold", "album:al0")
+	d.do("setdefq", "original")
+	d.do("toggle", "playlist:pl1") // Mix holds al0's songs
+	d.do("playlist", "playlist:pl1")
+	r := d.do("playlists")
+	row, _ := find(r, "Mix")
+	if _, now := find(r, "Sync Now"); row.Subtitle != "2 songs · Waiting to sync" || !now {
+		t.Errorf("playlist: %q, Sync Now %v", row.Subtitle, now)
+	}
+}
+
+// A held song not on the card says Held on its row, as in Sync Jobs: the sync adds nothing held.
+func TestHeldSongRow(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("album", "album:al0")
+	d.do("toggle", "song:al0.0 album:al0 0")
+	d.do("hold", "song:al0.0")
+	if row, _ := find(d.do("album", "album:al0"), "Song 0"); row.Subtitle != "Artist · Held" {
+		t.Errorf("Song 0 %q", row.Subtitle)
+	}
+}
+
+// Under Entire Library a song lost on the server that a playlist holds too is due: the plan
+// removes it, so Entire Library says Waiting to sync, with Sync Now.
+func TestLibraryPlaylistSongLost(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.syncOK(t)
+	n.songsPer = 2 // al0.2, in Mix too, is gone
+	d.do("check")
+	d.preview(t)
+	if row, _ := find(d.do("jobs"), "Entire Library"); row.Subtitle != "Waiting to sync" {
+		t.Errorf("Sync Jobs: %q", row.Subtitle)
+	}
+	if _, now := d.albumRow("Album 000"); !now {
+		t.Error("no Sync Now")
+	}
+}
+
+// After a restart (nothing fetched yet), an album that lost a song on the server is due though a
+// playlist in Sync isn't fetched: the songs the card records for the playlist stand for it, as
+// they do in the plan, so the lost song is removed (A7b-P3-1).
+func TestLostSongAfterRestartWithPlaylist(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3, playlists: 2} // Mix 2 holds al1's songs
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "playlist:pl2")
+	d.syncOK(t)
+	d2 := newTestDaemonOn(t, d.card, n, "", true)
+	n.songsPer = 2 // al0.2 removed on the server
+	d2.do("album", "album:al0")
+	if sub, now := d2.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+}
+
+// Add to Sync on an album of a held artist, every song of it on the card, is Included via the
+// artist and changes nothing; one with a song not on the card is added (A7b-P3-2).
+func TestAlbumOfHeldArtist(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("setdefq", "opus-128")
+	d.do("toggle", "artist:ar1")
+	d.syncOK(t)
+	d.do("hold", "artist:ar1")
+	d.do("setdefq", "original")
+	if r := d.do("toggle", "album:al0"); r.Message != "Included via Artist" {
+		t.Errorf("on the card: %q", r.Message)
+	}
+	if sel := d.selected(t); len(sel) != 1 {
+		t.Errorf("selection %+v", sel)
+	}
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · On Q2" || now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+	n.songsPer = 3 // a new track al1.2
+	if r := d.do("toggle", "album:al1"); r.Message != "Added to Sync · 3 songs" {
+		t.Errorf("a song not on the card: %q", r.Message)
+	}
+}
+
+// A held item with nothing of it on the card says Waiting to sync, not Held, once another chosen
+// item adds its songs: a song held, then its album chosen; an album held, then its artist chosen
+// (A7b-P3-3).
+func TestHeldItemAddedByAnother(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("album", "album:al0")
+	d.do("toggle", "song:al0.0 album:al0 0")
+	d.do("hold", "song:al0.0")
+	d.do("toggle", "album:al0")
+	if row, _ := find(d.do("album", "album:al0"), "Song 0"); row.Subtitle != "Artist · Waiting to sync" {
+		t.Errorf("Song 0 %q", row.Subtitle)
+	}
+	if row, _ := find(d.do("jobs"), "Song 0"); row.Subtitle != "Held · Waiting to sync" {
+		t.Errorf("Sync Jobs: song %q", row.Subtitle)
+	}
+
+	d = newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.do("hold", "album:al0")
+	d.do("toggle", "artist:ar1")
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+	if row, _ := find(d.do("jobs"), "Album 000"); row.Subtitle != "Held · Waiting to sync" {
+		t.Errorf("Sync Jobs: album %q", row.Subtitle)
+	}
+}
+
+// A held album that an artist chosen since (its songs not fetched, its albums are) wants at a
+// better quality is Waiting to sync, and so are its songs: the plan replaces them (A7b-P3-4).
+func TestHeldUpgradedByUnfetchedArtist(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, artistAlbums: 1}, "", true)
+	d.do("setdefq", "opus-128")
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("hold", "album:al0")
+	d.do("setdefq", "original")
+	d.do("toggle", "artist:ar1")
+	if sub, now := d.albumRow("Album 000"); sub != "Artist · Waiting to sync" || !now {
+		t.Errorf("album: %q, Sync Now %v", sub, now)
+	}
+	if row, _ := find(d.do("album", "album:al0"), "Song 0"); row.Subtitle != "Artist · Waiting to sync" {
+		t.Errorf("Song 0 %q", row.Subtitle)
+	}
+}
+
+// A song added to a synced playlist on the server, after the Sync page was opened: opening the
+// playlist fetches it, and the playlist says Waiting to sync with Sync Now, as with no preview.
+// The preview made before the fetch doesn't stand for the plan (A7b-P4-1).
+func TestFetchAfterPreview(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	d.do("check")
+	d.preview(t)
+	n.songsPer = 3 // a song added to the playlist on the server
+	if row, _ := find(d.do("playlist", "playlist:pl1"), "Song 2"); row.Subtitle != "Artist · Waiting to sync" {
+		t.Errorf("new song %q", row.Subtitle)
+	}
+	r := d.do("playlists")
+	row, _ := find(r, "Mix")
+	if _, now := find(r, "Sync Now"); row.Subtitle != "3 songs · Waiting to sync" || !now {
+		t.Errorf("playlist %q, Sync Now %v", row.Subtitle, now)
+	}
+}
+
+// An item taken out of Sync says Waiting to sync, and so do its songs, while a chosen item whose
+// songs aren't known can't hold them: an artist just added whose album list is known, an album
+// added and not synced before a restart. One that may hold any song (Favourites with no hearts,
+// after a restart) leaves the item Waiting to sync as well (A7b-P4-2).
+func TestTakenOutWhileItemUnknown(t *testing.T) {
+	check := func(d *tdaemon, album, id string) {
+		t.Helper()
+		if sub, now := d.albumRow(album); sub != "Artist · Waiting to sync" || !now {
+			t.Errorf("%s: %q, Sync Now %v", album, sub, now)
+		}
+		if id == "" {
+			return
+		}
+		if row, _ := find(d.do("album", "album:"+id), "Song 0"); row.Subtitle != "Artist · Waiting to sync" {
+			t.Errorf("%s: Song 0 %q", album, row.Subtitle)
+		}
+	}
+	n := &nav{albums: 2, songsPer: 2, artistAlbums: 1} // the artist's list: al0 only
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al1")
+	d.syncOK(t)
+	d.do("toggle", "album:al1") // out
+	d.do("toggle", "artist:ar1")
+	check(d, "Album 001", "al1")
+
+	n = &nav{albums: 2, songsPer: 2}
+	d = newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("toggle", "album:al1") // added, not synced
+	d2 := newTestDaemonOn(t, d.card, n, "", true)
+	d2.do("toggle", "album:al0") // out
+	check(d2, "Album 000", "al0")
+
+	d = newTestDaemon(t, n, "", true)
+	d.do("toggle", "favorites:all")
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d2 = newTestDaemonOn(t, d.card, n, "", true)
+	d2.do("toggle", "album:al0") // out
+	check(d2, "Album 000", "")
+}
+
+// A song chosen on its own, on the card through an album taken out since, stays On Q2 after a
+// restart: the sync keeps it (A7b-P4-3).
+func TestSongItemAfterRestart(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("toggle", "album:al0") // out
+	d.do("album", "album:al0")
+	d.do("toggle", "song:al0.0 album:al0 0")
+	d2 := newTestDaemonOn(t, d.card, n, "", true)
+	if row, _ := find(d2.do("album", "album:al0"), "Song 0"); row.Subtitle != "Artist · On Q2" {
+		t.Errorf("Song 0 %q", row.Subtitle)
+	}
+	if row, _ := find(d2.do("albums"), "Sync Now"); row.Subtitle != "1 waiting" {
+		t.Errorf("Sync Now %q", row.Subtitle)
+	}
+}
+
+// An album in Sync deleted on the server: once Sync is opened, Browse shows Sync Now, as the
+// preview removes its song, and Sync Jobs still says No longer on the server (A7b-P5-1).
+func TestGoneItemSyncNow(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 1}, "", true)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "album:al1")
+	d.syncOK(t)
+	d2 := newTestDaemonOn(t, d.card, &nav{albums: 1, songsPer: 1, goneID: "al1"}, "", true)
+	d2.preview(t)
+	if row, ok := find(d2.do("albums"), "Sync Now"); !ok || row.Subtitle != "1 waiting" {
+		t.Errorf("Sync Now %v %q", ok, row.Subtitle)
+	}
+	if row, _ := find(d2.do("jobs"), "Album 001"); row.Subtitle != "No longer on the server" {
+		t.Errorf("Sync Jobs %q", row.Subtitle)
+	}
+}
+
+// Under Entire Library, albums and artists have a status: after a restart, before Sync is opened,
+// Included via Entire Library; once Sync is opened, On Q2 for a synced album and Waiting to sync
+// for a new one (A7b-P1-10).
+func TestEntireLibraryAlbumStatus(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.syncOK(t)
+	n.albums = 2 // a new album on the server
+	d2 := newTestDaemonOn(t, d.card, n, "", true)
+	if sub, _ := d2.albumRow("Album 000"); sub != "Artist · Included via Entire Library" {
+		t.Errorf("after a restart: %q", sub)
+	}
+	if row, _ := find(d2.do("artists"), "Artist"); row.Subtitle != "2 albums · Included via Entire Library" {
+		t.Errorf("artist after a restart: %q", row.Subtitle)
+	}
+	d2.preview(t)
+	if sub, _ := d2.albumRow("Album 000"); sub != "Artist · On Q2" {
+		t.Errorf("synced album: %q", sub)
+	}
+	r := d2.do("albums")
+	row, _ := find(r, "Album 001")
+	now, _ := find(r, "Sync Now")
+	if row.Subtitle != "Artist · Waiting to sync" || now.Subtitle != "1 waiting" {
+		t.Errorf("new album: %q, Sync Now %q", row.Subtitle, now.Subtitle)
+	}
+}
+
+// Under a held Entire Library a new album never syncs: its page and Add to Sync say to resume
+// Entire Library, not that it is included (A7b-P2-6).
+func TestHeldLibraryNewAlbumWording(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.syncOK(t)
+	d.do("hold", "library:all")
+	n.albums = 2
+	const held = "Entire Library is held: resume it in Sync Jobs"
+	if row := d.do("album", "album:al1").Rows[0]; row.Kind != "info" || row.Title != held {
+		t.Errorf("page row %+v", row)
+	}
+	if r := d.do("toggle", "album:al1"); r.Message != held {
+		t.Errorf("toast %q", r.Message)
 	}
 }

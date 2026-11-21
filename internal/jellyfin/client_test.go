@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -205,6 +206,30 @@ func TestRedirectDropsTokenOffHost(t *testing.T) {
 	}
 }
 
+// A 307 or 308 at sign-in to another host is refused: Go would send the password there again.
+func TestRedirectKeepsPasswordOnHost(t *testing.T) {
+	for _, code := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		var got []string
+		other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			got = append(got, r.Method+" "+string(b))
+		}))
+		t.Cleanup(other.Close)
+		_, srv := newFake(t, map[string]http.HandlerFunc{
+			"/Users/AuthenticateByName": func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, strings.Replace(other.URL, "127.0.0.1", "localhost", 1)+"/Users/AuthenticateByName", code)
+			},
+		})
+		tr := srv.Client().Transport.(*http.Transport).Clone()
+		tr.TLSClientConfig.InsecureSkipVerify = true // the second test server has its own certificate
+		c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, &http.Client{Transport: tr})
+		_, err := c.SignIn(context.Background())
+		if !errors.Is(err, ErrRedirect) || len(got) > 0 {
+			t.Fatalf("%d: err %v; other host got %q", code, err, got)
+		}
+	}
+}
+
 func TestSongMapping(t *testing.T) {
 	_, srv := newFake(t, map[string]http.HandlerFunc{
 		"/Items/s1": func(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +296,7 @@ func TestAlbumsQuery(t *testing.T) {
 			for k := range r.URL.Query() {
 				q[k] = r.URL.Query().Get(k)
 			}
-			w.Write([]byte(`{"Items":[{"Id":"al1","Name":"Tender","AlbumArtist":"Broadcast","ProductionYear":2005,"ChildCount":12,"ImageTags":{"Primary":"t"}}],"TotalRecordCount":1}`))
+			w.Write([]byte(`{"Items":[{"Id":"al1","Name":"Tender","AlbumArtist":"Broadcast","ProductionYear":2005,"ChildCount":12,"ImageTags":{"Primary":"t"}}],"TotalRecordCount":1,"StartIndex":50}`))
 		},
 	})
 	al, err := signedIn(t, srv).Albums(context.Background(), 50, 25, "name", false)
@@ -678,7 +703,7 @@ func TestListChangedWhilePaged(t *testing.T) {
 			for i := 0; i < 500; i++ {
 				items = append(items, fmt.Sprintf(`{"Id":"s%s-%d","Type":"Audio"}`, r.URL.Query().Get("startIndex"), i))
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":%d}`, strings.Join(items, ","), total)
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":%d,"StartIndex":%s}`, strings.Join(items, ","), total, r.URL.Query().Get("startIndex"))
 		},
 	})
 	_, err := signedIn(t, srv).AllSongs(context.Background())
@@ -705,7 +730,7 @@ func TestTiedSongsSwappedBetweenPages(t *testing.T) {
 				}
 				items = append(items, fmt.Sprintf(`{"Id":"%s","Type":"Audio"}`, id))
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1000}`, strings.Join(items, ","))
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1000,"StartIndex":%d}`, strings.Join(items, ","), start)
 		},
 	})
 	if _, err := signedIn(t, srv).AllSongs(context.Background()); !errors.Is(err, ErrChanged) {
@@ -778,7 +803,7 @@ func TestArtistAlbumsPaged(t *testing.T) {
 				}
 				items = append(items, fmt.Sprintf(`{"Id":"al%d","Type":"MusicAlbum","Name":"Album %d"}`, n, n))
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1200}`, strings.Join(items, ","))
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1200,"StartIndex":%d}`, strings.Join(items, ","), start)
 		},
 	})
 	_, als, err := signedIn(t, srv).Artist(context.Background(), "ar1")
@@ -792,7 +817,7 @@ func TestArtistAlbumsPaged(t *testing.T) {
 }
 
 // A server that ignores startIndex (or a proxy that caches without the query) sends the same page
-// for ever under a huge total. The lists stop at the repeat, not at the caller's time limit
+// again and again under its total. The lists stop at the repeat, not at the caller's time limit
 // (audit 2026-11-16 #23).
 func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
 	page := func(item string) http.HandlerFunc {
@@ -801,7 +826,7 @@ func TestPagingStopsWhenServerIgnoresStart(t *testing.T) {
 			for i := 0; i < 500; i++ {
 				items = append(items, fmt.Sprintf(item, i))
 			}
-			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":2000000000,"StartIndex":0}`, strings.Join(items, ","))
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":50000,"StartIndex":0}`, strings.Join(items, ","))
 		}
 	}
 	_, srv := newFake(t, map[string]http.HandlerFunc{
@@ -1040,7 +1065,7 @@ func TestFavoritesPages(t *testing.T) {
 			for i := 0; i < n; i++ {
 				items = append(items, fmt.Sprintf(`{"Id":"s%s-%d","Type":"Audio"}`, q.Get("startIndex"), i))
 			}
-			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `],"TotalRecordCount":503}`))
+			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `],"TotalRecordCount":503,"StartIndex":` + q.Get("startIndex") + `}`))
 		},
 	})
 	got, err := signedIn(t, srv).Favorites(context.Background())
@@ -1067,7 +1092,7 @@ func TestLongListsPaged(t *testing.T) {
 			for i := start; i < min(start+500, 1203); i++ {
 				items = append(items, fmt.Sprintf(item, i, i))
 			}
-			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `],"TotalRecordCount":1203}`))
+			w.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `],"TotalRecordCount":1203,"StartIndex":` + q.Get("startIndex") + `}`))
 		}
 	}
 	_, srv := newFake(t, map[string]http.HandlerFunc{
@@ -1449,6 +1474,10 @@ func TestStatusMeaningPerRequest(t *testing.T) {
 			_, err := c.QuickConnectPoll(ctx, "s")
 			return err
 		}},
+		{"/QuickConnect/Connect", ErrQuickConnectOff, "401 403", func(c *Client) error { // turned off while the code is on screen
+			_, err := c.QuickConnectPoll(ctx, "s")
+			return err
+		}},
 		{"/Users/AuthenticateWithQuickConnect", ErrQuickConnectExpired, "401", func(c *Client) error {
 			_, err := c.QuickConnectSignIn(ctx, "s")
 			return err
@@ -1499,7 +1528,7 @@ func TestRedirectPlainHTTP(t *testing.T) {
 		"http://192.168.1.10:8097/x": false,
 	} {
 		u, _ := url.Parse(to)
-		if err := c.hc.CheckRedirect(&http.Request{URL: u, Header: http.Header{}}, []*http.Request{from}); (err == nil) != ok {
+		if err := c.hc.CheckRedirect(&http.Request{Method: "GET", URL: u, Header: http.Header{}}, []*http.Request{from}); (err == nil) != ok {
 			t.Errorf("%s: %v", to, err)
 		}
 	}
@@ -1541,5 +1570,211 @@ func TestRedirectDefaultPort(t *testing.T) {
 				t.Errorf("%s to %s: token kept %v", server, to, !same)
 			}
 		}
+	}
+}
+
+// A library over 100,000 items (a real one of 120,000, or a server that would page for ever under
+// a huge total) is refused on its first page, not read 200 pages deep or until the Q2 runs out of
+// memory. A total that changes between pages is ErrChanged, so the total is all there is to check.
+func TestPagingStopsAtLibraryCap(t *testing.T) {
+	for _, total := range []int{120000, 2000000000} {
+		var pages atomic.Int32
+		_, srv := newFake(t, map[string]http.HandlerFunc{
+			"/Items": func(w http.ResponseWriter, r *http.Request) {
+				start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+				pages.Add(1)
+				items := strings.TrimSuffix(strings.Repeat(`{"Id":"s"},`, 500), ",")
+				fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":%d,"StartIndex":%d}`, items, total, start)
+			},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := signedIn(t, srv).AllSongs(ctx)
+		cancel()
+		if Message(err, "h") != "Library too large for the Q2" || pages.Load() != 1 {
+			t.Errorf("total %d: %d pages: %v", total, pages.Load(), err)
+		}
+	}
+}
+
+// The cap is for the whole list, not each music library: two libraries of 60,000 songs (or album
+// artists) are refused, not read as 120,000, and so is a second library whose total is the largest
+// int (it must not wrap the sum negative and page on): each on the second library's first page.
+func TestPagingCapCountsEveryLibrary(t *testing.T) {
+	for _, total2 := range []int{60000, math.MaxInt} {
+		var lib2 atomic.Int32
+		page := func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			start, _ := strconv.Atoi(q.Get("startIndex"))
+			total := 60000
+			if q.Get("parentId") == "lib2" {
+				lib2.Add(1)
+				total = total2
+			}
+			var b strings.Builder
+			for i := start; i < start+500; i++ {
+				fmt.Fprintf(&b, `{"Id":"%s-%d","Type":"Audio","Path":"/music/A/%d.flac"},`, q.Get("parentId"), i, i)
+			}
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":%d,"StartIndex":%d}`, strings.TrimSuffix(b.String(), ","), total, start)
+		}
+		srv := twoLibraries(t, map[string]http.HandlerFunc{"/Items": page, "/Artists/AlbumArtists": page})
+		c := signedIn(t, srv)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		if songs, err := c.AllSongs(ctx); Message(err, "h") != "Library too large for the Q2" || lib2.Load() != 1 {
+			t.Errorf("lib2 total %d: songs: %d, %d lib2 pages, %v", total2, len(songs), lib2.Load(), err)
+		}
+		lib2.Store(0)
+		if artists, err := c.Artists(ctx, "name", false); Message(err, "h") != "Library too large for the Q2" || lib2.Load() != 1 {
+			t.Errorf("lib2 total %d: artists: %d, %d lib2 pages, %v", total2, len(artists), lib2.Load(), err)
+		}
+		cancel()
+	}
+}
+
+// A server that ignores limit but honours startIndex: a playlist of 1,200 songs comes whole,
+// 500 at a time, not cut to its first 500.
+func TestPlaylistServerIgnoresLimit(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Playlists/p1/Items": func(w http.ResponseWriter, r *http.Request) {
+			start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+			var b strings.Builder
+			for i := start; i < 1200; i++ {
+				fmt.Fprintf(&b, `{"Id":"s%d","Type":"Audio","Path":"/music/Artist/%d.flac"},`, i, i)
+			}
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":1200,"StartIndex":%d}`, strings.TrimSuffix(b.String(), ","), start)
+		},
+	})
+	songs, err := signedIn(t, srv).PlaylistSongs(context.Background(), "p1", false)
+	if err != nil || len(songs) != 1200 || songs[1199].ID != "s1199" {
+		t.Fatalf("%d songs, %v", len(songs), err)
+	}
+}
+
+// A page that doesn't say where it starts is taken only as the first: a server that ignores
+// startIndex and leaves StartIndex out stops at its second page.
+func TestPagingStopsWithoutStartIndex(t *testing.T) {
+	items := strings.TrimSuffix(strings.Repeat(`{"Id":"s","Type":"Audio","Path":"/music/A/1.flac"},`, 500), ",")
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":50000}`, items)
+		},
+		"/Playlists/p1/Items": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":50000}`, items)
+		},
+	})
+	c := signedIn(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.AllSongs(ctx); !errors.Is(err, ErrChanged) {
+		t.Fatalf("songs: %v", err)
+	}
+	if _, err := c.PlaylistSongs(ctx, "p1", false); !errors.Is(err, ErrChanged) {
+		t.Fatalf("playlist: %v", err)
+	}
+}
+
+// A Windows server whose music is on a network share (\\nas\music) lists its songs as music.
+func TestMusicOnWindowsShare(t *testing.T) {
+	f := &fake{h: map[string]http.HandlerFunc{
+		"/Items/s1": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Id":"s1","Type":"Audio","Path":"\\\\nas\\music\\Artist\\A\\01.flac"}`))
+		},
+		"/Playlists/p1/Items": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"Items":[{"Id":"s1","Type":"Audio","Path":"\\\\nas\\music\\Artist\\A\\01.flac"}],"TotalRecordCount":1}`))
+		},
+	}}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isFolderScan(r) {
+			w.Write([]byte(`{"Items":[{"Id":"ar","Type":"MusicArtist","Path":"\\\\nas\\music\\Artist"}],"TotalRecordCount":1}`))
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := signedIn(t, srv)
+	if ss, err := c.PlaylistSongs(context.Background(), "p1", false); err != nil || len(ss) != 1 {
+		t.Fatalf("playlist: %+v %v", ss, err)
+	}
+	if _, err := c.Song(context.Background(), "s1"); err != nil {
+		t.Fatalf("song: %v", err)
+	}
+}
+
+// Jellyfin answers a right password for a disabled or locked-out account (or one not allowed
+// from this network) with 403: that is not "Wrong username or password".
+func TestSignInRefusedAccount(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/AuthenticateByName": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusForbidden) },
+	})
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	_, err := c.SignIn(context.Background())
+	if want := "The server refused this account (disabled, locked, or not allowed from here). Ask its admin"; !errors.Is(err, ErrAuth) || Message(err, "h") != want {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
+// A 403 at Quick Connect's last step is the account refused, not "Sign in again ... Sign Out" to
+// someone not signed in.
+func TestQuickConnectRefusedAccount(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/AuthenticateWithQuickConnect": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", http.StatusForbidden) },
+	})
+	c, _ := New(Creds{Server: srv.URL}, srv.Client())
+	_, err := c.QuickConnectSignIn(context.Background(), "secret")
+	if want := "The server refused this account (disabled, locked, or not allowed from here). Ask its admin"; Message(err, "h") != want {
+		t.Fatalf("%v / %q", err, Message(err, "h"))
+	}
+}
+
+// A proxy in front of the server (basic auth, Authelia, Cloudflare Access) that refuses the server
+// check says what it answered, not "Sign in again ... Sign Out" to someone not signed in.
+func TestServerCheckRefusedByProxy(t *testing.T) {
+	for _, st := range []int{401, 403} {
+		_, srv := newFake(t, map[string]http.HandlerFunc{
+			"/System/Info/Public": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "", st) },
+		})
+		c, _ := New(Creds{Server: srv.URL}, srv.Client())
+		err := c.CheckServer(context.Background())
+		if want := fmt.Sprintf("The server answered HTTP %d", st); Message(err, "h") != want {
+			t.Errorf("%d: %v / %q", st, err, Message(err, "h"))
+		}
+	}
+}
+
+// A server that ignores limit sends no more rows than were asked into a page of albums.
+func TestAlbumsPageNoMoreThanAsked(t *testing.T) {
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Items": func(w http.ResponseWriter, r *http.Request) {
+			items := strings.TrimSuffix(strings.Repeat(`{"Id":"al","Type":"MusicAlbum"},`, 300), ",")
+			fmt.Fprintf(w, `{"Items":[%s],"TotalRecordCount":300,"StartIndex":0}`, items)
+		},
+	})
+	if al, err := signedIn(t, srv).Albums(context.Background(), 0, 25, "name", false); err != nil || len(al) != 25 {
+		t.Fatalf("%d albums, %v", len(al), err)
+	}
+}
+
+// A server that drips its JSON answer, a byte at a time, is cut off at the request's limit: the
+// idle limit alone never fires while bytes keep coming.
+func TestCallLimitCutsDrip(t *testing.T) {
+	old := callTimeout
+	callTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { callTimeout = old })
+	_, srv := newFake(t, map[string]http.HandlerFunc{
+		"/Users/Me": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("{"))
+			for range 1000 { // ends after 10 s, so the test fails rather than hangs without the limit
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				w.Write([]byte(" "))
+			}
+			w.Write([]byte("}"))
+		},
+	})
+	if err := signedIn(t, srv).Ping(context.Background()); err == nil {
+		t.Fatal("a dripping answer was read to its end")
 	}
 }

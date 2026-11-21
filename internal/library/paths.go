@@ -103,6 +103,9 @@ func Quality(q string, s jellyfin.Song, reencode bool) string {
 	return q
 }
 
+// Ext is the extension, dot included, of song s's file at quality q.
+func Ext(s jellyfin.Song, q string) string { return "." + ext(s, q) }
+
 func ext(s jellyfin.Song, q string) string {
 	if quality.IsOriginal(q) {
 		if SafeSuffix(s.Suffix) {

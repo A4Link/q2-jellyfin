@@ -1,6 +1,7 @@
 package q2spot
 
 import (
+	"io"
 	"net"
 	"path/filepath"
 	"strings"
@@ -89,5 +90,56 @@ func TestServe(t *testing.T) {
 	n, _ := c.Read(buf)
 	if got := string(buf[:n]); got != "Q2SPOT/1\n9\tok\tmenu\t\ninfo\t\tA%25\t\t\t\n" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// A request that can't be read gets the bad line, with its id when one can be read (0 otherwise),
+// and an endless one is cut at MaxRequest and answered at once, not at the deadline.
+func TestServeBadRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sock")
+	go Serve(path, func(r Request) Reply { return Reply{Message: r.Op} })
+	for _, c := range []struct{ name, req, id string }{
+		{"bad escape", "Q2SPOT/1\n7\tmenu\t%zz\n", "7"},
+		{"cut escape", "Q2SPOT/1\n7\tmenu\tab%4\n", "7"},
+		{"escaped NUL", "Q2SPOT/1\n7\tmenu\t%00\n", "7"},
+		{"raw NUL", "Q2SPOT/1\n7\tme\x00nu\n", "7"},
+		{"endless", "Q2SPOT/1\n7\tsearch\t", "7"}, // then "a" until the server closes
+		{"no version line", "7\tmenu\n", "7"},
+		{"empty", "", "0"},
+		{"no id", "Q2SPOT/1\nmenu\n", "0"},
+		{"one field", "Q2SPOT/1\n7\n", "7"},
+		{"two lines", "Q2SPOT/1\n7\tmenu\n8\tmenu\n", "7"},
+	} {
+		var c2 net.Conn
+		var err error
+		for i := 0; i < 100; i++ {
+			if c2, err = net.Dial("unix", path); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func(c net.Conn, name, req string) {
+			c.Write([]byte(req))
+			if name != "endless" {
+				c.(*net.UnixConn).CloseWrite()
+				return
+			}
+			more := []byte(strings.Repeat("a", 4096))
+			for { // until the server, past MaxRequest, stops reading and closes
+				if _, err := c.Write(more); err != nil {
+					return
+				}
+			}
+		}(c2, c.name, c.req)
+		start := time.Now()
+		c2.SetReadDeadline(start.Add(Timeout + 5*time.Second))
+		got, _ := io.ReadAll(c2)
+		c2.Close()
+		if want := "Q2SPOT/1\n" + c.id + "\tbad\tBad request\t\n"; string(got) != want {
+			t.Errorf("%s: %q, want %q", c.name, got, want)
+		}
 	}
 }

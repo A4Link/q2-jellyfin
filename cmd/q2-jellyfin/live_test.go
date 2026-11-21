@@ -24,7 +24,7 @@ import (
 
 // End-to-end tests of the app (daemon, sync engine, card layout) against a real Jellyfin server
 // made by contrib/testserver/setup.py. They run when JELLYFIN_TEST_SERVER names its server.json;
-// the daemon reaches the server through a TLS proxy of the test's own, as it only speaks HTTPS.
+// the daemon reaches the server over HTTPS, through a TLS proxy of the test's own.
 
 type liveConf struct {
 	URL   string                          `json:"url"`

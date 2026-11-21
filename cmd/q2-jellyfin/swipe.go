@@ -26,7 +26,9 @@ func (d *daemon) toggleSwipe(s settings) q2spot.Reply {
 	} else {
 		s.Swipe = "off"
 	}
-	d.saveSettings(s)
+	if d.saveSettings(s) != nil {
+		return q2spot.Fail(q2spot.Error, settingNotSaved)
+	}
 	if s.Swipe == "on" {
 		return q2spot.Reply{Message: "Swipe on: close and reopen Jellyfin"}
 	}

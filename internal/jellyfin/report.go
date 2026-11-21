@@ -98,7 +98,8 @@ func (c *Client) PlaybackStopped(ctx context.Context, id string, pos time.Durati
 
 // Refused reports whether err is the server's final word on a report: an item it doesn't know
 // (404) or a request it can't read (400). Sending it again changes nothing. A refusal of the
-// sign-in (401, 403), an error of the server's own (5xx) or no answer may pass.
+// sign-in (401), a 403 (one item forbidden, or the whole account: an access schedule, remote
+// access refused; the caller asks which), an error of the server's own (5xx) or no answer may pass.
 func Refused(err error) bool {
 	var ae *APIError
 	return errors.As(err, &ae) && (ae.HTTP == 400 || ae.HTTP == 404)

@@ -38,31 +38,35 @@ import (
 //
 // The outbox, .jellyfin/outbox.json, is what is still to send, written whole (aside, then renamed).
 // An entry leaves it only once the server took it (2xx), or refused it for good (an item it doesn't
-// know). It is sent in the background when the app finds Wi-Fi (at its start, or back), when a sync
-// starts, and after a failure with a growing wait; never on a page's or a song's time. It keeps at
-// most outboxMax entries, the oldest going first (counted in the log). It holds item ids, times and
-// hearts (fav.go), no secret. A damaged one is left for a new one, with a log line. The server
-// counts a play once a call; a call it took whose answer was lost is sent again and counts twice.
+// know, or forbids while the account itself still answers). It is sent in the background when the
+// app finds Wi-Fi (at its start, or back), when a sync starts, and after a failure with a growing
+// wait; never on a page's or a song's time. It keeps at most outboxMax entries, the oldest going
+// first (counted in the log). It holds item ids, times and hearts (fav.go), no secret. A damaged
+// one is left for a new one, with a log line. The server counts a play once a call: a play or
+// start whose answer was lost is marked tried, and before it goes again the server's last-played
+// date is asked (report.Tried).
 //
 // Q2 Pod's log is read on from the newest listen taken, kept in .jellyfin/plays.json with the
 // lines of that second already taken: Q2 Pod's upload rewrites the log without what it sent, so a
-// byte offset would not hold, and the log is never written here. The first read starts at that
-// moment: listens from before reporting was on, or older than the newest taken (a clock set back),
-// are not sent. Turning reporting off drops the plays waiting and forgets the place; signing out
-// empties the outbox (hearts too) and forgets the place.
+// byte offset would not hold, and the log is never written here. Reporting turned on, or a
+// sign-in, marks that moment (the clock unset then, the log's newest listen: Q2 Pod logs none
+// while it is): listens from before reporting was on, or older than the newest taken (a clock set
+// back), are not sent. Turning reporting off drops the plays waiting and forgets the place;
+// signing out empties the outbox (hearts too) and forgets the place.
 
 const (
-	outboxMax  = 1000
-	reportWait = 15 * time.Second // one report request
-	liveGrace  = 30 * time.Second // a live song counts as stopped this long after its length
-	liveSpan   = 10 * 60          // seconds: a log line of a song reported live this near is that play
-	liveKeep   = 2 * 24 * 60 * 60 // seconds a live report is remembered for that
-	reportMax  = 30 * time.Minute // the longest wait after failures
-	reportMin  = time.Minute      // the first
-	logLineMax = 4 << 10          // a longer line in Q2 Pod's log is no listen
-	playedKind = "played"         // report.Item was played at report.At
-	scrobbles  = ".scrobbler.log" // Q2 Pod's play log, at the card's root
-	scrobbled  = ".scrobbler.log.sent"
+	outboxMax   = 1000
+	reportBatch = 20               // a send takes what the server took out of the outbox this often
+	reportWait  = 15 * time.Second // one report request
+	liveGrace   = 30 * time.Second // a live song counts as stopped this long after its length
+	liveSpan    = 10 * 60          // seconds: a log line of a song reported live this near is that play
+	liveKeep    = 2 * 24 * 60 * 60 // seconds a live report is remembered for that
+	reportMax   = 30 * time.Minute // the longest wait after failures
+	reportMin   = time.Minute      // the first
+	logLineMax  = 4 << 10          // a longer line in Q2 Pod's log is no listen
+	playedKind  = "played"         // report.Item was played at report.At
+	scrobbles   = ".scrobbler.log" // Q2 Pod's play log, at the card's root
+	scrobbled   = ".scrobbler.log.sent"
 )
 
 // report is one outbox entry: Kind says what to tell the server about Item: played (at At), or
@@ -73,8 +77,12 @@ type report struct {
 	At   int64  `json:"at,omitempty"` // Unix seconds
 	On   bool   `json:"on,omitempty"` // a favourite's state
 	// Tried: sent once with no answer, so the server may have counted it. Before it goes again the
-	// item's last-played date is asked: equal to At, it counted and is not sent twice.
+	// item's last-played date is asked: At to the second (a play is marked at its time), or from a
+	// minute before Sent to liveSpan after it, it counted and is not sent twice.
 	Tried bool `json:"tried,omitempty"`
+	// Sent: when a live start went (Unix seconds), tried: the server dates it by its own clock then,
+	// not at At, the song's start (the app opened mid-song).
+	Sent int64 `json:"sent,omitempty"`
 }
 
 // same reports whether a and b are the same report, tried or not.
@@ -85,7 +93,9 @@ func (a report) same(b report) bool {
 // clockSet reports whether the Q2's clock is set: until Wi-Fi sets it, it reads 1970 or 2000, and a
 // play's time, or the place in Q2 Pod's log, would be decades off. Q2 Pod's own test (navigation.c
 // scrobble): it logs no listen before it either.
-func clockSet(t time.Time) bool { return t.Unix() >= 1600000000 }
+func clockSet(t time.Time) bool { return t.Unix() >= clockSetAt }
+
+const clockSetAt = 1600000000
 
 // clock is the Q2's clock for reports; tests set it.
 var clock = time.Now
@@ -192,6 +202,17 @@ func (o *outbox) remove(rs []report) error {
 	return o.save(cur)
 }
 
+// rewrite writes the outbox again as it is: an error is one a send's remove would meet.
+func (o *outbox) rewrite() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	cur, err := o.load()
+	if err != nil {
+		return err
+	}
+	return o.save(cur)
+}
+
 // tried marks r as sent without an answer (report.Tried).
 func (o *outbox) tried(r report) error {
 	o.mu.Lock()
@@ -245,7 +266,12 @@ type liveSong struct {
 	stop *time.Timer
 }
 
-func (d *daemon) reportsOn() bool { return d.settings().ReportPlays != "off" }
+// reportsOn is Report Plays on; off while settings.json can't be read, which may hold Off (review
+// A5-P4-1).
+func (d *daemon) reportsOn() bool {
+	s, err := d.settingsErr()
+	return err == nil && s.ReportPlays != "off"
+}
 
 // wantReports asks for a send at the next tick with Wi-Fi; now drops the wait after a failure.
 func (d *daemon) wantReports(now bool) {
@@ -307,8 +333,13 @@ func (d *daemon) sendReports() {
 	if d.reportsOn() {
 		d.readPlays()
 	}
+	// A play goes only while the outbox can be written to take it out again: on a full card each
+	// send would count every waiting play again (review A6-P2-5). They wait for room.
+	stuck := d.rep.box.rewrite()
 	var done []report
 	favs := false
+	pinged := false
+	var account error // a 403 is one song's only while the account answers (cl.Ping)
 	for _, r := range d.rep.box.pending() {
 		if d.client() != cl {
 			break // signed out meanwhile
@@ -320,11 +351,22 @@ func (d *daemon) sendReports() {
 			err = d.sendFav(cl, r)
 			favs = favs || err == nil // one not taken changed nothing on the server
 		case r.Kind == playedKind && d.reportsOn():
+			if stuck != nil {
+				failed = stuck // tried again later, with the wait of a failure
+				continue
+			}
 			counted, err = d.sendPlayed(cl, r)
 		default:
 			continue // a later build's, or a play with reporting turned off meanwhile
 		}
-		if err != nil && !jellyfin.Refused(err) && !(r.Kind == favKind && httpStatus(err) == 403) {
+		forbidden := httpStatus(err) == 403
+		if forbidden && !pinged { // a 403 to everything is the account (access schedule, remote access)
+			pinged = true
+			ctx, cancel := context.WithTimeout(context.Background(), reportWait)
+			account = cl.Ping(ctx)
+			cancel()
+		}
+		if err != nil && !jellyfin.Refused(err) && (!forbidden || account != nil) {
 			failed = err
 			break
 		}
@@ -342,17 +384,32 @@ func (d *daemon) sendReports() {
 			sent++
 		}
 		done = append(done, r)
+		if len(done) == reportBatch { // a stop mid-send then sends again at most these
+			if err := d.reportsDone(done); err != nil {
+				stuck = err
+			}
+			done = nil
+		}
 	}
-	if err := d.rep.box.remove(done); err != nil {
-		d.log.Printf("reports: outbox: %v", err)
-	}
+	d.reportsDone(done)
 	if favs {
 		d.favsChanged()
 	}
 }
 
+// reportsDone takes rs, sent or refused, out of the outbox.
+func (d *daemon) reportsDone(rs []report) error {
+	err := d.rep.box.remove(rs)
+	if err != nil {
+		d.log.Printf("reports: outbox: %v", err)
+	}
+	return err
+}
+
 // sendPlayed sends a played report; counted when, tried before, the server had counted it already
-// (its last-played date is the report's own). A request with no answer at all marks it tried.
+// (its last-played date is the report's or, a live start, from a minute before Sent, the clocks'
+// difference, to liveSpan after: one earlier is another play, the song before it repeated),
+// report.Tried. A request with no answer at all marks it tried.
 func (d *daemon) sendPlayed(cl *jellyfin.Client, r report) (counted bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), reportWait)
 	defer cancel()
@@ -361,20 +418,26 @@ func (d *daemon) sendPlayed(cl *jellyfin.Client, r report) (counted bool, err er
 		if err != nil {
 			return false, err
 		}
-		if !last.IsZero() && last.Unix() == r.At {
+		l := last.Unix()
+		if !last.IsZero() && (l == r.At || r.Sent != 0 && l >= r.Sent-60 && l-r.Sent <= liveSpan) {
 			return true, nil
 		}
 	}
 	err = cl.MarkPlayed(ctx, r.Item, time.Unix(r.At, 0))
-	// No answer, or an answer cut short (a body lost after its status): the server may have counted it.
-	var ae *jellyfin.APIError
-	if err != nil && (!errors.As(err, &ae) || ae.HTTP == 0 || errors.Is(err, jellyfin.ErrUnreachable)) {
+	if noAnswer(err) {
 		d.log.Printf("reports: %s %s at %s: no answer, may count twice", r.Kind, r.Item, day(r.At))
 		if terr := d.rep.box.tried(r); terr != nil {
 			d.log.Printf("reports: outbox: %v", terr)
 		}
 	}
 	return false, err
+}
+
+// noAnswer is err a request the server may have taken: no answer, or one cut short (a body lost
+// after its status).
+func noAnswer(err error) bool {
+	var ae *jellyfin.APIError
+	return err != nil && (!errors.As(err, &ae) || ae.HTTP == 0 || errors.Is(err, jellyfin.ErrUnreachable))
 }
 
 // day is Unix seconds as the log shows them (UTC).
@@ -385,12 +448,30 @@ func (d *daemon) stopReports(kind string) {
 	if kind == "" {
 		d.nowForget() // the account's queue: none of it goes to the next sign-in
 	}
+	// playsMu first, as readPlays takes them: a read under way adds its plays before they go.
+	d.rep.playsMu.Lock()
+	defer d.rep.playsMu.Unlock()
 	if err := d.rep.box.drop(kind); err != nil {
 		d.log.Printf("reports: outbox: %v", err)
 	}
-	d.rep.playsMu.Lock()
 	os.Remove(d.playsPath())
-	d.rep.playsMu.Unlock()
+}
+
+// startReports marks the place in Q2 Pod's log at reporting's start (turned on, a sign-in): the
+// listens from then on go, whenever the log is read next. With the clock unset the place is the
+// log's newest listen: Q2 Pod logs none while it is, so a newer one came after.
+func (d *daemon) startReports() {
+	if clockSet(clock()) {
+		d.notePlays(func(m *playsMark) { *m = playsMark{At: clock().Unix()} })
+		return
+	}
+	d.rep.playsMu.Lock()
+	defer d.rep.playsMu.Unlock()
+	_, m := listens(d.card, nil, playsMark{At: clockSetAt}, time.Unix(1<<40, 0))
+	b, _ := json.Marshal(m)
+	if err := q2.WriteFile(d.playsPath(), b); err != nil {
+		d.log.Printf("reports: plays.json: %v", err)
+	}
 }
 
 // ---- live: streamed songs ----
@@ -420,8 +501,8 @@ func (d *daemon) streamStarted(sg jellyfin.Song) {
 }
 
 // liveStart tells the server song id started at at (Playing, which counts it); a start it didn't
-// take is kept in the outbox as a play at that time. mark notes it in plays.json, so its line in Q2
-// Pod's log, if the song has one, isn't sent too.
+// take is kept in the outbox as a play at that time, tried when it may have counted. mark notes it
+// in plays.json, so its line in Q2 Pod's log, if the song has one, isn't sent too.
 func (d *daemon) liveStart(id string, at time.Time, mark bool) {
 	// The server's clock dates the live report; the Q2's dates the rest, unless it is unset.
 	dated := clockSet(at)
@@ -432,12 +513,17 @@ func (d *daemon) liveStart(id string, at time.Time, mark bool) {
 	if cl == nil {
 		return
 	}
+	sent := clock().Unix()
 	ctx, cancel := context.WithTimeout(context.Background(), reportWait)
 	err := cl.PlaybackStarted(ctx, id)
 	cancel()
 	// kept for later, as a play at its time: not for an account signed out, or reporting off, since
 	if err != nil && !jellyfin.Refused(err) && dated && cl == d.client() && d.reportsOn() {
-		if aerr := d.rep.box.add(report{Kind: playedKind, Item: id, At: at.Unix()}); aerr != nil {
+		r := report{Kind: playedKind, Item: id, At: at.Unix()}
+		if noAnswer(err) {
+			r.Tried, r.Sent = true, sent
+		}
+		if aerr := d.rep.box.add(r); aerr != nil {
 			d.log.Printf("reports: outbox: %v", aerr)
 		}
 		d.wantReports(false)
@@ -508,7 +594,8 @@ func (d *daemon) loadPlays() (playsMark, error) {
 }
 
 // notePlays changes plays.json with f, dropping live reports older than liveKeep. Nothing while the
-// clock is unset: a mark made then would read the whole log again once it is.
+// clock is unset: a mark made then would read the whole log again once it is (startReports marks
+// the log's newest then).
 func (d *daemon) notePlays(f func(*playsMark)) {
 	if !clockSet(clock()) {
 		return
@@ -544,7 +631,8 @@ func (d *daemon) readPlays() {
 	})
 }
 
-// listens reads Q2 Pod's log after m: the synced songs' listens as reports, and the new mark.
+// listens reads Q2 Pod's log after m: the synced songs' listens as reports (none with no
+// manifest), and the new mark.
 // The log is read before the lines its upload moved out: Q2 Pod appends those to .sent before it
 // rewrites the log, so a line moved meanwhile is in one or the other. A line dated more than an
 // hour after now (logged under a clock since set back) waits for its time, not to move the mark
@@ -580,6 +668,9 @@ func listens(card string, man *library.Manifest, m playsMark, now time.Time) ([]
 			}
 			if t == next.At {
 				next.Seen = append(next.Seen, h)
+			}
+			if man == nil {
+				return
 			}
 			if find == nil {
 				find = library.SongFinder(card, man)
@@ -651,9 +742,7 @@ func (d *daemon) toggleReports(s settings) q2spot.Reply {
 		d.stopReports(playedKind)
 		return q2spot.Reply{Message: "Report Plays to Server: Off"}
 	}
-	d.rep.playsMu.Lock()
-	os.Remove(d.playsPath()) // a read still running when it went off may have left one: on from now
-	d.rep.playsMu.Unlock()
+	d.startReports()
 	d.wantReports(true)
 	return q2spot.Reply{Message: "Report Plays to Server: On"}
 }

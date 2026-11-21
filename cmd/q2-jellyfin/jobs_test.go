@@ -133,3 +133,51 @@ func TestSyncJobsHoldWhilePaused(t *testing.T) {
 		return s.State == "done" && s.Total == 3
 	})
 }
+
+// An album taken out of Sync, then put back while the sync that removes it runs: the sync starts
+// again from a new plan, and the album stays on the card (review A5-P1-7).
+func TestAddBackDuringSyncKeepsAlbum(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al1")
+	putOnCard(t, d, map[string]string{"al0.0": "album:al0", "al0.1": "album:al0"}) // out of Sync
+	d.preview(t)
+	if p := d.daemon.preview.plan; len(p.Remove) != 2 {
+		t.Fatalf("plan removes %d", len(p.Remove))
+	}
+	d.do("start")
+	eventually(t, "the sync to run", func() bool { return d.runner.Snapshot().State == "running" })
+	if m := d.do("toggle", "album:al0").Message; m != "Added to Sync · 2 songs · checking the sync again" {
+		t.Fatalf("toast %q", m)
+	}
+	eventually(t, "the old plan stopped", func() bool { return !d.runner.Removes() })
+	close(n.block)
+	eventually(t, "the restarted sync", func() bool {
+		s := d.runner.Snapshot()
+		return s.State == "done" && s.Total == 2 && s.Removed == 0
+	})
+	if m := d.manifest(); m.Songs["al0.0"] == nil || m.Songs["al0.1"] == nil {
+		t.Errorf("al0 removed: %v", m.Songs)
+	}
+}
+
+// A sync whose plan removes nothing runs on through Add to Sync and Remove from Sync: a long sync
+// isn't cancelled by each press, and the change waits for the next sync.
+func TestAddDuringSyncWithoutRemovalsRunsOn(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3, block: make(chan struct{})}
+	d := runningSync(t, n)
+	if m := d.do("toggle", "album:al1").Message; m != "Added to Sync · 3 songs" {
+		t.Fatalf("add %q", m)
+	}
+	if m := d.do("toggle", "album:al1").Message; m != "Removed from Sync" {
+		t.Fatalf("remove %q", m)
+	}
+	if st := d.runner.Snapshot().State; st != "running" {
+		t.Fatalf("state %s", st)
+	}
+	close(n.block)
+	eventually(t, "the same sync", func() bool {
+		s := d.runner.Snapshot()
+		return s.State == "done" && s.Total == 3
+	})
+}

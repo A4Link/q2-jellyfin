@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -94,8 +93,8 @@ func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 			return n, nil
 		}
 		var ae *jellyfin.APIError
-		if ctx.Err() != nil || !r.CardMounted() || errors.Is(StopReason(err), ErrRefused) || errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
-			return 0, err // a refusal for the account, or a song not there, is the same on every try
+		if ctx.Err() != nil || !r.CardMounted() || errors.Is(StopReason(err), ErrRefused) || errors.Is(err, ErrSpaceLow) || errors.As(err, &ae) && ae.Code == jellyfin.CodeGone {
+			return 0, err // a refusal for the account, a song not there, or a card too full, is the same on every try
 		}
 		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, err)
 		if i == len(r.Backoff)-1 {
@@ -125,8 +124,8 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.mu.Unlock()
 	var from int64
 	// A .part already at the planned size (cut between fsync and rename, or an older, longer
-	// version) is fetched again whole.
-	if st, err := os.Stat(part); err == nil && w.Quality == "original" && (w.Bytes <= 0 || st.Size() < w.Bytes) {
+	// version) is fetched again whole, as is a song of unknown size: its key can't name a version.
+	if st, err := os.Stat(part); err == nil && w.Quality == "original" && st.Size() < w.Bytes {
 		if b, err := os.ReadFile(key); errors.Is(err, os.ErrNotExist) || err == nil && string(b) == stamp {
 			from = st.Size()
 		}
@@ -142,11 +141,20 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	limit := Limit(resp.ContentLength, w.Bytes)
 	flag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	if resp.StatusCode == http.StatusPartialContent {
-		if from == 0 || !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", from)) {
+		// The answer must run from the .part's end to the end of the planned version, its body the
+		// whole range: another version's total, or a range or body that stops short, would be saved
+		// as the song.
+		cr := resp.Header.Get("Content-Range")
+		var start, end, total int64
+		_, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &start, &end, &total)
+		if from == 0 || err != nil || start != from || end != total-1 || total != w.Bytes ||
+			resp.ContentLength >= 0 && resp.ContentLength != end-start+1 {
 			library.Remove(r.root, part)
-			return 0, fmt.Errorf("unexpected Content-Range %q", resp.Header.Get("Content-Range"))
+			library.Remove(r.root, key)
+			return 0, fmt.Errorf("unexpected Content-Range %q", cr)
 		}
 		flag = os.O_WRONLY | os.O_APPEND
 	} else if from > 0 {
@@ -163,6 +171,17 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 			return 0, err
 		}
 	}
+	// A song of unknown size may take only the room above Space to Keep Free: job.space can't
+	// check it before. It is measured once the old .part has gone.
+	var low error
+	if w.Bytes <= 0 && r.Free != nil && r.Reserve != nil {
+		left, reserve := r.Free(), r.Reserve()
+		low = &SpaceLowError{Left: left, Reserve: reserve}
+		if limit = min(limit, max(left-reserve, 0)); resp.ContentLength > limit {
+			library.Remove(r.root, key)
+			return 0, low
+		}
+	}
 	f, err := os.OpenFile(part, flag, 0o644)
 	if err != nil {
 		return 0, err
@@ -170,8 +189,10 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.mu.Lock()
 	r.cur, r.curMax = from, w.Bytes
 	r.mu.Unlock()
-	limit := Limit(resp.ContentLength, w.Bytes)
 	n, err := r.copy(f, io.LimitReader(resp.Body, limit+1), from)
+	if err == nil && low != nil && n-from > limit {
+		err = low
+	}
 	if err == nil {
 		err = SizeErr(n-from, resp.ContentLength, limit) // checked before the rename (I8)
 	}
@@ -192,7 +213,7 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		err = os.Rename(part, w.Path)
 	}
 	if err != nil {
-		if w.Quality != "original" { // a transcode is never resumed: its bytes are junk
+		if w.Quality != "original" || w.Bytes <= 0 { // a transcode or a song of unknown size is never resumed: its bytes are junk
 			library.Remove(r.root, part)
 			library.Remove(r.root, key)
 		}

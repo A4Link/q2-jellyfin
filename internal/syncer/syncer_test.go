@@ -559,7 +559,7 @@ func TestCancelKeepsFinished(t *testing.T) {
 func TestRunFullSizePartRecovers(t *testing.T) {
 	f, r, root := setup(t)
 	a, b := want(root, "a", "original"), want(root, "bb", "original")
-	b.Bytes = 0 // size unknown: the full .part asks for a Range past the end and gets 416
+	b.Bytes++ // the server's file is shorter than planned: the full .part asks for a Range past its end and gets 416
 	for _, w := range []plan.Want{a, b} {
 		os.MkdirAll(filepath.Dir(w.Path), 0o755)
 		os.WriteFile(w.Path+".part", bytes.Repeat([]byte("x"), len(data(w.Song.ID))), 0o644)
@@ -1007,7 +1007,7 @@ func TestCaseInsensitiveCard(t *testing.T) {
 	}
 	a, b, d := mk("a", "ABBA", ""), mk("b", "BEE", ""), mk("d", "CEE", "")
 	sel := selection.Set{Items: []selection.Item{{Kind: "song", ID: "a"}, {Kind: "song", ID: "b"}, {Kind: "song", ID: "d"}}}
-	p := plan.Compute(sel, "original", false, map[string][]jellyfin.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root, 1<<40)
+	p := plan.Compute(sel, "original", false, map[string][]jellyfin.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root)
 	if err := r.Start(p); err != nil {
 		t.Fatal(err)
 	}
@@ -1121,7 +1121,7 @@ func TestDropMissingForgetsGoneStale(t *testing.T) {
 	if len(mf.Stale) != 0 {
 		t.Errorf("deleted files still listed: %q", mf.Stale)
 	}
-	if p := plan.Compute(selection.Set{}, "opus-128", false, nil, nil, mf, root, 1<<40); p.Leftover != 0 {
+	if p := plan.Compute(selection.Set{}, "opus-128", false, nil, nil, mf, root); p.Leftover != 0 {
 		t.Errorf("Leftover %d", p.Leftover)
 	}
 }
@@ -1206,7 +1206,9 @@ func TestRemovalsHeldOnlyBySharedFailures(t *testing.T) {
 		{"server down once", all, map[string]int{"x": 502}, false, true},
 		{"two bad songs, a swap", []string{"x", "bb"}, map[string]int{"x": 404, "bb": 404}, false, true},
 		{"two bad songs, Entire Library", []string{"x", "bb"}, map[string]int{"x": 404, "bb": 404}, true, false},
-		{"server down once, Entire Library", all, map[string]int{"x": 502}, true, true},
+		// a later song arrives, so the server is up: one song that always fails so would hold for good
+		{"server down once, then a song arrives, Entire Library", all, map[string]int{"x": 502}, true, false},
+		{"server down at the end, Entire Library", all, map[string]int{"ccc": 502}, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f, r, root := setup(t)
@@ -1225,7 +1227,7 @@ func TestRemovalsHeldOnlyBySharedFailures(t *testing.T) {
 			if s.State != "done" || s.Failed != len(c.status) || (s.Held == 1) != c.held || (s.Removed == 1) == c.held {
 				t.Fatalf("%s: %d failed, %d held, %d removed", s.State, s.Failed, s.Held, s.Removed)
 			}
-			if retry := c.status["x"] == 502; s.HeldRetry != retry { // the done page's advice: Retry only
+			if retry := c.held && (c.status["x"] == 502 || c.status["ccc"] == 502); s.HeldRetry != retry { // the done page's advice: Retry only
 				t.Errorf("HeldRetry %v, want %v", s.HeldRetry, retry)
 			}
 			for _, p := range []string{z.Path, stale} {
@@ -2634,5 +2636,270 @@ func TestErrAtKeptAcrossLaunch(t *testing.T) {
 	r.Start(plan.Plan{})
 	if s := wait(t, r); s.State != "done" || !s.ErrAt.Equal(time.Unix(1_000_000, 0)) {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// ranged answers a request with Range by resume (its 206), and one without with the whole song.
+type ranged struct {
+	resume func(from int64) (body []byte, contentRange string)
+	mu     sync.Mutex
+	froms  []int64
+}
+
+func (s *ranged) MediaURL(id, q string) string { return "https://h/Items/" + id + "/Download" }
+func (s *ranged) CoverURL(id string) string    { return "" }
+func (s *ranged) Get(_ context.Context, _ string, from int64) (*http.Response, error) {
+	s.mu.Lock()
+	s.froms = append(s.froms, from)
+	s.mu.Unlock()
+	b, h := data("a"), http.Header{}
+	st := 200
+	if from > 0 {
+		var cr string
+		b, cr = s.resume(from)
+		st = 206
+		h.Set("Content-Range", cr)
+	}
+	return &http.Response{StatusCode: st, Header: h, Body: io.NopCloser(bytes.NewReader(b)), ContentLength: int64(len(b))}, nil
+}
+
+// A 206 that doesn't continue the .part to the end of the planned version (the wrong start,
+// another version's total, or a range that stops short) is never saved as the song: the .part
+// goes, and the next try fetches the song whole.
+func TestResumeChecksContentRange(t *testing.T) {
+	song := data("a")
+	size := len(song)
+	v2 := append(bytes.Clone(song), "longer re-rip"...)
+	for name, resume := range map[string]func(from int64) ([]byte, string){
+		"wrong start": func(from int64) ([]byte, string) {
+			return song[50:], fmt.Sprintf("bytes 50-%d/%d", size-1, size)
+		},
+		"other total": func(from int64) ([]byte, string) {
+			return v2[from:], fmt.Sprintf("bytes %d-%d/%d", from, len(v2)-1, len(v2))
+		},
+		"short end": func(from int64) ([]byte, string) {
+			return song[from : from+100], fmt.Sprintf("bytes %d-%d/%d", from, from+99, size)
+		},
+		"body short of its range": func(from int64) ([]byte, string) {
+			return song[from : from+100], fmt.Sprintf("bytes %d-%d/%d", from, size-1, size)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			src := &ranged{resume: resume}
+			r := New(root, src, nil)
+			r.Backoff, r.CardMounted = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }
+			w := want(root, "a", "original")
+			w.Song.CoverArt = ""
+			put(t, w.Path+".part", string(song[:100]))
+			put(t, w.Path+".part.key", fmt.Sprintf("original %d", w.Bytes))
+			r.Start(plan.Plan{Add: []plan.Want{w}})
+			if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+				t.Fatalf("%+v", s)
+			}
+			sameFile(t, w.Path, "a")
+			noParts(t, root)
+			src.mu.Lock()
+			defer src.mu.Unlock()
+			if !slices.Equal(src.froms, []int64{100, 0}) {
+				t.Errorf("froms %v", src.froms)
+			}
+		})
+	}
+}
+
+// A song of unknown size is never resumed: its key can't name the version its .part holds, so
+// a file replaced on the server since (a re-rip) would be saved part one version, part another.
+// It is fetched again whole.
+func TestUnknownSizeNotResumed(t *testing.T) {
+	v2 := bytes.Repeat([]byte("Z"), len(data("a"))+500)
+	root := t.TempDir()
+	src := &ranged{resume: func(from int64) ([]byte, string) {
+		return v2[from:], fmt.Sprintf("bytes %d-%d/%d", from, len(v2)-1, len(v2))
+	}}
+	r := New(root, src, nil)
+	r.Backoff, r.CardMounted = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }
+	w := want(root, "a", "original")
+	w.Song.CoverArt = ""
+	w.Bytes, w.Song.Size = 0, 0
+	put(t, w.Path+".part", string(data("a")[:100]))
+	put(t, w.Path+".part.key", "original 0")
+	r.Start(plan.Plan{Add: []plan.Want{w}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, w.Path, "a")
+	noParts(t, root)
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if !slices.Equal(src.froms, []int64{0}) {
+		t.Errorf("froms %v", src.froms)
+	}
+}
+
+// The room for a song of unknown size is measured once its old .part has gone: a .part left by
+// an earlier sync doesn't keep the song off a card with room for it (here a server that ignores
+// Range).
+func TestUnknownSizePartMakesRoom(t *testing.T) {
+	root := t.TempDir()
+	r := New(root, crafted{func() (io.Reader, int64) { return bytes.NewReader(data("a")), int64(len(data("a"))) }}, nil)
+	r.Backoff, r.CardMounted = []time.Duration{time.Millisecond}, func() bool { return true }
+	const reserve = 256 << 20
+	room := int64(len(data("a"))) + 1000 // the song fits once the .part goes
+	r.Free = func() int64 {
+		var n int64
+		filepath.Walk(root, func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && !fi.IsDir() {
+				n += fi.Size()
+			}
+			return nil
+		})
+		return reserve + room - n
+	}
+	r.Reserve = func() int64 { return reserve }
+	w := want(root, "a", "original")
+	w.Song.CoverArt = ""
+	w.Bytes, w.Song.Size = 0, 0
+	put(t, w.Path+".part", string(data("a")[:len(data("a"))/2]))
+	put(t, w.Path+".part.key", "original 0")
+	r.Start(plan.Plan{Add: []plan.Want{w}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, w.Path, "a")
+	noParts(t, root)
+}
+
+// An original of unknown size cut part-way leaves no .part: it is never resumed, so its bytes
+// would only take room, and the next song, which fits once they have gone, would pause the run as
+// the card nearly full.
+func TestCutUnknownSizeLeavesNoPart(t *testing.T) {
+	f, r, root := setup(t)
+	r.Backoff = r.Backoff[:1]
+	const reserve = 256 << 20
+	room := int64(len(data("bb"))) + 1000 // bb fits only with no .part of a on the card
+	r.Free = func() int64 {
+		var n int64
+		filepath.Walk(root, func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && !fi.IsDir() {
+				n += fi.Size()
+			}
+			return nil
+		})
+		return reserve + room - n
+	}
+	r.Reserve = func() int64 { return reserve }
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	a.Song.CoverArt, b.Song.CoverArt = "", ""
+	a.Bytes, a.Song.Size = 0, 0
+	f.drop["a"] = true
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.State != "done" || s.Done != 1 || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, b.Path, "bb")
+	noParts(t, root)
+}
+
+// A song whose size the server doesn't give takes no more than the room above Space to Keep Free,
+// with or without a Content-Length: it fails as the card nearly full, and its .part goes.
+func TestUnknownSizeKeepsReserve(t *testing.T) {
+	for name, cl := range map[string]int64{"no length": -1, "length": 5 << 20} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			var gets atomic.Int32
+			r := New(root, crafted{func() (io.Reader, int64) { gets.Add(1); return io.LimitReader(zeros{}, 5<<20), cl }}, nil)
+			r.Backoff, r.CardMounted = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }
+			const reserve = 256 << 20
+			used := func() int64 {
+				var n int64
+				filepath.Walk(root, func(_ string, fi os.FileInfo, err error) error {
+					if err == nil && !fi.IsDir() {
+						n += fi.Size()
+					}
+					return nil
+				})
+				return n
+			}
+			r.Free = func() int64 { return reserve + 1<<20 - used() } // 1 MiB above the reserve
+			r.Reserve = func() int64 { return reserve }
+			w := want(root, "a", "original")
+			w.Bytes, w.Song.Size = 0, 0
+			r.Start(plan.Plan{Add: []plan.Want{w}})
+			s := wait(t, r)
+			if s.Failed != 1 || len(s.Failures) != 1 || !strings.Contains(s.Failures[0].Msg, "nearly full") {
+				t.Fatalf("%+v", s)
+			}
+			if r.Free() < reserve {
+				t.Errorf("under Space to Keep Free by %d bytes", reserve-r.Free())
+			}
+			if gets.Load() != 1 {
+				t.Errorf("%d tries: the card is as full on every try", gets.Load())
+			}
+			noParts(t, root)
+		})
+	}
+}
+
+// Songs of unknown size that don't fit for want of room don't hold back the removals that make
+// it: an album taken out of Sync (5 MiB) goes, and the next sync brings the two songs (2 MiB
+// each) to a card 1 MiB above Space to Keep Free.
+func TestUnknownSizeNoRoomRemoves(t *testing.T) {
+	root := t.TempDir()
+	r := New(root, crafted{func() (io.Reader, int64) { return io.LimitReader(zeros{}, 2<<20), -1 }}, nil)
+	r.Backoff, r.CardMounted = []time.Duration{time.Millisecond}, func() bool { return true }
+	old := filepath.Join(root, "Jellyfin", "Old", "Alb", "01 - g.flac")
+	put(t, old, string(make([]byte, 5<<20)))
+	g := &library.Entry{ID: "g", Path: old, Quality: "original", Size: 5 << 20}
+	m := &library.Manifest{Songs: map[string]*library.Entry{"g": g}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	const reserve = 256 << 20
+	used := func() int64 {
+		var n int64
+		filepath.Walk(filepath.Join(root, "Jellyfin"), func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && !fi.IsDir() {
+				n += fi.Size()
+			}
+			return nil
+		})
+		return n
+	}
+	r.Free = func() int64 { return reserve + 6<<20 - used() }
+	r.Reserve = func() int64 { return reserve }
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	a.Song.CoverArt, b.Song.CoverArt = "", ""
+	a.Bytes, b.Bytes, a.Song.Size, b.Song.Size = 0, 0, 0, 0
+	r.Start(plan.Plan{Add: []plan.Want{a, b}, Remove: []*library.Entry{g}})
+	if s := wait(t, r); s.Removed != 1 || s.Held != 0 || s.Failed != 2 {
+		t.Fatalf("first sync: %+v", s)
+	}
+	if _, err := os.Stat(old); err == nil {
+		t.Error("the song taken out of Sync is still on the card")
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.Done != 2 || s.Failed != 0 {
+		t.Fatalf("second sync: %+v", s)
+	}
+}
+
+// A playlist's .m3u deleted from the card loses its sum, so the next plan writes it again; one
+// still there keeps it (review A5-P1-4).
+func TestDropMissingForgetsGonePlaylist(t *testing.T) {
+	_, r, root := setup(t)
+	mix, other := root+"/_explaylist_data/Mix.m3u", root+"/_explaylist_data/Other.m3u"
+	put(t, other, "#EXTM3U\n")
+	m := &library.Manifest{Songs: map[string]*library.Entry{},
+		Playlists:    map[string]string{"Mix": mix, "Other": other},
+		PlaylistSums: map[string]string{"Mix": "1", "Other": "2"}}
+	if err := m.Save(root, root+"/.jellyfin/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DropMissing(manifest(t, root)); err != nil {
+		t.Fatal(err)
+	}
+	if s := manifest(t, root).PlaylistSums; s["Mix"] != "" || s["Other"] != "2" {
+		t.Errorf("sums %v", s)
 	}
 }

@@ -140,7 +140,7 @@ Below them, Sync shows a preview, and nothing happens until you press **Start Sy
 
 **Lyrics:** when your Jellyfin server has a song's lyrics (a .lrc file beside it on the server, or lyrics in its tags), they show on Now Playing, lit line by line when they're timed. A sync puts them on the card beside the song. When you press a song in Jellyfin on Q2 Pod 1.7.4 or later, that song and the 19 after it get their lyrics (a synced song's are read from the card); a song further on gets them once a later press reaches it. On Q2 Pod 1.7.3, songs streamed from the server show none. They only ever come from your server.
 
-**Playback cache:** earlier versions kept songs played on Q2 Pod before 1.7.3 in `.jellyfin/cache/`. Nothing is added to it now, and a sync doesn't use it. While it holds songs, **Settings → Quality and Storage → Clear Playback Cache** (press twice) removes them.
+**Playback cache:** earlier versions kept songs played on Q2 Pod before 1.7.3 in `.jellyfin/cache/`. Nothing is added to it now, and a sync doesn't use it. While it holds anything, **Settings → Quality and Storage → Clear Playback Cache** (press twice) removes all of it, leftover part files too.
 
 **Reporting plays:** your Jellyfin server counts what you play on the Q2, as it does for its own apps: the song's play count, *Played* mark and last-played date, which the server's lists sort and filter by. **Settings → Report Plays to Server** turns it **Off** (it is **On** unless you turn it off); off, nothing is sent, and plays not sent yet are forgotten.
 
@@ -160,7 +160,7 @@ Below them, Sync shows a preview, and nothing happens until you press **Start Sy
 
 - An artist includes albums added to the server later. A playlist follows the server, order and duplicates included. A song reached through several items is stored once.
 - Songs land at `Jellyfin/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/<name>.m3u`, its name cut to the 63 bytes the Q2 keeps. A playlist taken out of Sync has its `.m3u` deleted, but the Q2's own copy, imported from it, stays (Q2 Pod can't delete one): delete it in **Library → Playlists**. Added back to Sync while that copy is still there (Entire Library turned on again too), the playlist arrives as "<name> (Jellyfin)".
-- Songs no longer in Sync are deleted after the downloads, or as soon as the card runs short of room, and only what the sync put there. The deletions are held back only when songs failed in a way that looks server-wide, or (outside Entire Library) when several songs failed and fewer arrived; a later sync without such failures makes them: Retry Failed (after a server-wide failure, the only way), or take the failing songs out of Sync if they failed on their own.
+- Songs no longer in Sync are deleted after the downloads, or as soon as the card runs short of room, and only what the sync put there. The deletions are held back only when songs failed in a way that looks server-wide (under Entire Library, only when no song arrived after it), or (outside Entire Library) when several songs failed and fewer arrived; a later sync without such failures makes them: Retry Failed (after a server-wide failure, the only way), or take the failing songs out of Sync if they failed on their own.
 
 ## What it touches
 
@@ -178,6 +178,7 @@ After a sync the Q2 updates its library and imports the playlists itself. A play
 
 - **An account without the download permission can't sync lossy songs as they are.** Under an Opus Sync Quality, MP3, AAC and Opus songs sync as the server's file, which the server sends only to a user with **Allow media downloading**. Without it the sync pauses with *Downloads are turned off for this account on the server* and, in the row below, *Turn on Always Re-encode in Quality and Storage*. Either give the user the permission, or turn on **Always Re-encode** so those songs are transcoded like the rest. Under Original, which downloads every song, the row below says *Or choose an Opus Sync Quality and Always Re-encode*.
 - **A streamed queue can need Jellyfin opened again.** Each song and cover of the queue Q2 Pod plays comes through the app, so Jellyfin stays running while the queue streams, song after song. Paused, stopped or stalled for 30 minutes (and no press), Jellyfin closes, as it always has: the queue then doesn't play on, and neither does one resumed after Jellyfin was closed (*Stop Streaming Services*, Rockbox), until Jellyfin is opened again. A Q2 Pod before 1.8.1 (without `now`) can't tell Jellyfin what plays, so there Jellyfin also closes 30 minutes after the last song it streamed: a queue whose synced songs play longer than that stops at the next streamed song until Jellyfin is opened again. A Q2 Pod change that starts Jellyfin when one of its songs starts is planned.
+- **A cover can be missing for one draw after very heavy browsing.** Past about 1,500 covers kept, tidying the cover cache can remove a cover just before it's drawn; it shows again on the next draw.
 
 ## Errors and logs
 
@@ -186,6 +187,8 @@ A failure shows a short message on screen. Open its **Details** row for the oper
 ## Update and remove
 
 To remove it, press **Jellyfin** twice in **System settings → App Store**, or delete `.jellyfin/`. Synced music stays in `Jellyfin/`. Removing it doesn't end its sign-in on your server, so sign out first (**Settings → Account → Sign Out**). If it's already removed, revoke the Q2 under **Dashboard → Devices**. A Q2 still signed in with an API key isn't signed out by Sign Out either: delete the key under **Dashboard → API Keys**.
+
+After a reinstall (`.jellyfin/` gone), the app no longer knows the files it put on the card. Before you sync again, delete `Jellyfin/` and the app's old playlist files: the `<name>.m3u` files in `_explaylist_data/` named after your Jellyfin playlists. If you don't, the playlists come back as "<name> (Jellyfin)", and old songs you don't sync again stay on the card.
 
 ## Build
 

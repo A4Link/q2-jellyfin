@@ -316,6 +316,18 @@ func TestPreviewFitsAfterCacheCleared(t *testing.T) {
 	}
 }
 
+// A sync paused or stopped early offers Update Your Library: the songs it fetched are on the card
+// but not yet in the Q2's library (review A5-P1-9). A press, not by itself: a scan stops playback.
+func TestStoppedSyncOffersLibraryUpdate(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	for _, r := range []q2spot.Reply{d.syncRows(syncer.Snapshot{State: "paused", Done: 200, Total: 300, Err: syncer.ErrSpaceLow}),
+		d.stoppedRows(syncer.Snapshot{State: "error", Done: 200, Total: 300, Err: syscall.ENOSPC})} {
+		if _, ok := find(r, "Update Your Library"); !ok {
+			t.Errorf("no Update Your Library in %q", titles(r))
+		}
+	}
+}
+
 // A sync paused or stopped on a full card names the cache too, as one short of space does (final
 // audit round 2 #5).
 func TestCardFullNamesCache(t *testing.T) {

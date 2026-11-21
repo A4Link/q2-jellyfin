@@ -661,6 +661,18 @@ func TestSignOutShowsSignIn(t *testing.T) {
 	if subs := strings.Join(subtitles(r), "|"); strings.Contains(subs, "Signed in as") {
 		t.Fatalf("stale subtitle %q", subs)
 	}
+	if row, _ := find(d.do("settings"), "Account"); row.Subtitle != "" { // nobody is signed in
+		t.Fatalf("Settings' Account row %+v", row)
+	}
+}
+
+// Settings as the first request after a restart (Back from Quality and Storage once the app had
+// exited) names the user under Account, as it does later.
+func TestSettingsFirstRequestShowsUser(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	if row, _ := find(d.do("settings"), "Account"); row.Subtitle != "u" {
+		t.Fatalf("Settings' Account row %+v", row)
+	}
 }
 
 // Sign Out asks first, as Clear Playback Cache does: the first press only says to press again, the
@@ -1105,6 +1117,111 @@ func TestHomeOnlyScope(t *testing.T) {
 	}
 }
 
+// A1-P1-1: Quick Connect to a plain http server polls with its secret, and swaps it for a token,
+// only on the server's home Wi-Fi. A Q2 moved to another network before the first poll sends
+// nothing more: the wait ends with the network's message and no sign-in is kept.
+func TestQuickConnectPlainHTTPOtherNetwork(t *testing.T) {
+	a := &authServer{}
+	d := privateHTTPDaemon(t, a)
+	d.login.poll = 200 * time.Millisecond
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	if r := d.do("qc"); !strings.Contains(r.Message, "123456") {
+		t.Fatalf("qc at home %+v", r)
+	}
+	t.Cleanup(d.cancelQC)
+	before := a.requests.Load()
+	d.setNet(q2.Network{SSID: "HomeNet", Gateway: "11:22:33:44:55:66"}) // an evil twin
+	eventually(t, "the wait to end", func() bool { return !d.qcWaiting() })
+	a.approved.Store(true)
+	time.Sleep(3 * d.login.poll)
+	if n := a.requests.Load() - before; n != 0 {
+		t.Errorf("%d requests sent off the home Wi-Fi", n)
+	}
+	if _, ok := creds.Load(d.dir); ok {
+		t.Error("a sign-in kept")
+	}
+	if qc, _ := find(d.do("menu"), "Sign In with Quick Connect"); qc.Subtitle != "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there" {
+		t.Errorf("message %q", qc.Subtitle)
+	}
+}
+
+// qcMover answers like authServer, but its first approved Quick Connect poll moves the Q2 to net
+// first (the Q2 changed Wi-Fi while the poll was on its way), and it counts the token swaps. The
+// Quick Connect loop polls one at a time, so moved needs no compare-and-swap.
+type qcMover struct {
+	authServer
+	d     *tdaemon
+	net   q2.Network
+	moved atomic.Bool
+	swaps atomic.Int32
+}
+
+func (m *qcMover) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/Users/AuthenticateWithQuickConnect":
+		m.swaps.Add(1)
+	case r.URL.Path == "/QuickConnect/Connect" && m.approved.Load() && !m.moved.Load():
+		m.d.setNet(m.net)
+		m.moved.Store(true) // after the move, so a test that waits for moved sees the new Wi-Fi
+	}
+	m.authServer.ServeHTTP(w, r)
+}
+
+func (d *tdaemon) setNet(n q2.Network) {
+	d.netMu.Lock()
+	d.netNow = func() q2.Network { return n }
+	d.netAt = time.Time{}
+	d.netMu.Unlock()
+}
+
+// startQCMover starts Quick Connect at home on a plain server whose approval moves the Q2 to net.
+func startQCMover(t *testing.T, net q2.Network) (*tdaemon, *qcMover) {
+	t.Helper()
+	m := &qcMover{net: net}
+	m.d = privateHTTPDaemon(t, m)
+	d := m.d
+	d.login.poll = 100 * time.Millisecond
+	d.do("menu")
+	allowPlain(t, d, "192.168.111.111:8096")
+	if r := d.do("qc"); !strings.Contains(r.Message, "123456") {
+		t.Fatalf("qc at home %+v", r)
+	}
+	t.Cleanup(d.cancelQC)
+	m.approved.Store(true)
+	return d, m
+}
+
+// A1-P2-2: the Q2 leaves the home Wi-Fi while the approved poll is on its way: the token isn't
+// asked for.
+func TestQuickConnectPlainHTTPMovedBeforeSwap(t *testing.T) {
+	d, m := startQCMover(t, q2.Network{SSID: "HomeNet", Gateway: "11:22:33:44:55:66"}) // an evil twin
+	eventually(t, "the wait to end", func() bool { return !d.qcWaiting() })
+	if n := m.swaps.Load(); n != 0 {
+		t.Errorf("%d token swaps sent off the home Wi-Fi", n)
+	}
+	if _, ok := creds.Load(d.dir); ok {
+		t.Error("a sign-in kept")
+	}
+	if qc, _ := find(d.do("menu"), "Sign In with Quick Connect"); qc.Subtitle != "Not this server's home Wi-Fi. New Wi-Fi at home? Type its address again there" {
+		t.Errorf("message %q", qc.Subtitle)
+	}
+}
+
+// A1-P2-1: the Wi-Fi can't be told for a moment (no gateway yet) between the approved poll and
+// the token swap: the wait goes on, and the approval signs in once the home Wi-Fi is back.
+func TestQuickConnectPlainHTTPUnsureBeforeSwap(t *testing.T) {
+	d, m := startQCMover(t, q2.Network{SSID: "HomeNet"})
+	eventually(t, "the approved poll", m.moved.Load)
+	time.Sleep(3 * d.login.poll)
+	if !d.qcWaiting() || m.swaps.Load() != 0 {
+		qc, _ := find(d.do("menu"), "Sign In with Quick Connect")
+		t.Fatalf("waiting %v, swaps %d; message %q", d.qcWaiting(), m.swaps.Load(), qc.Subtitle)
+	}
+	d.setNet(homeNet)
+	eventually(t, "the sign-in", func() bool { _, ok := creds.Load(d.dir); return ok })
+}
+
 // allowPlain types addr in the T9 box (signed out), answers Yes on the plain http question that
 // comes in the page's place (Q2 Pod asks the page again with the Yes row's context last), and
 // returns that answer's page.
@@ -1259,10 +1376,7 @@ func TestHomeNetworkOnly(t *testing.T) {
 	if err := d.client().Logout(ctx); err != nil {
 		t.Fatal(err)
 	}
-	at := func(n q2.Network) {
-		d.netNow = func() q2.Network { return n }
-		d.netAt = time.Time{}
-	}
+	at := d.setNet // under netMu: Sign Out's background Logout reads the network too (go test -race)
 	hotel := q2.Network{SSID: "HomeNet", Gateway: "11:22:33:44:55:66"}
 	at(hotel)
 	before := a.requests.Load()

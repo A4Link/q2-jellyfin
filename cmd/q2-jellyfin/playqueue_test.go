@@ -222,6 +222,34 @@ func TestPlayNoWiFi(t *testing.T) {
 	d.bg.Wait()
 }
 
+// A song row pressed once its page's songs are no longer kept plays that song, though the list
+// changed on the server meanwhile: from where it is now, or, gone from the list, not at all.
+func TestPlayListChanged(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 4}
+	d := newTestDaemon(t, n, "urls", true)
+	row, _ := find(d.do("album", "album:al0"), "Song 1")
+	for _, c := range []struct {
+		order []int
+		start string
+	}{{[]int{3, 2, 1, 0}, "start=2"}, {[]int{0, 2, 3}, ""}} {
+		n.order.Store(c.order)
+		d.lists.mu.Lock()
+		d.lists.at["item"] = d.lists.at["item"].Add(-listFor)
+		d.lists.mu.Unlock()
+		r := d.do(row.URI, row.Context)
+		if c.start == "" {
+			if r.Status != q2spot.Unavailable || r.Message != "The list has changed" {
+				t.Fatalf("%v: %+v", c.order, r)
+			}
+			continue
+		}
+		d.bg.Wait()
+		if urls := d.urlLines(t); r.Status != "" || urls[0] != "#Q2URLS/1\t"+c.start || !strings.Contains(urls[3], "\tSong 1\t") {
+			t.Fatalf("%v: %+v %q", c.order, r, urls)
+		}
+	}
+}
+
 // The queue is decoded again only when its file changes: a new Play's queue shows at once.
 func TestPlayQueueNewSave(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "urls now", true)

@@ -181,11 +181,11 @@ func (d *daemon) fetchArt(ctx context.Context, cl *jellyfin.Client, id, path str
 		return false
 	}
 	defer resp.Body.Close()
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(filepath.Dir(path), "*.tmp") // its own: the same cover may be fetched twice at once
 	if err != nil {
 		return false
 	}
+	tmp := f.Name()
 	n, err := io.Copy(f, io.LimitReader(resp.Body, artMax+1)) // one byte more: a cut cover shows
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -213,7 +213,8 @@ func (d *daemon) missArt(id string, wait time.Duration) {
 
 // pruneArt drops the oldest covers, artPrune at a time, until there are artKeep or fewer and they
 // add up to less than artBytes. Each row's file counts toward artKeep, links too; toward artBytes a
-// cover counts once, however many rows link it, as it takes its room once.
+// cover counts once, however many rows link it, as it takes its room once. A *.tmp over a minute old
+// goes too: a fetch the app's stop cut short.
 func (d *daemon) pruneArt() {
 	ents, err := os.ReadDir(d.artDir())
 	if err != nil {
@@ -229,7 +230,12 @@ func (d *daemon) pruneArt() {
 	var total int64
 	links := map[uint64]int{} // a cover's names still here, by inode
 	for _, e := range ents {
-		if info, err := e.Info(); err == nil && strings.HasSuffix(e.Name(), ".jpg") {
+		info, err := e.Info()
+		if err == nil && strings.HasSuffix(e.Name(), ".tmp") && time.Since(info.ModTime()) > time.Minute {
+			os.Remove(filepath.Join(d.artDir(), e.Name())) // a fetch cut short by an app stop: a live one lasts artBudget
+			continue
+		}
+		if err == nil && strings.HasSuffix(e.Name(), ".jpg") {
 			ino := info.Sys().(*syscall.Stat_t).Ino
 			fs = append(fs, f{e.Name(), info.ModTime(), info.Size(), ino})
 			if links[ino] == 0 {

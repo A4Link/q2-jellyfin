@@ -36,7 +36,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	for _, w := range []string{`"exclude":[]`, `"version":1`, `"added":"2026-01-02T03:04:05Z"`, `"kind":"playlist"`} {
+	for _, w := range []string{`"version":1`, `"added":"2026-01-02T03:04:05Z"`, `"kind":"playlist"`} {
 		if !strings.Contains(string(b), w) {
 			t.Errorf("missing %s in %s", w, b)
 		}
@@ -47,18 +47,33 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUnknownFieldsPreserved(t *testing.T) {
+// A file an older version wrote, with "exclude", or one with a key added by hand, still loads its
+// items; a save writes only what Set has (review A5-P1-11).
+func TestUnknownFieldsIgnored(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "selection.json")
-	os.WriteFile(p, []byte(`{"version":2,"items":[],"exclude":["x"],"web":{"theme":"dark"}}`), 0o644)
+	os.WriteFile(p, []byte(`{"version":2,"items":[{"kind":"album","id":"al0","name":"A"}],"exclude":["x"],"web":{"theme":"dark"}}`), 0o644)
 	s, err := Load(p)
-	if err != nil || s.Version != 2 {
+	if err != nil || s.Version != 2 || len(s.Items) != 1 || s.Items[0].ID != "al0" {
 		t.Fatalf("%+v %v", s, err)
 	}
 	if err := s.Save(p); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(p)
-	if !strings.Contains(string(b), `"web":{"theme":"dark"}`) || !strings.Contains(string(b), `"exclude":[]`) {
+	if b, _ := os.ReadFile(p); strings.Contains(string(b), "exclude") || strings.Contains(string(b), "web") {
 		t.Fatalf("got %s", b)
+	}
+}
+
+// Some Windows editors save "UTF-8 with BOM": the file still loads, rather than reading as damaged
+// with Reset Selection the only way out (review A5-P3-1).
+func TestLoadBOM(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "selection.json")
+	b := append([]byte{0xEF, 0xBB, 0xBF}, `{"version":1,"items":[{"kind":"album","id":"al0","name":"A"}],"exclude":[]}`...)
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(p)
+	if err != nil || len(s.Items) != 1 || s.Items[0].ID != "al0" {
+		t.Fatalf("%+v %v", s, err)
 	}
 }
